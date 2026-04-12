@@ -212,12 +212,21 @@ python3 worker.py \
 ```bash
 cd ~/repo/liquidwar5-ai-training
 
+# Quick run (~30 min, 22,500 games)
 python3 coordinator.py \
     --bootstrap-servers 192.168.1.226:31487 \
     --schema-registry http://192.168.1.226:30081 \
     --generations 50 \
-    --population 20 \
-    --games-per-eval 10
+    --population 30 \
+    --games-per-eval 15
+
+# Full 8-hour run (~360,000 games)
+# python3 coordinator.py \
+#     --bootstrap-servers 192.168.1.226:31487 \
+#     --schema-registry http://192.168.1.226:30081 \
+#     --generations 300 \
+#     --population 60 \
+#     --games-per-eval 20
 ```
 
 ### Running in background
