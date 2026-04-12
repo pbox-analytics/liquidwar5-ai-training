@@ -42,7 +42,8 @@ from evolve import AIParams
 
 
 def publish_jobs(producer, serializer, key_serializer,
-                 population: list, gen: int, games_per_eval: int) -> int:
+                 population: list, gen: int, games_per_eval: int,
+                 run_id: str = "") -> int:
     """Publish game evaluation jobs for a generation."""
     job_count = 0
     now = datetime.now(timezone.utc).isoformat()
@@ -50,7 +51,7 @@ def publish_jobs(producer, serializer, key_serializer,
     for idx, params in enumerate(population):
         for game_num in range(games_per_eval):
             seed = gen * 100000 + idx * 1000 + game_num
-            job_id = f"gen{gen:03d}_ind{idx:02d}_game{game_num:02d}"
+            job_id = f"{run_id}_gen{gen:03d}_ind{idx:02d}_game{game_num:02d}"
 
             job = {
                 "job_id": job_id,
@@ -73,19 +74,27 @@ def publish_jobs(producer, serializer, key_serializer,
 
 def collect_results(consumer, deserializer, key_deserializer,
                     expected_count: int,
-                    timeout_seconds: int = 300) -> dict:
+                    timeout_seconds: int = 300,
+                    run_id: str = "") -> dict:
     """Collect game results from workers.
 
     Returns {(gen, individual): [scores]}.
+    Only accepts results whose job_id starts with our run_id.
     """
     results = {}
     received = 0
+    skipped = 0
     deadline = time.time() + timeout_seconds
 
     while received < expected_count and time.time() < deadline:
         key, value = consume_avro(consumer, deserializer,
                                   key_deserializer, timeout=1.0)
         if value is None:
+            continue
+
+        job_id = value.get("job_id", "")
+        if run_id and not job_id.startswith(run_id):
+            skipped += 1
             continue
 
         gen = value["generation"]
@@ -98,6 +107,8 @@ def collect_results(consumer, deserializer, key_deserializer,
         results[k].append(score)
         received += 1
 
+    if skipped:
+        log(f"  Skipped {skipped} results from other runs")
     log(f"  Collected {received}/{expected_count} results")
     return results
 
@@ -175,12 +186,14 @@ def run_coordinator(args):
         # Publish jobs
         expected = len(population) * args.games_per_eval
         publish_jobs(jobs_prod, jobs_ser, jobs_key_ser,
-                     population, gen, args.games_per_eval)
+                     population, gen, args.games_per_eval,
+                     run_id=run_id)
 
         # Collect results
         results = collect_results(results_con, results_deser,
                                   results_key_deser, expected,
-                                  timeout_seconds=args.timeout)
+                                  timeout_seconds=args.timeout,
+                                  run_id=run_id)
 
         # Compute fitness
         scored = compute_fitness(results, population, gen)
