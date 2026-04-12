@@ -2,167 +2,177 @@
 """
 Live monitor for distributed evolution runs.
 
-Consumes from game-results and evolution-state topics to show
-real-time progress: games completed, games/sec, worker activity,
-generation progress, and best fitness.
+Watches the coordinator log and Kafka watermarks to show real-time
+progress. Much simpler than consuming Avro messages.
 
 Usage:
     uv run python3 monitor.py
-    uv run python3 monitor.py --offset latest  # live only
+    uv run python3 monitor.py --run-dir results/20260412_023556
 """
 
 import argparse
+import json
 import os
 import sys
 import time
-from collections import defaultdict
+from pathlib import Path
 
-from confluent_kafka import Consumer
+from confluent_kafka import Consumer, TopicPartition
 
-from kafka_avro import (
-    TOPIC_RESULTS, TOPIC_STATE,
-    create_avro_consumer, consume_avro,
-)
+
+TOPIC_RESULTS = "ml.liquidwar5.game-results"
+
+
+def get_kafka_stats(bootstrap_servers: str) -> dict:
+    """Get message counts from Kafka watermarks."""
+    try:
+        c = Consumer({
+            "bootstrap.servers": bootstrap_servers,
+            "group.id": f"lw5-monitor-wm-{os.getpid()}",
+        })
+        parts = c.list_topics(
+            topic=TOPIC_RESULTS).topics[TOPIC_RESULTS].partitions
+        total = 0
+        for pid in parts:
+            tp = TopicPartition(TOPIC_RESULTS, pid)
+            lo, hi = c.get_watermark_offsets(tp, timeout=5)
+            total += (hi - lo)
+        c.close()
+        return {"total_kafka_messages": total}
+    except Exception:
+        return {"total_kafka_messages": -1}
+
+
+def find_latest_run(results_dir: str) -> Path:
+    """Find the most recent run directory."""
+    results = Path(results_dir)
+    if not results.exists():
+        return None
+    runs = sorted(results.iterdir())
+    return runs[-1] if runs else None
+
+
+def parse_coordinator_log(log_path: Path) -> dict:
+    """Parse the coordinator log for progress info."""
+    info = {
+        "generations_completed": 0,
+        "current_gen": -1,
+        "best_fitness": 0.0,
+        "avg_fitness": 0.0,
+        "best_params": {},
+        "last_gen_time": 0.0,
+        "run_games": 0,
+        "skipped": 0,
+    }
+    if not log_path.exists():
+        return info
+
+    with open(log_path) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("=== Generation"):
+                try:
+                    info["current_gen"] = int(line.split()[2])
+                except (IndexError, ValueError):
+                    pass
+            elif line.startswith("Collected"):
+                try:
+                    parts = line.split()
+                    collected = int(parts[1].split("/")[0])
+                    info["run_games"] += collected
+                    info["generations_completed"] += 1
+                except (IndexError, ValueError):
+                    pass
+            elif line.startswith("Best:"):
+                try:
+                    info["best_fitness"] = float(line.split()[1])
+                    avg_idx = line.index("Avg:")
+                    info["avg_fitness"] = float(
+                        line[avg_idx:].split()[1])
+                    time_idx = line.index("Time:")
+                    info["last_gen_time"] = float(
+                        line[time_idx:].split()[1].rstrip("s"))
+                except (IndexError, ValueError):
+                    pass
+            elif line.startswith("Best params:"):
+                try:
+                    info["best_params"] = eval(
+                        line[len("Best params:"):].strip())
+                except Exception:
+                    pass
+            elif line.startswith("Skipped"):
+                try:
+                    info["skipped"] += int(line.split()[1])
+                except (IndexError, ValueError):
+                    pass
+
+    return info
 
 
 def run_monitor(args):
-    results_con, results_deser, results_key_deser = create_avro_consumer(
-        args.bootstrap_servers, args.schema_registry, TOPIC_RESULTS,
-        f"lw5-monitor-results-{os.getpid()}")
+    run_dir = Path(args.run_dir) if args.run_dir else find_latest_run("results")
+    if not run_dir:
+        print("No run directory found. Start a coordinator first.")
+        sys.exit(1)
 
-    state_con, state_deser, state_key_deser = create_avro_consumer(
-        args.bootstrap_servers, args.schema_registry, TOPIC_STATE,
-        f"lw5-monitor-state-{os.getpid()}")
-
-    # Override auto.offset.reset
-    results_con.unsubscribe()
-    state_con.unsubscribe()
-
-    from confluent_kafka import TopicPartition, OFFSET_BEGINNING, OFFSET_END
-
-    def on_assign_results(consumer, partitions):
-        for p in partitions:
-            p.offset = OFFSET_BEGINNING if args.offset == "earliest" else OFFSET_END
-        consumer.assign(partitions)
-
-    def on_assign_state(consumer, partitions):
-        for p in partitions:
-            p.offset = OFFSET_BEGINNING if args.offset == "earliest" else OFFSET_END
-        consumer.assign(partitions)
-
-    results_con.subscribe([TOPIC_RESULTS], on_assign=on_assign_results)
-    state_con.subscribe([TOPIC_STATE], on_assign=on_assign_state)
-
-    total_games = 0
-    games_by_worker = defaultdict(int)
-    games_by_generation = defaultdict(int)
-    current_gen = -1
-    best_fitness = 0.0
-    best_params = {}
-    start_time = time.time()
-    last_print = 0
-    recent_games = []
-
-    # Get total messages from watermarks first
-    from confluent_kafka import TopicPartition as TP
-    raw_consumer = Consumer({
-        "bootstrap.servers": args.bootstrap_servers,
-        "group.id": f"lw5-watermark-{os.getpid()}",
-    })
-    try:
-        parts = raw_consumer.list_topics(
-            topic=TOPIC_RESULTS).topics[TOPIC_RESULTS].partitions
-        for pid in parts:
-            tp = TP(TOPIC_RESULTS, pid)
-            lo, hi = raw_consumer.get_watermark_offsets(tp, timeout=5)
-            total_games += (hi - lo)
-    except Exception:
-        pass
-    raw_consumer.close()
-
-    print("=== Liquid War 5 Evolution Monitor ===")
-    print(f"Kafka: {args.bootstrap_servers}")
-    print(f"Schema Registry: {args.schema_registry}")
-    print(f"Existing results: {total_games:,}")
+    log_path = run_dir / "coordinator.log"
+    print(f"Monitoring: {run_dir}")
+    print(f"Log: {log_path}")
     print()
+
+    kafka_stats = get_kafka_stats(args.bootstrap_servers)
+    start_time = time.time()
+    prev_games = 0
 
     try:
         while True:
-            # Poll results topic
-            key, value = consume_avro(results_con, results_deser,
-                                      results_key_deser, timeout=0.2)
-            if value is not None:
-                total_games += 1
-                recent_games.append(time.time())
-                worker = value.get("worker", "unknown")
-                gen = value.get("generation", -1)
-                games_by_worker[worker] += 1
-                games_by_generation[gen] += 1
+            info = parse_coordinator_log(log_path)
 
-            # Poll state topic
-            key, value = consume_avro(state_con, state_deser,
-                                      state_key_deser, timeout=0.2)
-            if value is not None:
-                gen = value.get("generation", -1)
-                fitness = value.get("best_fitness", 0)
-                if gen > current_gen:
-                    current_gen = gen
-                if fitness > best_fitness:
-                    best_fitness = fitness
-                    best_params = value.get("best_params", {})
+            elapsed = time.time() - start_time
+            games_delta = info["run_games"] - prev_games
+            prev_games = info["run_games"]
 
-            # Print update every 2 seconds
-            now = time.time()
-            if now - last_print >= 2:
-                last_print = now
-                elapsed = now - start_time
+            # Estimate games/sec from last generation time
+            if info["last_gen_time"] > 0 and info["generations_completed"] > 0:
+                games_per_gen = 6000  # population * games_per_eval
+                gps = games_per_gen / info["last_gen_time"]
+            else:
+                gps = 0
 
-                # Games per second (last 30 seconds)
-                cutoff = now - 30
-                recent_games = [t for t in recent_games if t > cutoff]
-                gps = len(recent_games) / 30.0 if recent_games else 0
+            target = 1800000
+            remaining = target - info["run_games"]
+            eta_hours = (remaining / (gps * 3600)) if gps > 0 else 0
 
-                # Estimate
-                target = 1800000
-                remaining = target - total_games
-                eta_hours = (remaining / (gps * 3600)) if gps > 0 else 0
+            print(f"\033[2J\033[H", end="")
+            print(f"=== Liquid War 5 Evolution Monitor ===")
+            print(f"    Run: {run_dir.name}")
+            print()
+            print(f"  This run games:  {info['run_games']:>10,} / {target:,}")
+            print(f"  Games/sec:       {gps:>10.1f}")
+            print(f"  Generation:      {info['generations_completed']:>10} / 300")
+            print(f"  Last gen time:   {info['last_gen_time']:>10.1f}s")
+            print(f"  ETA:             {eta_hours:>10.1f} hours")
+            print(f"  Best fitness:    {info['best_fitness']:>10.4f}")
+            print(f"  Avg fitness:     {info['avg_fitness']:>10.4f}")
+            print()
 
-                print(f"\033[2J\033[H", end="")
-                print("=== Liquid War 5 Evolution Monitor ===")
-                print()
-                print(f"  Total games:     {total_games:>10,} / {target:,}")
-                print(f"  Games/sec:       {gps:>10.1f}")
-                print(f"  Elapsed:         {elapsed/3600:>10.1f} hours")
-                print(f"  ETA:             {eta_hours:>10.1f} hours")
-                print(f"  Generation:      {current_gen:>10} / 300")
-                print(f"  Best fitness:    {best_fitness:>10.4f}")
+            if info["best_params"]:
+                print("  Best params:")
+                for k, v in sorted(info["best_params"].items()):
+                    print(f"    {k:20s}  {v}")
                 print()
 
-                if games_by_worker:
-                    print("  Workers:")
-                    for worker, count in sorted(games_by_worker.items(),
-                                                key=lambda x: -x[1]):
-                        pct = count / total_games * 100 if total_games else 0
-                        print(f"    {worker:20s}  {count:>8,} games  ({pct:4.1f}%)")
-                    print()
+            print(f"  Kafka total messages: {kafka_stats['total_kafka_messages']:,}")
 
-                if current_gen >= 0:
-                    gen_games = games_by_generation.get(current_gen, 0)
-                    print(f"  Gen {current_gen}: {gen_games:,} / 6,000 results")
-                    print()
+            sys.stdout.flush()
+            time.sleep(5)
 
-                if best_params:
-                    print("  Best params:")
-                    for k, v in sorted(best_params.items()):
-                        print(f"    {k:20s}  {v}")
-
-                sys.stdout.flush()
+            # Refresh kafka stats every 30 seconds
+            if int(elapsed) % 30 == 0:
+                kafka_stats = get_kafka_stats(args.bootstrap_servers)
 
     except KeyboardInterrupt:
         print("\n\nMonitor stopped.")
-    finally:
-        results_con.close()
-        state_con.close()
 
 
 def main():
@@ -173,12 +183,8 @@ def main():
         "--bootstrap-servers", default="192.168.1.226:31487",
     )
     parser.add_argument(
-        "--schema-registry", default="http://192.168.1.226:30081",
-    )
-    parser.add_argument(
-        "--offset", default="latest",
-        choices=["earliest", "latest"],
-        help="Start from latest (live, default) or earliest (replay all)"
+        "--run-dir", default=None,
+        help="Path to run directory (default: latest in results/)"
     )
     args = parser.parse_args()
     run_monitor(args)
