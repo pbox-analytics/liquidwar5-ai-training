@@ -1,0 +1,45 @@
+{
+  "machines": [
+    {
+      "id": "ultra9",
+      "host": "localhost",
+      "role": "coordinator",
+      "description": "Intel Core Ultra 9, 64GB RAM, 5090 GPU",
+      "workers": 20,
+      "repo_path": "~/repo/liquidwar5-ai",
+      "training_path": "~/repo/liquidwar5-ai-training"
+    },
+    {
+      "id": "ryzen9",
+      "host": "CHANGEME_ryzen9_hostname_or_ip",
+      "role": "island",
+      "description": "Ryzen 9, 192GB RAM, 5090 GPU",
+      "workers": 20,
+      "repo_path": "~/repo/liquidwar5-ai",
+      "training_path": "~/repo/liquidwar5-ai-training"
+    },
+    {
+      "id": "dgx-spark",
+      "host": "CHANGEME_dgx_hostname_or_ip",
+      "role": "island",
+      "description": "DGX Spark GB10, 128GB unified",
+      "workers": 60,
+      "repo_path": "~/repo/liquidwar5-ai",
+      "training_path": "~/repo/liquidwar5-ai-training"
+    },
+    {
+      "id": "ryzen7",
+      "host": "CHANGEME_ryzen7_hostname_or_ip",
+      "role": "island",
+      "description": "Ryzen 7, 64GB RAM, 6090XT GPU",
+      "workers": 12,
+      "repo_path": "~/repo/liquidwar5-ai",
+      "training_path": "~/repo/liquidwar5-ai-training"
+    }
+  ],
+  "migration": {
+    "interval_generations": 5,
+    "migrants_per_exchange": 2,
+    "shared_dir": "migrations"
+  }
+}

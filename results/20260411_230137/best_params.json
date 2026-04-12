@@ -1,0 +1,12 @@
+{
+  "fitness": 0.773049599860253,
+  "params": {
+    "candidates": 13,
+    "density_radius": 3,
+    "density_weight": 240,
+    "health_weight": 431,
+    "replan": 196,
+    "retreat": 35
+  },
+  "cli_args": "-ai-candidates 13 -ai-density-radius 3 -ai-density-weight 240 -ai-health-weight 431 -ai-replan 196 -ai-retreat 35"
+}

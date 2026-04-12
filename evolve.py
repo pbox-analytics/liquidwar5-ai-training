@@ -6,10 +6,20 @@ Uses a genetic algorithm to evolve AI scoring parameters by running
 batches of headless games and selecting parameter sets that produce
 the most wins.
 
+Supports distributed island model: multiple machines each run their
+own population and periodically exchange best individuals via a shared
+migrations directory.
+
 Usage:
-    python3 evolve.py --game-binary ../liquidwar5/src/liquidwar \
-                      --dat-path ../liquidwar5/data/liquidwar.dat \
+    # Single machine
+    python3 evolve.py --game-binary ../liquidwar5-ai/src/liquidwar \
+                      --dat-path ../liquidwar5-ai/data/liquidwar.dat \
                       --generations 50 --population 20 --games-per-eval 10
+
+    # Island model (run on each machine with different island-id)
+    python3 evolve.py --game-binary ../liquidwar5-ai/src/liquidwar \
+                      --dat-path ../liquidwar5-ai/data/liquidwar.dat \
+                      --island-id ryzen9 --migration-dir /shared/migrations
 
 Output:
     results/<timestamp>/
@@ -179,13 +189,57 @@ def run_generation(game_binary: str, dat_path: str,
     return results
 
 
+def export_migrants(migration_dir: Path, island_id: str, gen: int,
+                    elite: List[AIParams], count: int):
+    """Export best individuals to the shared migration directory."""
+    migration_dir.mkdir(parents=True, exist_ok=True)
+    export_file = migration_dir / f"{island_id}_gen{gen:03d}.json"
+    migrants = [asdict(p) for p in elite[:count]]
+    with open(export_file, "w") as f:
+        json.dump({"island": island_id, "generation": gen,
+                   "migrants": migrants}, f)
+    print(f"  Exported {len(migrants)} migrants to {export_file.name}")
+
+
+def import_migrants(migration_dir: Path, island_id: str) -> List[AIParams]:
+    """Import migrants from other islands."""
+    migrants = []
+    if not migration_dir.exists():
+        return migrants
+
+    for f in sorted(migration_dir.glob("*.json")):
+        if f.stem.startswith(island_id):
+            continue  # Skip our own exports
+        try:
+            with open(f) as fh:
+                data = json.load(fh)
+            for m in data.get("migrants", []):
+                migrants.append(AIParams(**m))
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    if migrants:
+        print(f"  Imported {len(migrants)} migrants from other islands")
+    return migrants
+
+
 def evolve(args):
     """Main evolution loop."""
+    island_id = getattr(args, "island_id", None) or ""
+    migration_dir = Path(args.migration_dir) if args.migration_dir else None
+    migrate_interval = args.migrate_interval
+
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(args.output) / timestamp
+    run_name = f"{island_id}_{timestamp}" if island_id else timestamp
+    output_dir = Path(args.output) / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Evolution run: {timestamp}")
+    print(f"Evolution run: {run_name}")
+    if island_id:
+        print(f"Island: {island_id}")
+        if migration_dir:
+            print(f"Migration dir: {migration_dir}")
+            print(f"Migration interval: every {migrate_interval} generations")
     print(f"Output: {output_dir}")
     print(f"Population: {args.population}, Generations: {args.generations}")
     print(f"Games per eval: {args.games_per_eval}, Workers: {args.workers}")
@@ -252,8 +306,15 @@ def evolve(args):
         elite_count = max(2, args.population // 3)
         elite = [params for params, _ in results[:elite_count]]
 
+        # Island migration
+        if island_id and migration_dir and gen % migrate_interval == 0:
+            export_migrants(migration_dir, island_id, gen, elite, 2)
+            migrants = import_migrants(migration_dir, island_id)
+            if migrants:
+                elite.extend(migrants[:3])
+
         # Build next generation
-        next_pop = list(elite)  # Elite survive unchanged
+        next_pop = list(elite[:elite_count])  # Elite survive unchanged
 
         while len(next_pop) < args.population:
             if random.random() < 0.7:
@@ -321,6 +382,18 @@ def main():
     parser.add_argument(
         "--output", default="results",
         help="Output directory (default: results)"
+    )
+    parser.add_argument(
+        "--island-id", default="",
+        help="Island identifier for distributed evolution"
+    )
+    parser.add_argument(
+        "--migration-dir", default=None,
+        help="Shared directory for island migration exchange"
+    )
+    parser.add_argument(
+        "--migrate-interval", type=int, default=5,
+        help="Generations between migrations (default: 5)"
     )
 
     args = parser.parse_args()
