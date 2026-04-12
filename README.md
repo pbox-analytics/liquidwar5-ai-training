@@ -53,7 +53,15 @@ Uses a genetic algorithm to evolve AI scoring parameters by running thousands of
 
 Topics are managed via GitOps in [pandoras-box-data-acquisition](https://github.com/pbox-analytics/pandoras-box-data-acquisition) and deployed by ArgoCD.
 
-## Prerequisites
+## Setup
+
+See **[docs/SETUP.md](docs/SETUP.md)** for full setup instructions for all machines including:
+- System dependencies and build steps
+- Kafka and Schema Registry connectivity
+- Automated remote deployment
+- Troubleshooting guide
+
+## Quick Start Prerequisites
 
 ### Game binary
 
@@ -170,18 +178,32 @@ Or in auto mode to watch CPU players use the evolved params:
 | `-ai-replan` | 50 | 5-200 | Ticks between forced path replanning |
 | `-ai-retreat` | 20 | 5-100 | Retreat threshold (retreat if lost > 1/N fighters) |
 
+## Avro Schemas
+
+All Kafka messages use Avro serialization via the Confluent Schema Registry at `pandoratower.local:30081`. Schemas are in `schemas/`:
+
+| Schema | Topic | Description |
+|--------|-------|-------------|
+| `game_job.avsc` | `ml.liquidwar5.game-jobs` | Param sets for workers to evaluate |
+| `game_result.avsc` | `ml.liquidwar5.game-results` | Game outcomes with fighter counts and dominance score |
+| `evolution_state.avsc` | `ml.liquidwar5.evolution-state` | Compacted generation state log |
+| `ai_params.avsc` | (shared) | Nested record used by all three schemas |
+
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `evolve.py` | Standalone genetic algorithm (single machine or island model) |
-| `coordinator.py` | Kafka-based coordinator — publishes jobs, collects results, runs GA |
-| `worker.py` | Kafka-based worker — runs headless games from job queue |
+| `coordinator.py` | Kafka-based coordinator — publishes Avro jobs, collects results, runs GA |
+| `worker.py` | Kafka-based worker — consumes Avro jobs, runs headless games, publishes results |
+| `kafka_avro.py` | Shared Avro serialization module (schema loading, producer/consumer factories) |
 | `analyze.py` | Results analysis and matplotlib plots |
+| `schemas/` | Avro schema definitions (.avsc) |
+| `docs/SETUP.md` | Full multi-machine setup guide |
 | `deploy.sh` | Remote machine setup script |
 | `launch_all.sh` | Launch island-model evolution on all machines |
 | `machines.json` | Machine configuration template |
-| `requirements.txt` | Python dependencies |
+| `requirements.txt` | Python dependencies (confluent-kafka[avro], fastavro) |
 
 ## Roadmap
 
