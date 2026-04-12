@@ -110,7 +110,9 @@ class LiquidWarEngine:
             self._move_cursors(cursor_actions)
 
         self._seed_gradients()
-        self._spread_gradient()
+        # More iterations in early ticks to build initial gradient field
+        iters = 30 if self.tick < 100 else 10
+        self._spread_gradient(iterations=iters)
         self._move_fighters()
         self._resolve_combat()
         self._check_eliminations()
@@ -203,7 +205,19 @@ class LiquidWarEngine:
     # ------------------------------------------------------------------
 
     def _seed_gradients(self):
-        """Set gradient=0 at cursor positions, decay elsewhere."""
+        """Seed cursor positions and age the gradient field.
+
+        The gradient increases by 1 each tick everywhere, then the cursor
+        reseeds at 0. This creates an expanding wavefront like the C code
+        where cursor.val decreases each tick.
+        """
+        # Age: increase all gradients by 1 (like the C code's clock mechanism)
+        wall_mask = self.walls.unsqueeze(1).expand_as(self.gradient)
+        self.gradient = torch.where(
+            wall_mask, self.gradient,
+            (self.gradient + 1).clamp(max=GRADIENT_INF))
+
+        # Seed cursor positions at 0
         b_idx = torch.arange(self.B, device=self.device)
         for t in range(self.T):
             cy = self.cursor_pos[:, t, 0]
@@ -279,15 +293,17 @@ class LiquidWarEngine:
         padded_health = F.pad(self.health, (1, 1, 1, 1), value=-1)
         padded_passable = F.pad(self.passable_f, (1, 1, 1, 1), value=0)
 
-        best_grad = torch.full((B, H, W), GRADIENT_INF, device=self.device)
-        best_dy = torch.zeros(B, H, W, dtype=torch.long, device=self.device)
-        best_dx = torch.zeros(B, H, W, dtype=torch.long, device=self.device)
+        # Stack all 8 neighbor gradients, emptiness, passability at once
+        # Each is (8, B, H, W)
+        nb_grads = []
+        nb_valids = []
+        dy_vals = []
+        dx_vals = []
 
-        for dy_off, dx_off in self._shifts:
+        for i, (dy_off, dx_off) in enumerate(self._shifts):
             y_s = 1 + dy_off
             x_s = 1 + dx_off
 
-            # Neighbor gradient for each fighter's team
             nb_grad_all = padded_grad[:, :, y_s:y_s + H, x_s:x_s + W]
             nb_grad = nb_grad_all[
                 b_idx.expand(B, H, W),
@@ -295,26 +311,33 @@ class LiquidWarEngine:
                 y_idx.expand(B, H, W),
                 x_idx.expand(B, H, W),
             ]
-
-            # Neighbor must be passable and empty
             nb_empty = padded_health[:, y_s:y_s + H, x_s:x_s + W] <= 0
             nb_pass = padded_passable[:, y_s:y_s + H, x_s:x_s + W] > 0
 
-            valid = nb_pass & nb_empty
-            candidate = torch.where(valid, nb_grad,
-                                    torch.tensor(GRADIENT_INF,
-                                                 device=self.device))
+            nb_grads.append(nb_grad)
+            nb_valids.append(nb_pass & nb_empty)
+            dy_vals.append(dy_off)
+            dx_vals.append(dx_off)
 
-            better = candidate < best_grad
-            best_grad = torch.where(better, candidate, best_grad)
-            best_dy = torch.where(better, dy_off, best_dy)
-            best_dx = torch.where(better, dx_off, best_dx)
+        # (8, B, H, W)
+        all_grads = torch.stack(nb_grads, dim=0)
+        all_valid = torch.stack(nb_valids, dim=0)
 
-        # Only move if the best neighbor is better than current position
-        # and randomly select 50% to move (avoids all-at-once artifacts)
-        should_move = (has_fighter
-                       & (best_grad < current_grad)
-                       & (torch.rand(B, H, W, device=self.device) < 0.5))
+        # Mask invalid with INF
+        all_grads = torch.where(all_valid, all_grads, GRADIENT_INF)
+
+        # Find best direction (argmin over dim 0)
+        best_dir = all_grads.argmin(dim=0)  # (B, H, W)
+        best_grad = all_grads.gather(0, best_dir.unsqueeze(0)).squeeze(0)
+
+        # Map direction index to dy, dx
+        dy_tensor = torch.tensor(dy_vals, device=self.device)
+        dx_tensor = torch.tensor(dx_vals, device=self.device)
+        best_dy = dy_tensor[best_dir.flatten()].view(B, H, W)
+        best_dx = dx_tensor[best_dir.flatten()].view(B, H, W)
+
+        # Move if the best neighbor has lower gradient than current
+        should_move = has_fighter & (best_grad < current_grad)
 
         if not should_move.any():
             return
