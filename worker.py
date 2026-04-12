@@ -172,9 +172,9 @@ def run_worker(args):
 
     while running:
         # Continuously consume jobs and submit to pool
-        # as long as we have capacity
+        # Cap in-flight jobs to worker count to avoid oversubscription
         submitted = 0
-        while len(pending_futures) < args.workers * 2:
+        while len(pending_futures) < args.workers:
             key, value = consume_avro(jobs_con, jobs_deser,
                                       jobs_key_deser, timeout=0.1)
             if value is None:
