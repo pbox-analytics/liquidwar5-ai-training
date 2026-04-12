@@ -146,7 +146,7 @@ if __name__ == "__main__":
     print(f"Running {args.batch_size} games on {args.device}")
     if args.device == "cuda":
         print(f"GPU: {torch.cuda.get_device_name()}")
-        print(f"VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f}GB")
+        print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB")
 
     results = run_batch(
         batch_size=args.batch_size,
