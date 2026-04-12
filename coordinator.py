@@ -189,11 +189,11 @@ def run_coordinator(args):
                      population, gen, args.games_per_eval,
                      run_id=run_id)
 
-        # Collect results
+        # Collect results — no run_id filter needed since we consume
+        # from latest offset and use a unique consumer group
         results = collect_results(results_con, results_deser,
                                   results_key_deser, expected,
-                                  timeout_seconds=args.timeout,
-                                  run_id=run_id)
+                                  timeout_seconds=args.timeout)
 
         # Compute fitness
         scored = compute_fitness(results, population, gen)
