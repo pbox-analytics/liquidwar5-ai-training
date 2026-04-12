@@ -1,2 +1,5 @@
 battle_*.csv
 results/
+__pycache__/
+.venv/
+main.py
