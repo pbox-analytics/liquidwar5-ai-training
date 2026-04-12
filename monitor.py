@@ -36,14 +36,14 @@ def get_live_game_counts() -> list:
     counts = []
     for name, ssh_target, cores in MACHINES:
         try:
+            cmd = "ps aux | grep '[l]iquidwar -dat' | wc -l"
             if ssh_target is None:
                 result = subprocess.run(
-                    ["sh", "-c", "ps aux | grep './src/liquidwar' | grep -v grep | wc -l"],
+                    ["sh", "-c", cmd],
                     capture_output=True, text=True, timeout=5)
             else:
                 result = subprocess.run(
-                    ["ssh", "-o", "ConnectTimeout=3", ssh_target,
-                     "ps aux | grep './src/liquidwar' | grep -v grep | wc -l"],
+                    ["ssh", "-o", "ConnectTimeout=3", ssh_target, cmd],
                     capture_output=True, text=True, timeout=5)
             games = int(result.stdout.strip()) if result.returncode == 0 else 0
         except Exception:
