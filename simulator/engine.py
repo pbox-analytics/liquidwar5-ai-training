@@ -9,6 +9,12 @@ except the per-team cursor loop (T<=6 iterations).
 import torch
 import torch.nn.functional as F
 
+try:
+    from simulator.triton_kernels import triton_gradient_spread
+    HAS_TRITON = True
+except ImportError:
+    HAS_TRITON = False
+
 
 MAX_HEALTH = 16384
 GRADIENT_INF = 999999
@@ -111,6 +117,53 @@ class LiquidWarEngine:
         done = teams_left <= 1
         return self._get_state(), done, self._get_info()
 
+    def step_with_ai(self):
+        """Run one tick with built-in simple AI (no Python round-trip).
+
+        Computes cursor actions and game step in one call,
+        avoiding the overhead of returning to Python between them.
+        """
+        B, T, H, W = self.B, self.T, self.H, self.W
+
+        # --- Inline AI: move each cursor toward enemy centroid ---
+        has_fighter = (self.health > 0).float()
+        y_c = self._y_idx.float().expand(B, H, W)
+        x_c = self._x_idx.float().expand(B, H, W)
+
+        for t in range(T):
+            if not self.team_alive[:, t].any():
+                continue
+
+            enemy = (has_fighter - self.team_oh[:, t] * has_fighter).clamp(min=0)
+            e_count = enemy.sum(dim=(1, 2)).clamp(min=1)
+            e_y = (enemy * y_c).sum(dim=(1, 2)) / e_count
+            e_x = (enemy * x_c).sum(dim=(1, 2)) / e_count
+
+            cy = self.cursor_pos[:, t, 0].float()
+            cx = self.cursor_pos[:, t, 1].float()
+            dy = (e_y - cy).sign().long()
+            dx = (e_x - cx).sign().long()
+
+            alive = self.team_alive[:, t]
+            new_y = (self.cursor_pos[:, t, 0] + torch.where(alive, dy, torch.zeros_like(dy))).clamp(1, H - 2)
+            new_x = (self.cursor_pos[:, t, 1] + torch.where(alive, dx, torch.zeros_like(dx))).clamp(1, W - 2)
+
+            b = torch.arange(B, device=self.device)
+            ok = self.passable[b, new_y, new_x] & alive
+            self.cursor_pos[:, t, 0] = torch.where(ok, new_y, self.cursor_pos[:, t, 0])
+            self.cursor_pos[:, t, 1] = torch.where(ok, new_x, self.cursor_pos[:, t, 1])
+
+        # --- Game step ---
+        self._seed_and_spread_gradient()
+        self._move_fighters()
+        self._resolve_combat()
+        self._check_eliminations()
+
+        self.tick += 1
+        teams_left = self.team_alive.sum(dim=1)
+        done = teams_left <= 1
+        return done, self._get_info()
+
     # ------------------------------------------------------------------
     # Map generation
     # ------------------------------------------------------------------
@@ -196,30 +249,28 @@ class LiquidWarEngine:
             cx = self.cursor_pos[:, t, 1]
             self.gradient[b_idx, t, cy, cx] = 0
 
-        # Spread: in-place min with shifted views
-        # Use pre-allocated padded buffer
+        # Spread gradient
         iters = 40 if self.tick < 30 else self.grad_iters
-        p = self._grad_padded
 
-        for _ in range(iters):
-            # Fill padded buffer
-            p.fill_(GRADIENT_INF)
-            p[:, :, 1:H + 1, 1:W + 1] = self.gradient
-
-            # Compute min of 8 neighbors + 1 using stacked shifts
-            # Do it in-place on self.gradient to avoid allocations
-            g = self.gradient
-            torch.minimum(g, p[:, :, 0:H, 0:W] + 1, out=g)     # top-left
-            torch.minimum(g, p[:, :, 0:H, 1:W+1] + 1, out=g)   # top
-            torch.minimum(g, p[:, :, 0:H, 2:W+2] + 1, out=g)   # top-right
-            torch.minimum(g, p[:, :, 1:H+1, 0:W] + 1, out=g)   # left
-            torch.minimum(g, p[:, :, 1:H+1, 2:W+2] + 1, out=g) # right
-            torch.minimum(g, p[:, :, 2:H+2, 0:W] + 1, out=g)   # bot-left
-            torch.minimum(g, p[:, :, 2:H+2, 1:W+1] + 1, out=g) # bottom
-            torch.minimum(g, p[:, :, 2:H+2, 2:W+2] + 1, out=g) # bot-right
-
-            # Restore walls
-            g[self._wall_grad] = GRADIENT_INF
+        if HAS_TRITON and self.device != 'cpu':
+            # Triton kernel: fused iterations, no padded buffer
+            triton_gradient_spread(self.gradient, self.walls, iterations=iters)
+        else:
+            # Fallback: Python min-shift spread
+            p = self._grad_padded
+            for _ in range(iters):
+                p.fill_(GRADIENT_INF)
+                p[:, :, 1:H + 1, 1:W + 1] = self.gradient
+                g = self.gradient
+                torch.minimum(g, p[:, :, 0:H, 0:W] + 1, out=g)
+                torch.minimum(g, p[:, :, 0:H, 1:W+1] + 1, out=g)
+                torch.minimum(g, p[:, :, 0:H, 2:W+2] + 1, out=g)
+                torch.minimum(g, p[:, :, 1:H+1, 0:W] + 1, out=g)
+                torch.minimum(g, p[:, :, 1:H+1, 2:W+2] + 1, out=g)
+                torch.minimum(g, p[:, :, 2:H+2, 0:W] + 1, out=g)
+                torch.minimum(g, p[:, :, 2:H+2, 1:W+1] + 1, out=g)
+                torch.minimum(g, p[:, :, 2:H+2, 2:W+2] + 1, out=g)
+                g[self._wall_grad] = GRADIENT_INF
 
     # ------------------------------------------------------------------
     # Fighter movement (vectorized)
