@@ -1,33 +1,30 @@
 #!/usr/bin/env python3
 """
-GPU-accelerated parameter evolution for Liquid War 5 AI.
+GPU-accelerated parameter evolution with Kafka observability.
 
-Runs the entire evolution loop on a single GPU — no Kafka, no
-distributed workers needed. One GPU replaces the whole CPU cluster.
+Runs the evolution loop on a single GPU for speed, but publishes
+all game results and generation state to Kafka so Spark/Jupyter
+can monitor in real-time.
 
 Each generation:
   1. Generate parameter sets for the population
   2. Run all evaluation games on GPU (thousands at once)
-  3. Score fitness
-  4. Select, crossover, mutate -> next generation
+  3. Publish results to Kafka (Avro)
+  4. Score fitness, select, crossover, mutate -> next generation
 
 Usage:
     uv run python3 gpu_evolve.py --generations 300 --population 60 --games-per-eval 100
-
-    # On pandoras-box (fastest):
-    CUDA_HOME=/usr TORCH_CUDA_ARCH_LIST="9.0+PTX" uv run python3 gpu_evolve.py
-
-    # On spark-wolf (native):
-    CUDA_HOME=/usr/local/cuda-13.0 uv run python3 gpu_evolve.py
 """
 
 import argparse
 import json
 import os
 import random
+import socket
 import sys
 import time
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
@@ -35,28 +32,111 @@ import torch
 from evolve import AIParams
 from simulator.gpu_native import run_games_gpu, generate_walls
 
+# Kafka publishing (optional — runs without it if unavailable)
+try:
+    from kafka_avro import (
+        TOPIC_RESULTS, TOPIC_STATE,
+        create_avro_producer, produce_avro,
+    )
+    HAS_KAFKA = True
+except ImportError:
+    HAS_KAFKA = False
 
-def evaluate_population_gpu(population, games_per_eval, num_teams_choices,
-                            device='cuda'):
-    """Evaluate all individuals by running games on GPU.
 
-    For each individual, runs games_per_eval games with random team counts.
-    All games for all individuals run in one GPU batch.
+def setup_kafka(bootstrap_servers, schema_registry):
+    """Set up Kafka producers for results and state topics."""
+    if not HAS_KAFKA:
+        return None, None, None, None, None, None
 
-    Returns list of (params, fitness) sorted by fitness descending.
-    """
+    try:
+        res_prod, res_ser, res_key = create_avro_producer(
+            bootstrap_servers, schema_registry, TOPIC_RESULTS)
+        state_prod, state_ser, state_key = create_avro_producer(
+            bootstrap_servers, schema_registry, TOPIC_STATE)
+        return res_prod, res_ser, res_key, state_prod, state_ser, state_key
+    except Exception as e:
+        print(f"Kafka setup failed ({e}), running without Kafka")
+        return None, None, None, None, None, None
+
+
+def publish_game_results(res_prod, res_ser, res_key, results,
+                         population, games_per_eval, gen, island_id):
+    """Publish individual game results to Kafka."""
+    if res_prod is None:
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    hostname = socket.gethostname()
+
+    for idx, params in enumerate(population):
+        start = idx * games_per_eval
+        end = start + games_per_eval
+
+        for g in range(games_per_eval):
+            game_idx = start + g
+            dom = results['dominance'][game_idx].item()
+            fighters = results['fighters_per_team'][game_idx].tolist()
+            total = results['total_fighters'][game_idx].item()
+            ticks = results['ticks'][game_idx].item()
+            winner = results['best_team'][game_idx].item()
+
+            msg = {
+                "job_id": f"{island_id}_gen{gen:03d}_ind{idx:02d}_g{g:02d}",
+                "generation": gen,
+                "individual": idx,
+                "game_num": g,
+                "seed": gen * 100000 + idx * 1000 + g,
+                "params": asdict(params),
+                "result": {
+                    "winner": int(winner),
+                    "ticks": int(ticks),
+                    "team_fighters": [int(f) for f in fighters],
+                    "total_fighters": int(total),
+                    "dominance": float(dom),
+                    "num_teams": 4,
+                },
+                "worker": hostname,
+                "duration_ms": 0,
+                "completed_at": now,
+            }
+
+            produce_avro(res_prod, res_ser, res_key,
+                         TOPIC_RESULTS, f"{gen}:{idx}", msg)
+
+    res_prod.flush()
+
+
+def publish_generation_state(state_prod, state_ser, state_key,
+                             gen, best_params, best_fitness, avg_fitness,
+                             population_size, games_total, duration_ms):
+    """Publish generation summary to Kafka."""
+    if state_prod is None:
+        return
+
+    state = {
+        "generation": gen,
+        "best_fitness": float(best_fitness),
+        "avg_fitness": float(avg_fitness),
+        "best_params": asdict(best_params),
+        "population_size": population_size,
+        "games_evaluated": games_total,
+        "generation_duration_ms": int(duration_ms),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    produce_avro(state_prod, state_ser, state_key,
+                 TOPIC_STATE, f"gen:{gen}", state)
+    state_prod.flush()
+
+
+def evaluate_population_gpu(population, games_per_eval, device='cuda'):
+    """Evaluate all individuals in one GPU batch."""
     total_games = len(population) * games_per_eval
     walls = generate_walls(total_games, device=device)
 
-    # Assign random team counts per game
-    team_counts = torch.tensor(
-        [random.choice(num_teams_choices) for _ in range(total_games)],
-        device=device)
-
-    # Run all games at once
     results = run_games_gpu(
         batch_size=total_games,
-        num_teams=4,  # max teams (unused teams get 0 fighters)
+        num_teams=4,
         fighters_per_team=500,
         max_ticks=5000,
         grad_iters=4,
@@ -64,36 +144,43 @@ def evaluate_population_gpu(population, games_per_eval, num_teams_choices,
         device=device,
     )
 
-    # Score each individual by averaging dominance across their games
     scored = []
     for idx, params in enumerate(population):
         start = idx * games_per_eval
         end = start + games_per_eval
-        individual_dom = results['dominance'][start:end]
-        fitness = individual_dom.mean().item()
+        fitness = results['dominance'][start:end].mean().item()
         scored.append((params, fitness))
 
     scored.sort(key=lambda x: x[1], reverse=True)
-    return scored
+    return scored, results
 
 
 def run_evolution(args):
-    """Main GPU evolution loop."""
+    """Main GPU evolution loop with Kafka publishing."""
     device = args.device
     if device == 'cuda' and not torch.cuda.is_available():
         print("CUDA not available, falling back to CPU")
         device = 'cpu'
+
+    island_id = f"{socket.gethostname()}_{time.strftime('%Y%m%d_%H%M%S')}"
 
     if device == 'cuda':
         gpu_name = torch.cuda.get_device_name()
         sms = torch.cuda.get_device_properties(0).multi_processor_count
         print(f"GPU: {gpu_name} ({sms} SMs)")
 
+    # Set up Kafka
+    kafka_components = setup_kafka(args.bootstrap_servers,
+                                    args.schema_registry)
+    res_prod, res_ser, res_key = kafka_components[:3]
+    state_prod, state_ser, state_key = kafka_components[3:]
+
+    kafka_status = "connected" if res_prod else "disabled"
+
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     output_dir = Path(args.output) / f"gpu_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    log_path = output_dir / "evolution.log"
-    log_file = open(log_path, "w")
+    log_file = open(output_dir / "evolution.log", "w")
 
     def log(msg=""):
         line = str(msg)
@@ -103,39 +190,39 @@ def run_evolution(args):
         log_file.flush()
 
     total_games = args.population * args.games_per_eval
+
     log(f"=== GPU Evolution ===")
+    log(f"Island: {island_id}")
     log(f"Population: {args.population}")
     log(f"Games per eval: {args.games_per_eval}")
     log(f"Games per generation: {total_games}")
     log(f"Generations: {args.generations}")
     log(f"Total games: {total_games * args.generations:,}")
     log(f"Device: {device}")
+    log(f"Kafka: {kafka_status}")
     log(f"Output: {output_dir}")
     log()
 
-    # Team count choices for variety
-    team_choices = [2, 3, 4]
-
     # Initialize population
-    population = [AIParams()]  # default params
+    population = [AIParams()]
     for _ in range(args.population - 1):
         population.append(AIParams.random())
 
     best_ever = None
     best_ever_fitness = 0.0
-    evolution_data = []
+    total_games_run = 0
 
     for gen in range(args.generations):
         gen_start = time.time()
 
-        # Evaluate
-        scored = evaluate_population_gpu(
-            population, args.games_per_eval, team_choices, device)
+        scored, results = evaluate_population_gpu(
+            population, args.games_per_eval, device)
 
         gen_time = time.time() - gen_start
         best_params, best_fitness = scored[0]
         avg_fitness = sum(f for _, f in scored) / len(scored)
         gps = total_games / gen_time
+        total_games_run += total_games
 
         if best_fitness > best_ever_fitness:
             best_ever_fitness = best_fitness
@@ -143,30 +230,28 @@ def run_evolution(args):
 
         log(f"Gen {gen:>3d}/{args.generations}  "
             f"best={best_fitness:.4f}  avg={avg_fitness:.4f}  "
-            f"time={gen_time:.1f}s  games/s={gps:.0f}")
+            f"time={gen_time:.1f}s  games/s={gps:.0f}  "
+            f"total={total_games_run:,}")
 
-        # Save generation data
-        gen_data = {
-            "generation": gen,
-            "best_fitness": best_fitness,
-            "avg_fitness": avg_fitness,
-            "time_seconds": gen_time,
-            "games_per_sec": gps,
-            "best_params": asdict(best_params),
-        }
-        evolution_data.append(gen_data)
+        # Publish to Kafka
+        publish_game_results(res_prod, res_ser, res_key,
+                             results, population, args.games_per_eval,
+                             gen, island_id)
+        publish_generation_state(state_prod, state_ser, state_key,
+                                 gen, best_params, best_fitness,
+                                 avg_fitness, args.population,
+                                 total_games, int(gen_time * 1000))
 
-        # Save generation results
+        # Save generation locally
         gen_file = output_dir / f"gen_{gen:03d}.json"
         with open(gen_file, "w") as f:
             json.dump([{"params": asdict(p), "fitness": fit}
                        for p, fit in scored], f, indent=2)
 
-        # Selection: keep top 30%
+        # Selection + breeding
         elite_count = max(2, args.population // 3)
         elite = [params for params, _ in scored[:elite_count]]
 
-        # Breed next generation
         next_pop = list(elite)
         while len(next_pop) < args.population:
             if random.random() < 0.7:
@@ -179,38 +264,40 @@ def run_evolution(args):
 
         population = next_pop
 
-    # Save final results
+    # Final results
     log()
     log(f"=== Evolution Complete ===")
     log(f"Best fitness: {best_ever_fitness:.4f}")
     log(f"Best params: {asdict(best_ever)}")
-    log(f"CLI: {' '.join(best_ever.to_cli_args())}")
+    log(f"Total games: {total_games_run:,}")
 
-    # Save best params
     best_file = output_dir / "best_params.json"
     with open(best_file, "w") as f:
         json.dump({
             "fitness": best_ever_fitness,
             "params": asdict(best_ever),
             "cli_args": " ".join(best_ever.to_cli_args()),
+            "island_id": island_id,
+            "total_games": total_games_run,
         }, f, indent=2)
-
-    # Save evolution log
-    evo_file = output_dir / "evolution_data.json"
-    with open(evo_file, "w") as f:
-        json.dump(evolution_data, f, indent=2)
 
     log_file.close()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="GPU-accelerated parameter evolution")
+        description="GPU-accelerated parameter evolution with Kafka")
     parser.add_argument("--generations", type=int, default=300)
     parser.add_argument("--population", type=int, default=60)
     parser.add_argument("--games-per-eval", type=int, default=100)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output", default="results")
+    parser.add_argument(
+        "--bootstrap-servers", default="192.168.1.226:31487",
+        help="Kafka bootstrap servers")
+    parser.add_argument(
+        "--schema-registry", default="http://192.168.1.226:30081",
+        help="Schema Registry URL")
     args = parser.parse_args()
     run_evolution(args)
 
