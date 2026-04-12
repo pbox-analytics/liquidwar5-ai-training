@@ -1,69 +1,56 @@
 #!/usr/bin/env python3
 """
-Evolution coordinator — publishes game jobs to Kafka, collects results,
-runs genetic algorithm selection, and publishes next generation.
+Evolution coordinator — publishes game jobs to Kafka as Avro,
+collects results, runs genetic algorithm selection, and publishes
+the next generation.
 
 Usage:
     python3 coordinator.py \
         --bootstrap-servers pandoratower.local:30092 \
+        --schema-registry http://pandoratower.local:30081 \
         --generations 50 --population 20 --games-per-eval 10
 """
 
 import argparse
 import json
-import os
 import random
 import sys
 import time
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
-from confluent_kafka import Producer, Consumer, KafkaError
-
+from kafka_avro import (
+    TOPIC_JOBS, TOPIC_RESULTS, TOPIC_STATE,
+    create_avro_producer, create_avro_consumer,
+    produce_avro, consume_avro,
+)
 from evolve import AIParams
 
-TOPIC_JOBS = "ml.liquidwar5.game-jobs"
-TOPIC_RESULTS = "ml.liquidwar5.game-results"
-TOPIC_STATE = "ml.liquidwar5.evolution-state"
 
-
-def create_producer(bootstrap_servers: str) -> Producer:
-    return Producer({
-        "bootstrap.servers": bootstrap_servers,
-        "compression.type": "snappy",
-        "linger.ms": 5,
-        "batch.num.messages": 100,
-    })
-
-
-def create_consumer(bootstrap_servers: str, group_id: str) -> Consumer:
-    return Consumer({
-        "bootstrap.servers": bootstrap_servers,
-        "group.id": group_id,
-        "auto.offset.reset": "latest",
-        "enable.auto.commit": True,
-    })
-
-
-def publish_jobs(producer: Producer, population: list, gen: int,
-                 games_per_eval: int):
+def publish_jobs(producer, serializer, key_serializer,
+                 population: list, gen: int, games_per_eval: int) -> int:
     """Publish game evaluation jobs for a generation."""
     job_count = 0
+    now = datetime.now(timezone.utc).isoformat()
+
     for idx, params in enumerate(population):
         for game_num in range(games_per_eval):
             seed = gen * 100000 + idx * 1000 + game_num
+            job_id = f"gen{gen:03d}_ind{idx:02d}_game{game_num:02d}"
+
             job = {
+                "job_id": job_id,
                 "generation": gen,
                 "individual": idx,
                 "game_num": game_num,
                 "seed": seed,
                 "params": asdict(params),
+                "created_at": now,
             }
-            producer.produce(
-                TOPIC_JOBS,
-                key=f"{gen}:{idx}".encode(),
-                value=json.dumps(job).encode(),
-            )
+
+            produce_avro(producer, serializer, key_serializer,
+                         TOPIC_JOBS, f"{gen}:{idx}", job)
             job_count += 1
 
     producer.flush()
@@ -71,31 +58,32 @@ def publish_jobs(producer: Producer, population: list, gen: int,
     return job_count
 
 
-def collect_results(consumer: Consumer, expected_count: int,
+def collect_results(consumer, deserializer, key_deserializer,
+                    expected_count: int,
                     timeout_seconds: int = 300) -> dict:
-    """Collect game results from workers. Returns {(gen, individual): [scores]}."""
+    """Collect game results from workers.
+
+    Returns {(gen, individual): [scores]}.
+    """
     results = {}
     received = 0
     deadline = time.time() + timeout_seconds
 
     while received < expected_count and time.time() < deadline:
-        msg = consumer.poll(1.0)
-        if msg is None:
-            continue
-        if msg.error():
-            if msg.error().code() != KafkaError._PARTITION_EOF:
-                print(f"  Consumer error: {msg.error()}", file=sys.stderr)
+        key, value = consume_avro(consumer, deserializer,
+                                  key_deserializer, timeout=1.0)
+        if value is None:
             continue
 
-        try:
-            result = json.loads(msg.value().decode())
-            key = (result["generation"], result["individual"])
-            if key not in results:
-                results[key] = []
-            results[key].append(result.get("score", 0.0))
-            received += 1
-        except (json.JSONDecodeError, KeyError) as e:
-            print(f"  Bad message: {e}", file=sys.stderr)
+        gen = value["generation"]
+        ind = value["individual"]
+        score = value["result"]["dominance"]
+        k = (gen, ind)
+
+        if k not in results:
+            results[k] = []
+        results[k].append(score)
+        received += 1
 
     print(f"  Collected {received}/{expected_count} results")
     return results
@@ -106,8 +94,7 @@ def compute_fitness(results: dict, population: list,
     """Compute fitness for each individual. Returns [(params, fitness)]."""
     scored = []
     for idx, params in enumerate(population):
-        key = (gen, idx)
-        scores = results.get(key, [])
+        scores = results.get((gen, idx), [])
         fitness = sum(scores) / len(scores) if scores else 0.0
         scored.append((params, fitness))
 
@@ -115,35 +102,43 @@ def compute_fitness(results: dict, population: list,
     return scored
 
 
-def publish_state(producer: Producer, gen: int, best_params: AIParams,
-                  best_fitness: float, avg_fitness: float):
+def publish_state(producer, serializer, key_serializer,
+                  gen: int, best_params: AIParams,
+                  best_fitness: float, avg_fitness: float,
+                  population_size: int, games_evaluated: int,
+                  duration_ms: int):
     """Publish generation state to compacted topic."""
     state = {
         "generation": gen,
         "best_fitness": best_fitness,
         "avg_fitness": avg_fitness,
         "best_params": asdict(best_params),
-        "timestamp": time.time(),
+        "population_size": population_size,
+        "games_evaluated": games_evaluated,
+        "generation_duration_ms": duration_ms,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    producer.produce(
-        TOPIC_STATE,
-        key=f"gen:{gen}".encode(),
-        value=json.dumps(state).encode(),
-    )
+    produce_avro(producer, serializer, key_serializer,
+                 TOPIC_STATE, f"gen:{gen}", state)
     producer.flush()
 
 
 def run_coordinator(args):
     """Main coordinator loop."""
-    producer = create_producer(args.bootstrap_servers)
-    consumer = create_consumer(args.bootstrap_servers, "lw5-coordinator")
-    consumer.subscribe([TOPIC_RESULTS])
+    jobs_prod, jobs_ser, jobs_key_ser = create_avro_producer(
+        args.bootstrap_servers, args.schema_registry, TOPIC_JOBS)
+    state_prod, state_ser, state_key_ser = create_avro_producer(
+        args.bootstrap_servers, args.schema_registry, TOPIC_STATE)
+    results_con, results_deser, results_key_deser = create_avro_consumer(
+        args.bootstrap_servers, args.schema_registry, TOPIC_RESULTS,
+        "lw5-coordinator")
 
     output_dir = Path(args.output) / time.strftime("%Y%m%d_%H%M%S")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"=== Coordinator starting ===")
     print(f"Kafka: {args.bootstrap_servers}")
+    print(f"Schema Registry: {args.schema_registry}")
     print(f"Population: {args.population}, Generations: {args.generations}")
     print(f"Games per eval: {args.games_per_eval}")
     print(f"Output: {output_dir}")
@@ -163,10 +158,12 @@ def run_coordinator(args):
 
         # Publish jobs
         expected = len(population) * args.games_per_eval
-        publish_jobs(producer, population, gen, args.games_per_eval)
+        publish_jobs(jobs_prod, jobs_ser, jobs_key_ser,
+                     population, gen, args.games_per_eval)
 
         # Collect results
-        results = collect_results(consumer, expected,
+        results = collect_results(results_con, results_deser,
+                                  results_key_deser, expected,
                                   timeout_seconds=args.timeout)
 
         # Compute fitness
@@ -175,21 +172,24 @@ def run_coordinator(args):
         best_params, best_fitness = scored[0]
         avg_fitness = sum(f for _, f in scored) / len(scored)
         gen_time = time.time() - gen_start
+        games_total = sum(len(v) for v in results.values())
 
         if best_fitness > best_ever_fitness:
             best_ever_fitness = best_fitness
             best_ever = best_params
 
         # Publish state
-        publish_state(producer, gen, best_params, best_fitness, avg_fitness)
+        publish_state(state_prod, state_ser, state_key_ser,
+                      gen, best_params, best_fitness, avg_fitness,
+                      len(population), games_total,
+                      int(gen_time * 1000))
 
-        # Log
         print(f"  Best: {best_fitness:.4f}  Avg: {avg_fitness:.4f}  "
               f"Time: {gen_time:.1f}s")
         print(f"  Best params: {asdict(best_params)}")
         print()
 
-        # Save generation results
+        # Save generation results locally
         gen_file = output_dir / f"generation_{gen:03d}.json"
         with open(gen_file, "w") as f:
             json.dump([{"params": asdict(p), "fitness": fit}
@@ -225,7 +225,7 @@ def run_coordinator(args):
     print(f"Best params: {asdict(best_ever)}")
     print(f"CLI: {' '.join(best_ever.to_cli_args())}")
 
-    consumer.close()
+    results_con.close()
 
 
 def main():
@@ -237,21 +237,17 @@ def main():
         help="Kafka bootstrap servers"
     )
     parser.add_argument(
-        "--generations", type=int, default=50,
+        "--schema-registry", default="http://pandoratower.local:30081",
+        help="Schema Registry URL"
     )
-    parser.add_argument(
-        "--population", type=int, default=20,
-    )
-    parser.add_argument(
-        "--games-per-eval", type=int, default=10,
-    )
+    parser.add_argument("--generations", type=int, default=50)
+    parser.add_argument("--population", type=int, default=20)
+    parser.add_argument("--games-per-eval", type=int, default=10)
     parser.add_argument(
         "--timeout", type=int, default=300,
         help="Seconds to wait for results per generation"
     )
-    parser.add_argument(
-        "--output", default="results",
-    )
+    parser.add_argument("--output", default="results")
 
     args = parser.parse_args()
     run_coordinator(args)

@@ -1,0 +1,30 @@
+{
+  "type": "record",
+  "name": "GameResult",
+  "namespace": "com.liquidwar5.ai",
+  "doc": "Result of a single headless game simulation",
+  "fields": [
+    {"name": "job_id",       "type": "string", "doc": "Matching job identifier"},
+    {"name": "generation",   "type": "int",    "doc": "Evolution generation number"},
+    {"name": "individual",   "type": "int",    "doc": "Individual index within the generation"},
+    {"name": "game_num",     "type": "int",    "doc": "Game number within evaluation"},
+    {"name": "seed",         "type": "int",    "doc": "Random seed used"},
+    {"name": "params",       "type": "com.liquidwar5.ai.AIParams", "doc": "AI parameters used"},
+    {"name": "result", "type": {
+      "type": "record",
+      "name": "SimulationResult",
+      "namespace": "com.liquidwar5.ai",
+      "doc": "Game outcome data",
+      "fields": [
+        {"name": "winner",          "type": "int",              "doc": "Winning team index (-1 if tie)"},
+        {"name": "ticks",           "type": "int",              "doc": "Total game ticks elapsed"},
+        {"name": "team_fighters",   "type": {"type": "array", "items": "int"}, "doc": "Fighter count per team at game end"},
+        {"name": "total_fighters",  "type": "int",              "doc": "Sum of all fighters"},
+        {"name": "dominance",       "type": "double",           "doc": "Winning team's fighter fraction (fitness score)"}
+      ]
+    }, "doc": "Simulation outcome"},
+    {"name": "worker",        "type": "string", "doc": "Hostname of the worker that ran the game"},
+    {"name": "duration_ms",   "type": "long",   "doc": "Wall-clock time for the simulation in milliseconds"},
+    {"name": "completed_at",  "type": "string", "doc": "ISO 8601 timestamp of completion"}
+  ]
+}

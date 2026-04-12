@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Game simulation worker — consumes jobs from Kafka, runs headless games,
-publishes results back.
+Game simulation worker — consumes Avro jobs from Kafka, runs headless
+games, publishes Avro results back.
 
 Run one worker per machine. Each worker uses all available CPU cores
-to run games in parallel.
+to run games in parallel via a process pool.
 
 Usage:
     python3 worker.py \
         --bootstrap-servers pandoratower.local:30092 \
+        --schema-registry http://pandoratower.local:30081 \
         --game-binary ../liquidwar5-ai/src/liquidwar \
-        --dat-path ../liquidwar5-ai/data/liquidwar.dat \
-        --workers 20
+        --dat-path ../liquidwar5-ai/data/liquidwar.dat
 """
 
 import argparse
-import json
 import os
 import signal
 import subprocess
@@ -23,13 +22,14 @@ import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict
+from datetime import datetime, timezone
 
-from confluent_kafka import Producer, Consumer, KafkaError
-
+from kafka_avro import (
+    TOPIC_JOBS, TOPIC_RESULTS,
+    create_avro_producer, create_avro_consumer,
+    produce_avro, consume_avro,
+)
 from evolve import AIParams
-
-TOPIC_JOBS = "ml.liquidwar5.game-jobs"
-TOPIC_RESULTS = "ml.liquidwar5.game-results"
 
 running = True
 
@@ -44,15 +44,18 @@ signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 
-def run_game(game_binary: str, dat_path: str, params: AIParams,
-             seed: int) -> float:
-    """Run a single headless game. Returns fitness score."""
+def run_game(game_binary: str, dat_path: str, params_dict: dict,
+             seed: int) -> dict:
+    """Run a single headless game. Returns result dict."""
+    params = AIParams(**params_dict)
     cmd = [
         game_binary,
         "-dat", dat_path,
         "-headless",
         "-seed", str(seed),
     ] + params.to_cli_args()
+
+    start_ms = int(time.time() * 1000)
 
     try:
         proc = subprocess.run(
@@ -63,83 +66,91 @@ def run_game(game_binary: str, dat_path: str, params: AIParams,
                 parts = line.split(",")
                 fighters = [int(x) for x in parts[3:9]]
                 total = sum(fighters)
-                if total > 0:
-                    return max(fighters) / total
+                winner = int(parts[1])
+                ticks = int(parts[2])
+                dominance = max(fighters) / total if total > 0 else 0.0
+
+                return {
+                    "winner": winner,
+                    "ticks": ticks,
+                    "team_fighters": fighters,
+                    "total_fighters": total,
+                    "dominance": dominance,
+                    "duration_ms": int(time.time() * 1000) - start_ms,
+                }
     except (subprocess.TimeoutExpired, Exception) as e:
         print(f"  Game failed (seed={seed}): {e}", file=sys.stderr)
 
-    return 0.0
+    return {
+        "winner": -1,
+        "ticks": 0,
+        "team_fighters": [0, 0, 0, 0, 0, 0],
+        "total_fighters": 0,
+        "dominance": 0.0,
+        "duration_ms": int(time.time() * 1000) - start_ms,
+    }
 
 
 def process_job(job: dict, game_binary: str, dat_path: str) -> dict:
-    """Process a single game job and return the result."""
-    params = AIParams(**job["params"])
-    score = run_game(game_binary, dat_path, params, job["seed"])
+    """Process a game job, returning a full result message."""
+    sim = run_game(game_binary, dat_path, job["params"], job["seed"])
 
     return {
+        "job_id": job["job_id"],
         "generation": job["generation"],
         "individual": job["individual"],
         "game_num": job["game_num"],
         "seed": job["seed"],
-        "score": score,
         "params": job["params"],
+        "result": {
+            "winner": sim["winner"],
+            "ticks": sim["ticks"],
+            "team_fighters": sim["team_fighters"],
+            "total_fighters": sim["total_fighters"],
+            "dominance": sim["dominance"],
+        },
         "worker": os.uname().nodename,
-        "timestamp": time.time(),
+        "duration_ms": sim["duration_ms"],
+        "completed_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
 def run_worker(args):
     """Main worker loop."""
-    consumer = Consumer({
-        "bootstrap.servers": args.bootstrap_servers,
-        "group.id": "lw5-workers",
-        "auto.offset.reset": "earliest",
-        "enable.auto.commit": True,
-        "max.poll.interval.ms": 600000,  # 10 min — games take time
-    })
-    consumer.subscribe([TOPIC_JOBS])
-
-    producer = Producer({
-        "bootstrap.servers": args.bootstrap_servers,
-        "compression.type": "snappy",
-    })
+    jobs_con, jobs_deser, jobs_key_deser = create_avro_consumer(
+        args.bootstrap_servers, args.schema_registry, TOPIC_JOBS,
+        "lw5-workers")
+    results_prod, results_ser, results_key_ser = create_avro_producer(
+        args.bootstrap_servers, args.schema_registry, TOPIC_RESULTS)
 
     hostname = os.uname().nodename
     print(f"=== Worker starting on {hostname} ===")
     print(f"Kafka: {args.bootstrap_servers}")
+    print(f"Schema Registry: {args.schema_registry}")
     print(f"Game binary: {args.game_binary}")
     print(f"Parallel workers: {args.workers}")
-    print(f"Listening on topic: {TOPIC_JOBS}")
+    print(f"Batch size: {args.batch_size}")
     print()
 
     executor = ProcessPoolExecutor(max_workers=args.workers)
-    pending_futures = []
     games_completed = 0
 
     while running:
         # Collect a batch of jobs
         batch = []
         for _ in range(args.batch_size):
-            msg = consumer.poll(0.5)
-            if msg is None:
+            key, value = consume_avro(jobs_con, jobs_deser,
+                                      jobs_key_deser, timeout=0.5)
+            if value is None:
                 break
-            if msg.error():
-                if msg.error().code() != KafkaError._PARTITION_EOF:
-                    print(f"  Consumer error: {msg.error()}", file=sys.stderr)
-                continue
-            try:
-                job = json.loads(msg.value().decode())
-                batch.append(job)
-            except json.JSONDecodeError:
-                continue
+            batch.append(value)
 
         if not batch:
-            # No jobs available, wait briefly
             time.sleep(0.5)
             continue
 
-        print(f"  Processing batch of {len(batch)} jobs "
-              f"(gen={batch[0].get('generation', '?')})")
+        gen = batch[0].get("generation", "?")
+        print(f"  Processing batch of {len(batch)} jobs (gen={gen})")
 
         # Submit jobs to process pool
         futures = []
@@ -149,36 +160,41 @@ def run_worker(args):
             )
             futures.append(future)
 
-        # Collect results and publish
+        # Collect results and publish as Avro
         for future in futures:
             try:
                 result = future.result(timeout=120)
-                producer.produce(
+                produce_avro(
+                    results_prod, results_ser, results_key_ser,
                     TOPIC_RESULTS,
-                    key=f"{result['generation']}:{result['individual']}".encode(),
-                    value=json.dumps(result).encode(),
+                    f"{result['generation']}:{result['individual']}",
+                    result,
                 )
                 games_completed += 1
             except Exception as e:
                 print(f"  Job failed: {e}", file=sys.stderr)
 
-        producer.flush()
+        results_prod.flush()
 
         if games_completed % 10 == 0:
             print(f"  [{hostname}] Total games completed: {games_completed}")
 
     executor.shutdown(wait=False)
-    consumer.close()
+    jobs_con.close()
     print(f"Worker shut down. Total games: {games_completed}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Game simulation worker — run headless games from Kafka jobs"
+        description="Game simulation worker — consumes Avro jobs from Kafka"
     )
     parser.add_argument(
         "--bootstrap-servers", default="pandoratower.local:30092",
         help="Kafka bootstrap servers"
+    )
+    parser.add_argument(
+        "--schema-registry", default="http://pandoratower.local:30081",
+        help="Schema Registry URL"
     )
     parser.add_argument(
         "--game-binary", required=True,

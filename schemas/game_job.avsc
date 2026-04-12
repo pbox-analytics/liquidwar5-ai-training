@@ -1,0 +1,15 @@
+{
+  "type": "record",
+  "name": "GameJob",
+  "namespace": "com.liquidwar5.ai",
+  "doc": "A game simulation job published by the coordinator for workers to execute",
+  "fields": [
+    {"name": "job_id",      "type": "string", "doc": "Unique job identifier (gen_ind_game)"},
+    {"name": "generation",  "type": "int",    "doc": "Evolution generation number"},
+    {"name": "individual",  "type": "int",    "doc": "Individual index within the generation"},
+    {"name": "game_num",    "type": "int",    "doc": "Game number within this individual's evaluation"},
+    {"name": "seed",        "type": "int",    "doc": "Random seed for reproducible simulation"},
+    {"name": "params",      "type": "com.liquidwar5.ai.AIParams", "doc": "AI parameters to evaluate"},
+    {"name": "created_at",  "type": "string", "doc": "ISO 8601 timestamp of job creation"}
+  ]
+}

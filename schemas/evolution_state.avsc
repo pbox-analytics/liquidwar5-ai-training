@@ -1,0 +1,16 @@
+{
+  "type": "record",
+  "name": "EvolutionState",
+  "namespace": "com.liquidwar5.ai",
+  "doc": "State snapshot of a single evolution generation",
+  "fields": [
+    {"name": "generation",             "type": "int",    "doc": "Generation number"},
+    {"name": "best_fitness",           "type": "double", "doc": "Highest fitness in this generation"},
+    {"name": "avg_fitness",            "type": "double", "doc": "Mean fitness across population"},
+    {"name": "best_params",            "type": "com.liquidwar5.ai.AIParams", "doc": "Parameters of the best individual"},
+    {"name": "population_size",        "type": "int",    "doc": "Number of individuals evaluated"},
+    {"name": "games_evaluated",        "type": "int",    "doc": "Total games run this generation"},
+    {"name": "generation_duration_ms", "type": "long",   "doc": "Wall-clock time for the generation in milliseconds"},
+    {"name": "timestamp",              "type": "string", "doc": "ISO 8601 timestamp"}
+  ]
+}
