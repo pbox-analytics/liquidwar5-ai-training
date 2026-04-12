@@ -17,6 +17,8 @@ import sys
 import time
 from collections import defaultdict
 
+from confluent_kafka import Consumer
+
 from kafka_avro import (
     TOPIC_RESULTS, TOPIC_STATE,
     create_avro_consumer, consume_avro,
