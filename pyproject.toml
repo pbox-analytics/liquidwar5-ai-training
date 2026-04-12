@@ -10,3 +10,5 @@ dependencies = [
 
 [project.optional-dependencies]
 plot = ["matplotlib>=3.8.0"]
+gpu = ["torch>=2.0.0"]
+all = ["matplotlib>=3.8.0", "torch>=2.0.0"]
