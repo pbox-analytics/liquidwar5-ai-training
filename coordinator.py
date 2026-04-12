@@ -13,9 +13,22 @@ Usage:
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
+
+_log_file = None
+
+def log(msg=""):
+    """Log to file and stderr with immediate flush."""
+    global _log_file
+    line = str(msg)
+    sys.stderr.write(line + "\n")
+    sys.stderr.flush()
+    if _log_file:
+        _log_file.write(line + "\n")
+        _log_file.flush()
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,7 +67,7 @@ def publish_jobs(producer, serializer, key_serializer,
             job_count += 1
 
     producer.flush()
-    print(f"  Published {job_count} jobs for generation {gen}")
+    log(f"  Published {job_count} jobs for generation {gen}")
     return job_count
 
 
@@ -85,7 +98,7 @@ def collect_results(consumer, deserializer, key_deserializer,
         results[k].append(score)
         received += 1
 
-    print(f"  Collected {received}/{expected_count} results")
+    log(f"  Collected {received}/{expected_count} results")
     return results
 
 
@@ -133,16 +146,18 @@ def run_coordinator(args):
         args.bootstrap_servers, args.schema_registry, TOPIC_RESULTS,
         "lw5-coordinator")
 
+    global _log_file
     output_dir = Path(args.output) / time.strftime("%Y%m%d_%H%M%S")
     output_dir.mkdir(parents=True, exist_ok=True)
+    _log_file = open(output_dir / "coordinator.log", "w")
 
-    print(f"=== Coordinator starting ===")
-    print(f"Kafka: {args.bootstrap_servers}")
-    print(f"Schema Registry: {args.schema_registry}")
-    print(f"Population: {args.population}, Generations: {args.generations}")
-    print(f"Games per eval: {args.games_per_eval}")
-    print(f"Output: {output_dir}")
-    print()
+    log(f"=== Coordinator starting ===")
+    log(f"Kafka: {args.bootstrap_servers}")
+    log(f"Schema Registry: {args.schema_registry}")
+    log(f"Population: {args.population}, Generations: {args.generations}")
+    log(f"Games per eval: {args.games_per_eval}")
+    log(f"Output: {output_dir}")
+    log()
 
     # Initialize population
     population = [AIParams()]
@@ -153,7 +168,7 @@ def run_coordinator(args):
     best_ever_fitness = 0.0
 
     for gen in range(args.generations):
-        print(f"=== Generation {gen} ===")
+        log(f"=== Generation {gen} ===")
         gen_start = time.time()
 
         # Publish jobs
@@ -184,10 +199,10 @@ def run_coordinator(args):
                       len(population), games_total,
                       int(gen_time * 1000))
 
-        print(f"  Best: {best_fitness:.4f}  Avg: {avg_fitness:.4f}  "
+        log(f"  Best: {best_fitness:.4f}  Avg: {avg_fitness:.4f}  "
               f"Time: {gen_time:.1f}s")
-        print(f"  Best params: {asdict(best_params)}")
-        print()
+        log(f"  Best params: {asdict(best_params)}")
+        log()
 
         # Save generation results locally
         gen_file = output_dir / f"generation_{gen:03d}.json"
@@ -221,10 +236,10 @@ def run_coordinator(args):
                 "cli_args": " ".join(best_ever.to_cli_args()),
             }, f, indent=2)
 
-    print(f"Evolution complete!")
-    print(f"Best fitness: {best_ever_fitness:.4f}")
-    print(f"Best params: {asdict(best_ever)}")
-    print(f"CLI: {' '.join(best_ever.to_cli_args())}")
+    log(f"Evolution complete!")
+    log(f"Best fitness: {best_ever_fitness:.4f}")
+    log(f"Best params: {asdict(best_ever)}")
+    log(f"CLI: {' '.join(best_ever.to_cli_args())}")
 
     results_con.close()
 
