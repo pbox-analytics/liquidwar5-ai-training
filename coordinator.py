@@ -142,12 +142,13 @@ def run_coordinator(args):
         args.bootstrap_servers, args.schema_registry, TOPIC_JOBS)
     state_prod, state_ser, state_key_ser = create_avro_producer(
         args.bootstrap_servers, args.schema_registry, TOPIC_STATE)
+    run_id = time.strftime("%Y%m%d_%H%M%S")
     results_con, results_deser, results_key_deser = create_avro_consumer(
         args.bootstrap_servers, args.schema_registry, TOPIC_RESULTS,
-        "lw5-coordinator")
+        f"lw5-coordinator-{run_id}")
 
     global _log_file
-    output_dir = Path(args.output) / time.strftime("%Y%m%d_%H%M%S")
+    output_dir = Path(args.output) / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
     _log_file = open(output_dir / "coordinator.log", "w")
 
