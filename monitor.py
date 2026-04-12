@@ -70,39 +70,46 @@ def parse_coordinator_log(log_path: Path) -> dict:
     with open(log_path) as f:
         for line in f:
             line = line.strip()
-            if line.startswith("=== Generation"):
+            if "=== Generation" in line:
                 try:
                     info["current_gen"] = int(line.split()[2])
                 except (IndexError, ValueError):
                     pass
-            elif line.startswith("Collected"):
+            elif "Collected" in line and "/" in line:
                 try:
                     parts = line.split()
-                    collected = int(parts[1].split("/")[0])
-                    info["run_games"] += collected
-                    info["generations_completed"] += 1
+                    for p in parts:
+                        if "/" in p:
+                            collected = int(p.split("/")[0])
+                            info["run_games"] += collected
+                            info["generations_completed"] += 1
+                            break
                 except (IndexError, ValueError):
                     pass
-            elif line.startswith("Best:"):
+            elif "Best:" in line and "Avg:" in line:
                 try:
-                    info["best_fitness"] = float(line.split()[1])
-                    avg_idx = line.index("Avg:")
-                    info["avg_fitness"] = float(
-                        line[avg_idx:].split()[1])
-                    time_idx = line.index("Time:")
+                    parts = line.split()
+                    best_idx = parts.index("Best:") + 1
+                    info["best_fitness"] = max(
+                        info["best_fitness"], float(parts[best_idx]))
+                    avg_idx = parts.index("Avg:") + 1
+                    info["avg_fitness"] = float(parts[avg_idx])
+                    time_idx = parts.index("Time:") + 1
                     info["last_gen_time"] = float(
-                        line[time_idx:].split()[1].rstrip("s"))
+                        parts[time_idx].rstrip("s"))
                 except (IndexError, ValueError):
                     pass
-            elif line.startswith("Best params:"):
+            elif "Best params:" in line:
                 try:
                     info["best_params"] = eval(
-                        line[len("Best params:"):].strip())
+                        line[line.index("{"):])
                 except Exception:
                     pass
-            elif line.startswith("Skipped"):
+            elif "Skipped" in line:
                 try:
-                    info["skipped"] += int(line.split()[1])
+                    parts = line.split()
+                    skip_idx = parts.index("Skipped") + 1
+                    info["skipped"] += int(parts[skip_idx])
                 except (IndexError, ValueError):
                     pass
 
