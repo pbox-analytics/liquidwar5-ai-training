@@ -7,9 +7,9 @@ This guide covers setting up all machines for the liquidwar5-ai distributed para
 ```
 ┌────────────────────────────────────────────────────────┐
 │                   Kafka Cluster (k3s)                  │
-│               pandoras-box:31487                 │
+│               192.168.1.226:31487                 │
 │                                                        │
-│  Schema Registry: pandoras-box:30081             │
+│  Schema Registry: 192.168.1.226:30081             │
 │  Topics: ml.liquidwar5.game-jobs                       │
 │          ml.liquidwar5.game-results                    │
 │          ml.liquidwar5.evolution-state                 │
@@ -41,7 +41,7 @@ This guide covers setting up all machines for the liquidwar5-ai distributed para
 - Python 3.10+
 - GCC, make, autoconf, automake
 - liballegro4-dev
-- Network access to pandoras-box:31487 (Kafka) and :30081 (Schema Registry)
+- Network access to 192.168.1.226:31487 (Kafka) and :30081 (Schema Registry)
 - SSH key access to GitHub (for cloning repos)
 
 ## Infrastructure (already running)
@@ -50,8 +50,8 @@ These are deployed on the k3s cluster and managed via ArgoCD/GitOps:
 
 | Service | Address | Repo |
 |---------|---------|------|
-| Kafka broker | pandoras-box:31487 | pbox-analytics/pandoras-box-data-platform |
-| Schema Registry | pandoras-box:30081 | pbox-analytics/pandoras-box-data-platform |
+| Kafka broker | 192.168.1.226:31487 | pbox-analytics/pandoras-box-data-platform |
+| Schema Registry | 192.168.1.226:30081 | pbox-analytics/pandoras-box-data-platform |
 | Kafka topics | Auto-created / ArgoCD | pbox-analytics/pandoras-box-data-acquisition |
 
 **Note:** The Schema Registry deployment requires `enableServiceLinks: false` in the pod spec to avoid the Confluent `PORT` env var conflict with Kubernetes service discovery.
@@ -106,13 +106,13 @@ pip install -r requirements.txt
 
 ```bash
 # Schema Registry
-curl -s http://pandoras-box:30081/subjects
+curl -s http://192.168.1.226:30081/subjects
 # Should return: []
 
 # Quick Kafka test (optional)
 python3 -c "
 from confluent_kafka import Producer
-p = Producer({'bootstrap.servers': 'pandoras-box:31487'})
+p = Producer({'bootstrap.servers': '192.168.1.226:31487'})
 p.produce('ml.liquidwar5.game-jobs', b'test')
 p.flush()
 print('Kafka OK')
@@ -160,7 +160,7 @@ cd ~/repo/liquidwar5-ai-training
 pip install -r requirements.txt
 
 # 6. Verify Kafka connectivity
-curl -s http://pandoras-box:30081/subjects
+curl -s http://192.168.1.226:30081/subjects
 ```
 
 ### DGX Spark note
@@ -176,32 +176,32 @@ cd ~/repo/liquidwar5-ai-training
 
 # pandoratower (coordinator machine also runs a worker)
 python3 worker.py \
-    --bootstrap-servers pandoras-box:31487 \
-    --schema-registry http://pandoras-box:30081 \
+    --bootstrap-servers 192.168.1.226:31487 \
+    --schema-registry http://192.168.1.226:30081 \
     --game-binary ../liquidwar5-ai/src/liquidwar \
     --dat-path ../liquidwar5-ai/data/liquidwar.dat \
     --workers 20
 
 # pandoras-box
 python3 worker.py \
-    --bootstrap-servers pandoras-box:31487 \
-    --schema-registry http://pandoras-box:30081 \
+    --bootstrap-servers 192.168.1.226:31487 \
+    --schema-registry http://192.168.1.226:30081 \
     --game-binary ../liquidwar5-ai/src/liquidwar \
     --dat-path ../liquidwar5-ai/data/liquidwar.dat \
     --workers 20
 
 # dgx-spark
 python3 worker.py \
-    --bootstrap-servers pandoras-box:31487 \
-    --schema-registry http://pandoras-box:30081 \
+    --bootstrap-servers 192.168.1.226:31487 \
+    --schema-registry http://192.168.1.226:30081 \
     --game-binary ../liquidwar5-ai/src/liquidwar \
     --dat-path ../liquidwar5-ai/data/liquidwar.dat \
     --workers 60
 
 # ryzen7
 python3 worker.py \
-    --bootstrap-servers pandoras-box:31487 \
-    --schema-registry http://pandoras-box:30081 \
+    --bootstrap-servers 192.168.1.226:31487 \
+    --schema-registry http://192.168.1.226:30081 \
     --game-binary ../liquidwar5-ai/src/liquidwar \
     --dat-path ../liquidwar5-ai/data/liquidwar.dat \
     --workers 12
@@ -213,8 +213,8 @@ python3 worker.py \
 cd ~/repo/liquidwar5-ai-training
 
 python3 coordinator.py \
-    --bootstrap-servers pandoras-box:31487 \
-    --schema-registry http://pandoras-box:30081 \
+    --bootstrap-servers 192.168.1.226:31487 \
+    --schema-registry http://192.168.1.226:30081 \
     --generations 50 \
     --population 20 \
     --games-per-eval 10
@@ -227,11 +227,11 @@ Use `nohup` or `tmux`/`screen` for long-running evolution:
 ```bash
 # With tmux
 tmux new -s worker
-python3 worker.py --bootstrap-servers pandoras-box:31487 ...
+python3 worker.py --bootstrap-servers 192.168.1.226:31487 ...
 # Ctrl-B, D to detach
 
 # With nohup
-nohup python3 worker.py --bootstrap-servers pandoras-box:31487 ... > worker.log 2>&1 &
+nohup python3 worker.py --bootstrap-servers 192.168.1.226:31487 ... > worker.log 2>&1 &
 ```
 
 ## Standalone mode (no Kafka)
@@ -270,10 +270,10 @@ Coordinator logs each generation:
 
 ```bash
 # List registered schemas
-curl -s http://pandoras-box:30081/subjects
+curl -s http://192.168.1.226:30081/subjects
 
 # View a schema
-curl -s http://pandoras-box:30081/subjects/ml.liquidwar5.game-jobs-value/versions/latest
+curl -s http://192.168.1.226:30081/subjects/ml.liquidwar5.game-jobs-value/versions/latest
 ```
 
 ### Kafka topics

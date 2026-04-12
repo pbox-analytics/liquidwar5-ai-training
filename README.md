@@ -18,7 +18,7 @@ Uses a genetic algorithm to evolve AI scoring parameters by running thousands of
               ┌────────────────────────────┐
               │  Kafka: ml.liquidwar5      │
               │       .game-jobs           │
-              │  (pandoras-box:31487)│
+              │  (192.168.1.226:31487)│
               └────────────────────────────┘
                            │ consumed by worker group
               ┌────────────┼────────────┐
@@ -110,7 +110,7 @@ python3 evolve.py \
 
 ```bash
 python3 worker.py \
-    --bootstrap-servers pandoras-box:31487 \
+    --bootstrap-servers 192.168.1.226:31487 \
     --game-binary ../liquidwar5-ai/src/liquidwar \
     --dat-path ../liquidwar5-ai/data/liquidwar.dat
 ```
@@ -121,7 +121,7 @@ Workers auto-detect CPU count. Override with `--workers N`. Workers auto-scale v
 
 ```bash
 python3 coordinator.py \
-    --bootstrap-servers pandoras-box:31487 \
+    --bootstrap-servers 192.168.1.226:31487 \
     --generations 50 --population 20 --games-per-eval 10
 ```
 
@@ -180,7 +180,7 @@ Or in auto mode to watch CPU players use the evolved params:
 
 ## Avro Schemas
 
-All Kafka messages use Avro serialization via the Confluent Schema Registry at `pandoras-box:30081`. Schemas are in `schemas/`:
+All Kafka messages use Avro serialization via the Confluent Schema Registry at `192.168.1.226:30081`. Schemas are in `schemas/`:
 
 | Schema | Topic | Description |
 |--------|-------|-------------|

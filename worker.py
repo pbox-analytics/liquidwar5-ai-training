@@ -8,8 +8,8 @@ to run games in parallel via a process pool.
 
 Usage:
     python3 worker.py \
-        --bootstrap-servers pandoras-box:31487 \
-        --schema-registry http://pandoras-box:30081 \
+        --bootstrap-servers 192.168.1.226:31487 \
+        --schema-registry http://192.168.1.226:30081 \
         --game-binary ../liquidwar5-ai/src/liquidwar \
         --dat-path ../liquidwar5-ai/data/liquidwar.dat
 """
@@ -189,11 +189,11 @@ def main():
         description="Game simulation worker — consumes Avro jobs from Kafka"
     )
     parser.add_argument(
-        "--bootstrap-servers", default="pandoras-box:31487",
+        "--bootstrap-servers", default="192.168.1.226:31487",
         help="Kafka bootstrap servers"
     )
     parser.add_argument(
-        "--schema-registry", default="http://pandoras-box:30081",
+        "--schema-registry", default="http://192.168.1.226:30081",
         help="Schema Registry URL"
     )
     parser.add_argument(
