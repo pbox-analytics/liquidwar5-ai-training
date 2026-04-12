@@ -34,6 +34,7 @@ def run_batch(batch_size=256, num_teams=4, max_ticks=24000,
         num_teams=num_teams,
         fighters_per_team=fighters_per_team,
         device=device,
+        grad_iters=4,
     )
 
     state = engine.reset()
