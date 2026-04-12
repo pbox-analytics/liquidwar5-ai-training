@@ -61,10 +61,27 @@ def run_monitor(args):
     last_print = 0
     recent_games = []
 
+    # Get total messages from watermarks first
+    from confluent_kafka import TopicPartition as TP
+    raw_consumer = Consumer({
+        "bootstrap.servers": args.bootstrap_servers,
+        "group.id": f"lw5-watermark-{os.getpid()}",
+    })
+    try:
+        parts = raw_consumer.list_topics(
+            topic=TOPIC_RESULTS).topics[TOPIC_RESULTS].partitions
+        for pid in parts:
+            tp = TP(TOPIC_RESULTS, pid)
+            lo, hi = raw_consumer.get_watermark_offsets(tp, timeout=5)
+            total_games += (hi - lo)
+    except Exception:
+        pass
+    raw_consumer.close()
+
     print("=== Liquid War 5 Evolution Monitor ===")
     print(f"Kafka: {args.bootstrap_servers}")
     print(f"Schema Registry: {args.schema_registry}")
-    print(f"Reading from: {args.offset}")
+    print(f"Existing results: {total_games:,}")
     print()
 
     try:
@@ -157,9 +174,9 @@ def main():
         "--schema-registry", default="http://192.168.1.226:30081",
     )
     parser.add_argument(
-        "--offset", default="earliest",
+        "--offset", default="latest",
         choices=["earliest", "latest"],
-        help="Start from earliest (see all) or latest (live only)"
+        help="Start from latest (live, default) or earliest (replay all)"
     )
     args = parser.parse_args()
     run_monitor(args)
