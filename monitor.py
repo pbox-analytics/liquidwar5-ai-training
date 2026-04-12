@@ -13,6 +13,7 @@ Usage:
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -21,6 +22,34 @@ from confluent_kafka import Consumer, TopicPartition
 
 
 TOPIC_RESULTS = "ml.liquidwar5.game-results"
+
+MACHINES = [
+    ("PandoraStorm", None, 24),           # local
+    ("pandoratower", "wolfgang@pandoratower", 16),
+    ("pandoras-box", "pandora@pandoras-box", 32),
+    ("spark-wolf", "wolfgang@spark-wolf", 20),
+]
+
+
+def get_live_game_counts() -> list:
+    """Count running game processes on each machine via SSH."""
+    counts = []
+    for name, ssh_target, cores in MACHINES:
+        try:
+            if ssh_target is None:
+                result = subprocess.run(
+                    ["sh", "-c", "ps aux | grep './src/liquidwar' | grep -v grep | wc -l"],
+                    capture_output=True, text=True, timeout=5)
+            else:
+                result = subprocess.run(
+                    ["ssh", "-o", "ConnectTimeout=3", ssh_target,
+                     "ps aux | grep './src/liquidwar' | grep -v grep | wc -l"],
+                    capture_output=True, text=True, timeout=5)
+            games = int(result.stdout.strip()) if result.returncode == 0 else 0
+        except Exception:
+            games = 0
+        counts.append((name, games, cores))
+    return counts
 
 
 def get_kafka_stats(bootstrap_servers: str) -> dict:
@@ -128,7 +157,9 @@ def run_monitor(args):
     print()
 
     kafka_stats = get_kafka_stats(args.bootstrap_servers)
+    game_counts = get_live_game_counts()
     start_time = time.time()
+    last_game_check = time.time()
     prev_games = 0
 
     try:
@@ -169,12 +200,26 @@ def run_monitor(args):
                     print(f"    {k:20s}  {v}")
                 print()
 
+            print(f"  Live games:")
+            total_games_live = 0
+            for name, games, cores in game_counts:
+                bar = "#" * min(games, 40)
+                total_games_live += games
+                status = "OK" if games <= cores else "OVER"
+                print(f"    {name:16s}  {games:>3} / {cores} cores  [{status}]  {bar}")
+            print(f"    {'TOTAL':16s}  {total_games_live:>3}")
+            print()
+
             print(f"  Kafka total messages: {kafka_stats['total_kafka_messages']:,}")
 
             sys.stdout.flush()
             time.sleep(5)
 
-            # Refresh kafka stats every 30 seconds
+            # Refresh live counts every 10 seconds, kafka every 30
+            now2 = time.time()
+            if now2 - last_game_check >= 10:
+                last_game_check = now2
+                game_counts = get_live_game_counts()
             if int(elapsed) % 30 == 0:
                 kafka_stats = get_kafka_stats(args.bootstrap_servers)
 
