@@ -156,7 +156,7 @@ def run_coordinator(args):
     run_id = time.strftime("%Y%m%d_%H%M%S")
     results_con, results_deser, results_key_deser = create_avro_consumer(
         args.bootstrap_servers, args.schema_registry, TOPIC_RESULTS,
-        f"lw5-coordinator-{run_id}")
+        f"lw5-coordinator-{run_id}", offset_reset="latest")
 
     global _log_file
     output_dir = Path(args.output) / run_id

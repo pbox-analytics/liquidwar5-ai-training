@@ -99,7 +99,8 @@ def create_avro_producer(bootstrap_servers: str,
 def create_avro_consumer(bootstrap_servers: str,
                          schema_registry_url: str,
                          topic: str,
-                         group_id: str) -> tuple:
+                         group_id: str,
+                         offset_reset: str = "earliest") -> tuple:
     """Create a Consumer and AvroDeserializer for a topic.
 
     Returns (consumer, deserializer, key_deserializer).
@@ -121,7 +122,7 @@ def create_avro_consumer(bootstrap_servers: str,
     consumer = Consumer({
         "bootstrap.servers": bootstrap_servers,
         "group.id": group_id,
-        "auto.offset.reset": "earliest",
+        "auto.offset.reset": offset_reset,
         "enable.auto.commit": True,
         "max.poll.interval.ms": 600000,
     })
