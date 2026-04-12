@@ -2,13 +2,18 @@
   "type": "record",
   "name": "AIParams",
   "namespace": "com.liquidwar5.ai",
-  "doc": "Tunable AI scoring parameters for opponent behavior",
+  "doc": "Tunable AI scoring parameters for opponent behavior (11 params per team)",
   "fields": [
-    {"name": "candidates",      "type": "int", "default": 10,  "doc": "Target candidates to evaluate per decision"},
-    {"name": "density_radius",  "type": "int", "default": 5,   "doc": "Enemy density search radius in grid cells"},
-    {"name": "density_weight",  "type": "int", "default": 50,  "doc": "Weight for enemy concentration in scoring"},
-    {"name": "health_weight",   "type": "int", "default": 100, "doc": "Divisor for health factor in scoring"},
-    {"name": "replan",          "type": "int", "default": 50,  "doc": "Ticks between forced path replanning"},
-    {"name": "retreat",         "type": "int", "default": 20,  "doc": "Retreat if lost more than 1/N fighters"}
+    {"name": "candidates",       "type": "int", "default": 10,  "doc": "Target candidates to evaluate per decision"},
+    {"name": "density_radius",   "type": "int", "default": 5,   "doc": "Enemy density search radius in grid cells"},
+    {"name": "density_weight",   "type": "int", "default": 50,  "doc": "Weight for enemy concentration in scoring"},
+    {"name": "health_weight",    "type": "int", "default": 100, "doc": "Divisor for health factor in scoring"},
+    {"name": "replan",           "type": "int", "default": 50,  "doc": "Ticks between forced path replanning"},
+    {"name": "retreat",          "type": "int", "default": 20,  "doc": "Retreat if lost more than 1/N fighters"},
+    {"name": "distance_weight",  "type": "int", "default": 10,  "doc": "Penalty per unit of distance to target (scaled /10)"},
+    {"name": "target_weakest",   "type": "int", "default": 0,   "doc": "Preference for attacking weaker teams (0-100)"},
+    {"name": "aggression",       "type": "int", "default": 50,  "doc": "Retreat duration control: 0=cautious, 100=never retreat"},
+    {"name": "frontline_bias",   "type": "int", "default": 0,   "doc": "Preference for targets near own fighters (0-100)"},
+    {"name": "cursor_momentum",  "type": "int", "default": 0,   "doc": "Preference for targets in current direction (0-100)"}
   ]
 }

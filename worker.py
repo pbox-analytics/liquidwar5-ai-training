@@ -45,10 +45,15 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 
 def run_game(game_binary: str, dat_path: str, params_dict: dict,
-             seed: int, num_teams: int = 0) -> dict:
-    """Run a single headless game. Returns result dict."""
+             seed: int, num_teams: int = 0,
+             team_params: dict = None) -> dict:
+    """Run a single headless game. Returns result dict.
+
+    If team_params is provided, it's a dict of {team_index: params_dict}
+    for per-team self-play. Otherwise uses params_dict for all teams.
+    """
     import random as rng
-    params = AIParams(**params_dict)
+    import tempfile
 
     if num_teams == 0:
         rng.seed(seed)
@@ -60,7 +65,21 @@ def run_game(game_binary: str, dat_path: str, params_dict: dict,
         "-headless",
         "-seed", str(seed),
         "-teams", str(num_teams),
-    ] + params.to_cli_args()
+    ]
+
+    params_file = None
+    if team_params:
+        params_file = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False)
+        for team_idx, tp in team_params.items():
+            p = AIParams(**tp)
+            for line in p.to_params_file_lines(int(team_idx)):
+                params_file.write(line + "\n")
+        params_file.close()
+        cmd += ["-ai-params-file", params_file.name]
+    else:
+        params = AIParams(**params_dict)
+        cmd += params.to_cli_args()
 
     start_ms = int(time.time() * 1000)
 
@@ -88,6 +107,10 @@ def run_game(game_binary: str, dat_path: str, params_dict: dict,
                 }
     except (subprocess.TimeoutExpired, Exception) as e:
         print(f"  Game failed (seed={seed}): {e}", file=sys.stderr)
+    finally:
+        if params_file:
+            import os
+            os.unlink(params_file.name)
 
     return {
         "winner": -1,

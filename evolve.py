@@ -44,13 +44,33 @@ from typing import List, Optional
 
 @dataclass
 class AIParams:
-    """A set of tunable AI parameters."""
+    """A set of tunable AI parameters (11 per team)."""
     candidates: int = 10
     density_radius: int = 5
     density_weight: int = 50
     health_weight: int = 100
     replan: int = 50
     retreat: int = 20
+    distance_weight: int = 10
+    target_weakest: int = 0
+    aggression: int = 50
+    frontline_bias: int = 0
+    cursor_momentum: int = 0
+
+    # (field_name, min, max) for mutation and random generation
+    PARAM_RANGES = [
+        ("candidates", 3, 30),
+        ("density_radius", 2, 15),
+        ("density_weight", 5, 500),
+        ("health_weight", 10, 500),
+        ("replan", 5, 200),
+        ("retreat", 5, 100),
+        ("distance_weight", 1, 100),
+        ("target_weakest", 0, 100),
+        ("aggression", 0, 100),
+        ("frontline_bias", 0, 100),
+        ("cursor_momentum", 0, 100),
+    ]
 
     def to_cli_args(self) -> List[str]:
         return [
@@ -62,6 +82,13 @@ class AIParams:
             "-ai-retreat", str(self.retreat),
         ]
 
+    def to_params_file_lines(self, team: int) -> List[str]:
+        """Generate per-team params file lines."""
+        lines = []
+        for name, _, _ in self.PARAM_RANGES:
+            lines.append(f"{name} {team} {getattr(self, name)}")
+        return lines
+
     def mutate(self, rate: float = 0.3) -> "AIParams":
         """Return a mutated copy of this parameter set."""
         def maybe_mutate(val, lo, hi):
@@ -70,38 +97,26 @@ class AIParams:
                 return max(lo, min(hi, val + delta))
             return val
 
-        return AIParams(
-            candidates=maybe_mutate(self.candidates, 3, 30),
-            density_radius=maybe_mutate(self.density_radius, 2, 15),
-            density_weight=maybe_mutate(self.density_weight, 5, 500),
-            health_weight=maybe_mutate(self.health_weight, 10, 500),
-            replan=maybe_mutate(self.replan, 5, 200),
-            retreat=maybe_mutate(self.retreat, 5, 100),
-        )
+        kwargs = {}
+        for name, lo, hi in self.PARAM_RANGES:
+            kwargs[name] = maybe_mutate(getattr(self, name), lo, hi)
+        return AIParams(**kwargs)
 
     @staticmethod
     def random() -> "AIParams":
         """Generate a random parameter set."""
-        return AIParams(
-            candidates=random.randint(3, 30),
-            density_radius=random.randint(2, 15),
-            density_weight=random.randint(5, 500),
-            health_weight=random.randint(10, 500),
-            replan=random.randint(5, 200),
-            retreat=random.randint(5, 100),
-        )
+        kwargs = {}
+        for name, lo, hi in AIParams.PARAM_RANGES:
+            kwargs[name] = random.randint(lo, hi)
+        return AIParams(**kwargs)
 
     @staticmethod
     def crossover(a: "AIParams", b: "AIParams") -> "AIParams":
         """Create a child by mixing two parents."""
-        return AIParams(
-            candidates=random.choice([a.candidates, b.candidates]),
-            density_radius=random.choice([a.density_radius, b.density_radius]),
-            density_weight=random.choice([a.density_weight, b.density_weight]),
-            health_weight=random.choice([a.health_weight, b.health_weight]),
-            replan=random.choice([a.replan, b.replan]),
-            retreat=random.choice([a.retreat, b.retreat]),
-        )
+        kwargs = {}
+        for name, _, _ in AIParams.PARAM_RANGES:
+            kwargs[name] = random.choice([getattr(a, name), getattr(b, name)])
+        return AIParams(**kwargs)
 
 
 @dataclass
