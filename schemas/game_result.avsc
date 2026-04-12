@@ -20,7 +20,8 @@
         {"name": "ticks",           "type": "int",              "doc": "Total game ticks elapsed"},
         {"name": "team_fighters",   "type": {"type": "array", "items": "int"}, "doc": "Fighter count per team at game end"},
         {"name": "total_fighters",  "type": "int",              "doc": "Sum of all fighters"},
-        {"name": "dominance",       "type": "double",           "doc": "Winning team's fighter fraction (fitness score)"}
+        {"name": "dominance",       "type": "double",           "doc": "Winning team's fighter fraction (fitness score)"},
+        {"name": "num_teams",       "type": "int",              "doc": "Number of teams in this game", "default": 6}
       ]
     }, "doc": "Simulation outcome"},
     {"name": "worker",        "type": "string", "doc": "Hostname of the worker that ran the game"},

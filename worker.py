@@ -45,14 +45,21 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 
 def run_game(game_binary: str, dat_path: str, params_dict: dict,
-             seed: int) -> dict:
+             seed: int, num_teams: int = 0) -> dict:
     """Run a single headless game. Returns result dict."""
+    import random as rng
     params = AIParams(**params_dict)
+
+    if num_teams == 0:
+        rng.seed(seed)
+        num_teams = rng.choice([2, 3, 4, 5, 6])
+
     cmd = [
         game_binary,
         "-dat", dat_path,
         "-headless",
         "-seed", str(seed),
+        "-teams", str(num_teams),
     ] + params.to_cli_args()
 
     start_ms = int(time.time() * 1000)
@@ -76,6 +83,7 @@ def run_game(game_binary: str, dat_path: str, params_dict: dict,
                     "team_fighters": fighters,
                     "total_fighters": total,
                     "dominance": dominance,
+                    "num_teams": num_teams,
                     "duration_ms": int(time.time() * 1000) - start_ms,
                 }
     except (subprocess.TimeoutExpired, Exception) as e:
@@ -87,6 +95,7 @@ def run_game(game_binary: str, dat_path: str, params_dict: dict,
         "team_fighters": [0, 0, 0, 0, 0, 0],
         "total_fighters": 0,
         "dominance": 0.0,
+        "num_teams": num_teams,
         "duration_ms": int(time.time() * 1000) - start_ms,
     }
 
@@ -108,6 +117,7 @@ def process_job(job: dict, game_binary: str, dat_path: str) -> dict:
             "team_fighters": sim["team_fighters"],
             "total_fighters": sim["total_fighters"],
             "dominance": sim["dominance"],
+            "num_teams": sim.get("num_teams", 6),
         },
         "worker": os.uname().nodename,
         "duration_ms": sim["duration_ms"],
