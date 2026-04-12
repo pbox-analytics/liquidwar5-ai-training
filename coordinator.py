@@ -6,7 +6,7 @@ the next generation.
 
 Usage:
     python3 coordinator.py \
-        --bootstrap-servers pandoratower.local:30092 \
+        --bootstrap-servers pandoratower.local:31487 \
         --schema-registry http://pandoratower.local:30081 \
         --generations 50 --population 20 --games-per-eval 10
 """
@@ -234,7 +234,7 @@ def main():
         description="Evolution coordinator — publishes jobs, collects results"
     )
     parser.add_argument(
-        "--bootstrap-servers", default="pandoratower.local:30092",
+        "--bootstrap-servers", default="pandoratower.local:31487",
         help="Kafka bootstrap servers"
     )
     parser.add_argument(

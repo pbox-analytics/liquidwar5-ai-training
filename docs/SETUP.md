@@ -7,7 +7,7 @@ This guide covers setting up all machines for the liquidwar5-ai distributed para
 ```
 ┌────────────────────────────────────────────────────────┐
 │                   Kafka Cluster (k3s)                  │
-│               pandoratower.local:30092                 │
+│               pandoratower.local:31487                 │
 │                                                        │
 │  Schema Registry: pandoratower.local:30081             │
 │  Topics: ml.liquidwar5.game-jobs                       │
@@ -41,7 +41,7 @@ This guide covers setting up all machines for the liquidwar5-ai distributed para
 - Python 3.10+
 - GCC, make, autoconf, automake
 - liballegro4-dev
-- Network access to pandoratower.local:30092 (Kafka) and :30081 (Schema Registry)
+- Network access to pandoratower.local:31487 (Kafka) and :30081 (Schema Registry)
 - SSH key access to GitHub (for cloning repos)
 
 ## Infrastructure (already running)
@@ -50,7 +50,7 @@ These are deployed on the k3s cluster and managed via ArgoCD/GitOps:
 
 | Service | Address | Repo |
 |---------|---------|------|
-| Kafka broker | pandoratower.local:30092 | pbox-analytics/pandoras-box-data-platform |
+| Kafka broker | pandoratower.local:31487 | pbox-analytics/pandoras-box-data-platform |
 | Schema Registry | pandoratower.local:30081 | pbox-analytics/pandoras-box-data-platform |
 | Kafka topics | Auto-created / ArgoCD | pbox-analytics/pandoras-box-data-acquisition |
 
@@ -112,7 +112,7 @@ curl -s http://pandoratower.local:30081/subjects
 # Quick Kafka test (optional)
 python3 -c "
 from confluent_kafka import Producer
-p = Producer({'bootstrap.servers': 'pandoratower.local:30092'})
+p = Producer({'bootstrap.servers': 'pandoratower.local:31487'})
 p.produce('ml.liquidwar5.game-jobs', b'test')
 p.flush()
 print('Kafka OK')
@@ -176,7 +176,7 @@ cd ~/repo/liquidwar5-ai-training
 
 # pandoratower (coordinator machine also runs a worker)
 python3 worker.py \
-    --bootstrap-servers pandoratower.local:30092 \
+    --bootstrap-servers pandoratower.local:31487 \
     --schema-registry http://pandoratower.local:30081 \
     --game-binary ../liquidwar5-ai/src/liquidwar \
     --dat-path ../liquidwar5-ai/data/liquidwar.dat \
@@ -184,7 +184,7 @@ python3 worker.py \
 
 # pandoras-box
 python3 worker.py \
-    --bootstrap-servers pandoratower.local:30092 \
+    --bootstrap-servers pandoratower.local:31487 \
     --schema-registry http://pandoratower.local:30081 \
     --game-binary ../liquidwar5-ai/src/liquidwar \
     --dat-path ../liquidwar5-ai/data/liquidwar.dat \
@@ -192,7 +192,7 @@ python3 worker.py \
 
 # dgx-spark
 python3 worker.py \
-    --bootstrap-servers pandoratower.local:30092 \
+    --bootstrap-servers pandoratower.local:31487 \
     --schema-registry http://pandoratower.local:30081 \
     --game-binary ../liquidwar5-ai/src/liquidwar \
     --dat-path ../liquidwar5-ai/data/liquidwar.dat \
@@ -200,7 +200,7 @@ python3 worker.py \
 
 # ryzen7
 python3 worker.py \
-    --bootstrap-servers pandoratower.local:30092 \
+    --bootstrap-servers pandoratower.local:31487 \
     --schema-registry http://pandoratower.local:30081 \
     --game-binary ../liquidwar5-ai/src/liquidwar \
     --dat-path ../liquidwar5-ai/data/liquidwar.dat \
@@ -213,7 +213,7 @@ python3 worker.py \
 cd ~/repo/liquidwar5-ai-training
 
 python3 coordinator.py \
-    --bootstrap-servers pandoratower.local:30092 \
+    --bootstrap-servers pandoratower.local:31487 \
     --schema-registry http://pandoratower.local:30081 \
     --generations 50 \
     --population 20 \
@@ -227,11 +227,11 @@ Use `nohup` or `tmux`/`screen` for long-running evolution:
 ```bash
 # With tmux
 tmux new -s worker
-python3 worker.py --bootstrap-servers pandoratower.local:30092 ...
+python3 worker.py --bootstrap-servers pandoratower.local:31487 ...
 # Ctrl-B, D to detach
 
 # With nohup
-nohup python3 worker.py --bootstrap-servers pandoratower.local:30092 ... > worker.log 2>&1 &
+nohup python3 worker.py --bootstrap-servers pandoratower.local:31487 ... > worker.log 2>&1 &
 ```
 
 ## Standalone mode (no Kafka)

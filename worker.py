@@ -8,7 +8,7 @@ to run games in parallel via a process pool.
 
 Usage:
     python3 worker.py \
-        --bootstrap-servers pandoratower.local:30092 \
+        --bootstrap-servers pandoratower.local:31487 \
         --schema-registry http://pandoratower.local:30081 \
         --game-binary ../liquidwar5-ai/src/liquidwar \
         --dat-path ../liquidwar5-ai/data/liquidwar.dat
@@ -189,7 +189,7 @@ def main():
         description="Game simulation worker — consumes Avro jobs from Kafka"
     )
     parser.add_argument(
-        "--bootstrap-servers", default="pandoratower.local:30092",
+        "--bootstrap-servers", default="pandoratower.local:31487",
         help="Kafka bootstrap servers"
     )
     parser.add_argument(

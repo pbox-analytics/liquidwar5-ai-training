@@ -18,7 +18,7 @@ Uses a genetic algorithm to evolve AI scoring parameters by running thousands of
               ┌────────────────────────────┐
               │  Kafka: ml.liquidwar5      │
               │       .game-jobs           │
-              │  (pandoratower.local:30092)│
+              │  (pandoratower.local:31487)│
               └────────────────────────────┘
                            │ consumed by worker group
               ┌────────────┼────────────┐
@@ -110,7 +110,7 @@ python3 evolve.py \
 
 ```bash
 python3 worker.py \
-    --bootstrap-servers pandoratower.local:30092 \
+    --bootstrap-servers pandoratower.local:31487 \
     --game-binary ../liquidwar5-ai/src/liquidwar \
     --dat-path ../liquidwar5-ai/data/liquidwar.dat
 ```
@@ -121,7 +121,7 @@ Workers auto-detect CPU count. Override with `--workers N`. Workers auto-scale v
 
 ```bash
 python3 coordinator.py \
-    --bootstrap-servers pandoratower.local:30092 \
+    --bootstrap-servers pandoratower.local:31487 \
     --generations 50 --population 20 --games-per-eval 10
 ```
 
