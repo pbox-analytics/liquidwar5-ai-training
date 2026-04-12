@@ -167,36 +167,39 @@ def run_worker(args):
 
     executor = ProcessPoolExecutor(max_workers=args.workers)
     games_completed = 0
+    pending_futures = {}  # future -> job_id
+    last_status = time.time()
 
     while running:
-        # Collect a batch of jobs
-        batch = []
-        for _ in range(args.batch_size):
+        # Continuously consume jobs and submit to pool
+        # as long as we have capacity
+        submitted = 0
+        while len(pending_futures) < args.workers * 2:
             key, value = consume_avro(jobs_con, jobs_deser,
-                                      jobs_key_deser, timeout=0.5)
+                                      jobs_key_deser, timeout=0.1)
             if value is None:
                 break
-            batch.append(value)
-
-        if not batch:
-            time.sleep(0.5)
-            continue
-
-        gen = batch[0].get("generation", "?")
-        print(f"  Processing batch of {len(batch)} jobs (gen={gen})")
-
-        # Submit jobs to process pool
-        futures = []
-        for job in batch:
             future = executor.submit(
-                process_job, job, args.game_binary, args.dat_path
+                process_job, value, args.game_binary, args.dat_path
             )
-            futures.append(future)
+            pending_futures[future] = value.get("job_id", "?")
+            submitted += 1
 
-        # Collect results and publish as Avro
-        for future in futures:
+        if submitted > 0:
+            gen = value.get("generation", "?") if value else "?"
+            print(f"  Submitted {submitted} jobs (gen={gen}), "
+                  f"{len(pending_futures)} in flight")
+
+        # Publish results as they complete (non-blocking check)
+        done = []
+        for future in pending_futures:
+            if future.done():
+                done.append(future)
+
+        for future in done:
+            job_id = pending_futures.pop(future)
             try:
-                result = future.result(timeout=120)
+                result = future.result(timeout=0)
                 produce_avro(
                     results_prod, results_ser, results_key_ser,
                     TOPIC_RESULTS,
@@ -205,12 +208,21 @@ def run_worker(args):
                 )
                 games_completed += 1
             except Exception as e:
-                print(f"  Job failed: {e}", file=sys.stderr)
+                print(f"  Job {job_id} failed: {e}", file=sys.stderr)
 
-        results_prod.flush()
+        if done:
+            results_prod.flush()
 
-        if games_completed % 10 == 0:
-            print(f"  [{hostname}] Total games completed: {games_completed}")
+        # Status update every 10 seconds
+        now = time.time()
+        if now - last_status >= 10:
+            last_status = now
+            print(f"  [{hostname}] completed: {games_completed}, "
+                  f"in flight: {len(pending_futures)}")
+
+        # Brief sleep if nothing to do
+        if not submitted and not done:
+            time.sleep(0.2)
 
     executor.shutdown(wait=False)
     jobs_con.close()
