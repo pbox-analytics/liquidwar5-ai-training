@@ -149,7 +149,7 @@ def consume_avro(consumer, deserializer, key_deserializer,
                  timeout: float = 1.0) -> tuple:
     """Consume and deserialize one Avro message.
 
-    Returns (key, value) or (None, None) if no message.
+    Returns (key, value) or (None, None) if no message or deserialization fails.
     """
     msg = consumer.poll(timeout)
     if msg is None:
@@ -157,9 +157,13 @@ def consume_avro(consumer, deserializer, key_deserializer,
     if msg.error():
         return None, None
 
-    key = key_deserializer(msg.key()) if msg.key() else None
-    value = deserializer(
-        msg.value(),
-        SerializationContext(msg.topic(), MessageField.VALUE),
-    )
-    return key, value
+    try:
+        key = key_deserializer(msg.key()) if msg.key() else None
+        value = deserializer(
+            msg.value(),
+            SerializationContext(msg.topic(), MessageField.VALUE),
+        )
+        return key, value
+    except Exception:
+        # Skip messages that weren't produced with Avro serializer
+        return None, None

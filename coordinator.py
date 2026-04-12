@@ -213,12 +213,13 @@ def run_coordinator(args):
 
     # Save best
     best_file = output_dir / "best_params.json"
-    with open(best_file, "w") as f:
-        json.dump({
-            "fitness": best_ever_fitness,
-            "params": asdict(best_ever),
-            "cli_args": " ".join(best_ever.to_cli_args()),
-        }, f, indent=2)
+    if best_ever:
+        with open(best_file, "w") as f:
+            json.dump({
+                "fitness": best_ever_fitness,
+                "params": asdict(best_ever),
+                "cli_args": " ".join(best_ever.to_cli_args()),
+            }, f, indent=2)
 
     print(f"Evolution complete!")
     print(f"Best fitness: {best_ever_fitness:.4f}")
