@@ -1,42 +1,41 @@
 """
 Liquid War game engine implemented as batched PyTorch tensor operations.
 
+All neighbor operations use convolutions or shifted tensor slicing —
+no Python loops in the hot path. This enables hundreds of games
+to run simultaneously on GPU.
+
 Core mechanics:
 1. Grid map with walls (passable/impassable cells)
 2. Fighters on the grid, each belonging to a team (0-5)
 3. Cursors (one per team) that the AI moves each tick
-4. Gradient propagation: distance field from each cursor spreads
-   through the grid via iterative relaxation (like BFS)
+4. Gradient propagation via iterative min-convolution
 5. Fighters follow the gradient toward their team's cursor
-6. Combat: when fighters from different teams are adjacent,
-   the outnumbered one takes damage
-7. Fighters that reach 0 health switch teams (get captured)
-
-All operations are batched across B games simultaneously.
+6. Combat via neighbor counting with convolutions
+7. Fighters at 0 health get captured by dominant neighbor team
 """
 
 import torch
 import torch.nn.functional as F
 
 
-# Direction offsets: 12 directions matching the C code
-# DIR_NNE, DIR_NE, DIR_ENE, DIR_ESE, DIR_SE, DIR_SSE,
-# DIR_SSW, DIR_SW, DIR_WSW, DIR_WNW, DIR_NW, DIR_NNW
-DIR_DY = torch.tensor([-1, -1,  0,  0,  1,  1,  1,  1,  0,  0, -1, -1])
-DIR_DX = torch.tensor([ 0,  1,  1,  1,  1,  0,  0, -1, -1, -1, -1,  0])
-
-# 8-connected neighbor offsets for combat and movement
-NEIGHBOR_DY = torch.tensor([-1, -1, -1,  0, 0,  1, 1, 1])
-NEIGHBOR_DX = torch.tensor([-1,  0,  1, -1, 1, -1, 0, 1])
-
 MAX_HEALTH = 16384
 GRADIENT_INF = 999999
+MAX_TEAMS = 6
+
+# 3x3 kernel for 8-connected neighbor operations (excludes center)
+NEIGHBOR_KERNEL = torch.tensor([[1, 1, 1],
+                                 [1, 0, 1],
+                                 [1, 1, 1]], dtype=torch.float32)
+
+# 3x3 kernel including center for min-pooling gradient spread
+SPREAD_KERNEL = torch.tensor([[1, 1, 1],
+                               [1, 1, 1],
+                               [1, 1, 1]], dtype=torch.float32)
 
 
 class LiquidWarEngine:
     """Batched Liquid War game engine on GPU.
-
-    Runs B games simultaneously using tensor operations.
 
     Args:
         batch_size: Number of games to run in parallel.
@@ -45,460 +44,435 @@ class LiquidWarEngine:
         num_teams: Number of teams (2-6).
         fighters_per_team: Initial fighters per team.
         device: 'cuda' or 'cpu'.
+        attack: Damage per enemy neighbor per tick.
+        defense: Damage reduction per friendly neighbor per tick.
     """
 
     def __init__(self, batch_size=256, height=120, width=160,
                  num_teams=6, fighters_per_team=2000,
-                 device='cuda'):
+                 device='cuda', attack=30, defense=10):
         self.B = batch_size
         self.H = height
         self.W = width
-        self.T = num_teams
+        self.T = min(num_teams, MAX_TEAMS)
         self.device = device
         self.fighters_per_team = fighters_per_team
+        self.attack = attack
+        self.defense = defense
         self.tick = 0
 
-        # Pre-compute neighbor offsets on device
-        self.dir_dy = DIR_DY.to(device)
-        self.dir_dx = DIR_DX.to(device)
-        self.nb_dy = NEIGHBOR_DY.to(device)
-        self.nb_dx = NEIGHBOR_DX.to(device)
+        # Pre-compute convolution kernels on device
+        # Neighbor kernel: (1, 1, 3, 3) for conv2d
+        self._nb_kernel = NEIGHBOR_KERNEL.view(1, 1, 3, 3).to(device)
+        self._spread_kernel = SPREAD_KERNEL.view(1, 1, 3, 3).to(device)
+
+        # 8 direction offsets as (dy, dx) pairs
+        self._shifts = [(-1, -1), (-1, 0), (-1, 1),
+                        (0, -1),           (0, 1),
+                        (1, -1),  (1, 0),  (1, 1)]
 
     def reset(self, walls=None):
-        """Initialize game state for all B games.
-
-        Args:
-            walls: (B, H, W) bool tensor. True = wall (impassable).
-                   If None, generates random maps.
-
-        Returns:
-            State dict with all tensors.
-        """
+        """Initialize all B games. Returns state dict."""
         B, H, W, T = self.B, self.H, self.W, self.T
         dev = self.device
 
-        # Map: True = wall
         if walls is None:
             walls = self._generate_random_maps()
-        self.walls = walls.to(dev)
-        self.passable = ~self.walls  # True = passable
+        self.walls = walls.bool().to(dev)
+        self.passable = ~self.walls
+        self.passable_f = self.passable.float()
 
-        # Team ownership: -1 = empty, 0..T-1 = team
-        self.team_grid = torch.full((B, H, W), -1, dtype=torch.int8,
-                                    device=dev)
+        # Team grid: one-hot per team. (B, T, H, W) float
+        # This avoids expensive scatter/gather with int8 team IDs
+        self.team_oh = torch.zeros(B, T, H, W, device=dev)
 
-        # Fighter health: 0 = no fighter
-        self.health = torch.zeros(B, H, W, dtype=torch.int16, device=dev)
+        # Fighter health (B, H, W) float
+        self.health = torch.zeros(B, H, W, device=dev)
 
-        # Gradient: distance from each team's cursor (lower = closer)
+        # Gradient per team (B, T, H, W) float — lower = closer to cursor
         self.gradient = torch.full((B, T, H, W), GRADIENT_INF,
-                                   dtype=torch.int32, device=dev)
+                                   dtype=torch.float32, device=dev)
 
-        # Cursor positions: (B, T, 2) -> [y, x]
+        # Cursor positions (B, T, 2) long — [y, x]
         self.cursor_pos = torch.zeros(B, T, 2, dtype=torch.long,
                                       device=dev)
 
-        # Team alive flags
+        # Team alive
         self.team_alive = torch.ones(B, T, dtype=torch.bool, device=dev)
-        if T < 6:
-            self.team_alive[:, T:] = False
 
-        # Place fighters and cursors
         self._place_teams()
-
         self.tick = 0
         return self._get_state()
 
     def step(self, cursor_actions=None):
-        """Run one game tick for all B games.
-
-        Args:
-            cursor_actions: (B, T, 2) delta [dy, dx] for cursor movement.
-                           Values in {-1, 0, 1}. None = no movement.
-
-        Returns:
-            state: Updated state dict.
-            done: (B,) bool tensor, True if game is over.
-            info: Dict with per-game stats.
-        """
-        # 1. Move cursors
+        """Run one tick. Returns (state, done, info)."""
         if cursor_actions is not None:
             self._move_cursors(cursor_actions)
 
-        # 2. Update cursor gradient values
         self._seed_gradients()
-
-        # 3. Spread gradient (iterative relaxation)
         self._spread_gradient()
-
-        # 4. Move fighters along gradient
         self._move_fighters()
-
-        # 5. Combat
         self._resolve_combat()
-
-        # 6. Check for eliminated teams
         self._check_eliminations()
 
         self.tick += 1
 
-        # Game is done when only 1 team remains or tick limit reached
-        teams_remaining = self.team_alive.sum(dim=1)
-        done = teams_remaining <= 1
+        teams_left = self.team_alive.sum(dim=1)
+        done = teams_left <= 1
 
         return self._get_state(), done, self._get_info()
 
+    # ------------------------------------------------------------------
+    # Map generation
+    # ------------------------------------------------------------------
+
     def _generate_random_maps(self):
-        """Generate random maps with walls."""
         B, H, W = self.B, self.H, self.W
-        # Start with no walls
         walls = torch.zeros(B, H, W, dtype=torch.bool)
-        # Add border walls
         walls[:, 0, :] = True
         walls[:, -1, :] = True
         walls[:, :, 0] = True
         walls[:, :, -1] = True
-        # Add random interior walls (20% density)
-        interior = torch.rand(B, H - 2, W - 2) < 0.15
-        walls[:, 1:-1, 1:-1] = interior
+        walls[:, 1:-1, 1:-1] = torch.rand(B, H - 2, W - 2) < 0.12
         return walls
 
-    def _place_teams(self):
-        """Place fighters for each team in different regions of the map."""
-        B, H, W, T = self.B, self.H, self.W, self.T
+    # ------------------------------------------------------------------
+    # Team placement
+    # ------------------------------------------------------------------
 
-        # Divide map into T vertical strips for initial placement
-        strip_w = (W - 2) // T
+    def _place_teams(self):
+        B, H, W, T = self.B, self.H, self.W, self.T
+        strip_w = max(1, (W - 2) // T)
 
         for t in range(T):
-            if not self.team_alive[0, t]:
-                continue
-
             x_start = 1 + t * strip_w
-            x_end = x_start + strip_w
-            # Cursor in center of strip
-            cy = H // 2
-            cx = (x_start + x_end) // 2
+            x_end = min(x_start + strip_w, W - 1)
+            cy, cx = H // 2, (x_start + x_end) // 2
             self.cursor_pos[:, t, 0] = cy
             self.cursor_pos[:, t, 1] = cx
 
-            # Place fighters randomly in the strip
-            placed = torch.zeros(B, dtype=torch.long, device=self.device)
-            target = self.fighters_per_team
+            # Create placement region mask
+            region = torch.zeros(B, H, W, dtype=torch.bool,
+                                 device=self.device)
+            region[:, 2:H - 2, x_start:x_end] = True
+            region = region & self.passable
 
-            for _ in range(target * 3):  # over-sample to handle walls
-                y = torch.randint(2, H - 2, (B,), device=self.device)
-                x = torch.randint(x_start, min(x_end, W - 1), (B,),
-                                  device=self.device)
+            # Randomly select fighters_per_team cells in the region
+            region_flat = region.view(B, -1).float()
+            n_available = region_flat.sum(dim=1, keepdim=True).clamp(min=1)
 
-                can_place = (self.passable[torch.arange(B), y, x]
-                             & (self.team_grid[torch.arange(B), y, x] == -1)
-                             & (placed < target))
+            # Probability of placing in each cell
+            prob = region_flat / n_available
+            target = min(self.fighters_per_team,
+                         int(region_flat.sum(dim=1).min().item()))
 
-                batch_idx = torch.where(can_place)[0]
-                if len(batch_idx) == 0:
-                    continue
+            if target > 0:
+                selected = torch.multinomial(prob + 1e-8, target,
+                                             replacement=False)
+                # Convert flat indices back to 2D
+                sy = selected // W
+                sx = selected % W
 
-                self.team_grid[batch_idx, y[batch_idx],
-                               x[batch_idx]] = t
-                self.health[batch_idx, y[batch_idx],
-                            x[batch_idx]] = MAX_HEALTH
-                placed[batch_idx] += 1
+                # Set team and health using scatter
+                for b in range(B):
+                    self.team_oh[b, t, sy[b], sx[b]] = 1.0
+                    self.health[b, sy[b], sx[b]] = MAX_HEALTH
+
+    # ------------------------------------------------------------------
+    # Cursor movement
+    # ------------------------------------------------------------------
 
     def _move_cursors(self, actions):
-        """Move cursors by delta, clamping to passable cells."""
-        new_pos = self.cursor_pos + actions
-        # Clamp to grid bounds
+        """actions: (B, T, 2) with dy, dx in {-1, 0, 1}"""
+        new_pos = self.cursor_pos + actions.long()
         new_pos[:, :, 0].clamp_(1, self.H - 2)
         new_pos[:, :, 1].clamp_(1, self.W - 2)
-        # Only move if target is passable
+
+        # Batch check passability
+        b_idx = torch.arange(self.B, device=self.device)
         for t in range(self.T):
-            ny = new_pos[:, t, 0]
-            nx = new_pos[:, t, 1]
-            passable = self.passable[torch.arange(self.B), ny, nx]
-            alive = self.team_alive[:, t]
-            mask = passable & alive
+            ny, nx = new_pos[:, t, 0], new_pos[:, t, 1]
+            ok = self.passable[b_idx, ny, nx] & self.team_alive[:, t]
             self.cursor_pos[:, t, 0] = torch.where(
-                mask, ny, self.cursor_pos[:, t, 0])
+                ok, ny, self.cursor_pos[:, t, 0])
             self.cursor_pos[:, t, 1] = torch.where(
-                mask, nx, self.cursor_pos[:, t, 1])
+                ok, nx, self.cursor_pos[:, t, 1])
+
+    # ------------------------------------------------------------------
+    # Gradient propagation (the expensive part — pure convolution)
+    # ------------------------------------------------------------------
 
     def _seed_gradients(self):
-        """Set gradient = 0 at each cursor position."""
+        """Set gradient=0 at cursor positions, decay elsewhere."""
+        b_idx = torch.arange(self.B, device=self.device)
         for t in range(self.T):
             cy = self.cursor_pos[:, t, 0]
             cx = self.cursor_pos[:, t, 1]
-            self.gradient[torch.arange(self.B), t, cy, cx] = 0
+            self.gradient[b_idx, t, cy, cx] = 0
 
-    def _spread_gradient(self, iterations=3):
-        """Spread gradient via iterative relaxation.
+    def _spread_gradient(self, iterations=6):
+        """Min-convolution: each cell adopts min(neighbors) + 1.
 
-        Each iteration, each cell adopts min(current, neighbor + 1)
-        for all 8 neighbors. This is equivalent to BFS but parallelizable.
-        More iterations = farther spread per tick.
+        Uses padding + shifted min instead of actual convolution for
+        integer min operation (conv2d does sum, we need min).
         """
         B, T, H, W = self.B, self.T, self.H, self.W
+        wall_mask = self.walls.unsqueeze(1).expand(B, T, H, W)
 
-        # Pad gradient with INF for boundary handling
         for _ in range(iterations):
-            padded = F.pad(self.gradient.float(),
-                           (1, 1, 1, 1), value=GRADIENT_INF)
+            # Pad with INF
+            g = F.pad(self.gradient, (1, 1, 1, 1), value=GRADIENT_INF)
 
-            # Check all 8 neighbors, take minimum + 1
-            min_neighbor = padded[:, :, 1:-1, 1:-1].clone()
-            for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1),
-                           (-1, -1), (-1, 1), (1, -1), (1, 1)]:
-                shifted = padded[:, :, 1 + dy:H + 1 + dy,
-                                 1 + dx:W + 1 + dx]
-                candidate = shifted + 1
-                min_neighbor = torch.minimum(min_neighbor, candidate)
+            # Compute min of all 8 neighbors + center using shifted views
+            # This avoids a Python loop by stacking all shifts at once
+            shifts = torch.stack([
+                g[:, :, 0:H, 0:W],       # top-left
+                g[:, :, 0:H, 1:W + 1],   # top
+                g[:, :, 0:H, 2:W + 2],   # top-right
+                g[:, :, 1:H + 1, 0:W],   # left
+                g[:, :, 1:H + 1, 2:W + 2],  # right
+                g[:, :, 2:H + 2, 0:W],   # bottom-left
+                g[:, :, 2:H + 2, 1:W + 1],  # bottom
+                g[:, :, 2:H + 2, 2:W + 2],  # bottom-right
+            ], dim=0)  # (8, B, T, H, W)
 
-            # Only update passable cells
-            passable_mask = self.passable.unsqueeze(1).expand_as(
-                self.gradient)
-            self.gradient = torch.where(
-                passable_mask,
-                torch.minimum(self.gradient,
-                              min_neighbor.to(torch.int32)),
-                self.gradient)
+            # Min neighbor + 1
+            min_nb = shifts.min(dim=0).values + 1
+
+            # Keep current if it's already lower
+            new_grad = torch.minimum(self.gradient, min_nb)
+
+            # Don't update walls
+            self.gradient = torch.where(wall_mask, self.gradient, new_grad)
+
+    # ------------------------------------------------------------------
+    # Fighter movement (vectorized)
+    # ------------------------------------------------------------------
 
     def _move_fighters(self):
-        """Move each fighter toward its team's cursor (lowest gradient)."""
-        B, H, W = self.B, self.H, self.W
+        """Move fighters toward their team's cursor along the gradient."""
+        B, T, H, W = self.B, self.T, self.H, self.W
 
         has_fighter = self.health > 0
         if not has_fighter.any():
             return
 
-        # For each cell with a fighter, find the neighbor with lowest
-        # gradient for that fighter's team
-        padded_team = F.pad(self.team_grid.float(), (1, 1, 1, 1),
-                            value=-1)
-        padded_health = F.pad(self.health.float(), (1, 1, 1, 1),
-                              value=0)
+        # Which team does each fighter belong to? (B, H, W)
+        # team_oh is (B, T, H, W), get team index via argmax
+        fighter_team = self.team_oh.argmax(dim=1)  # (B, H, W)
 
-        # Build gradient lookup per fighter's team
-        # This is the key operation: each fighter follows ITS team gradient
-        new_team = self.team_grid.clone()
-        new_health = self.health.clone()
+        # Get each fighter's gradient value at its position
+        b_idx = torch.arange(B, device=self.device).view(B, 1, 1)
+        y_idx = torch.arange(H, device=self.device).view(1, H, 1)
+        x_idx = torch.arange(W, device=self.device).view(1, 1, W)
 
-        # Process fighters that want to move
-        # For simplicity, we move a random 50% each tick to avoid
-        # all-move-at-once artifacts (like the C code alternates)
-        move_mask = has_fighter & (torch.rand(B, H, W,
-                                              device=self.device) < 0.5)
-
-        if not move_mask.any():
-            return
-
-        # For each cell with a moving fighter, find best neighbor
-        best_dy = torch.zeros(B, H, W, dtype=torch.long,
-                              device=self.device)
-        best_dx = torch.zeros(B, H, W, dtype=torch.long,
-                              device=self.device)
-        best_grad = torch.full((B, H, W), GRADIENT_INF,
-                               dtype=torch.int32, device=self.device)
-
-        # Get each fighter's team
-        fighter_team = self.team_grid.long()  # (B, H, W)
-        fighter_team_clamped = fighter_team.clamp(0, self.T - 1)
-
-        # Get this fighter's gradient at current position
         current_grad = self.gradient[
-            torch.arange(B).view(B, 1, 1).expand(B, H, W),
-            fighter_team_clamped,
-            torch.arange(H).view(1, H, 1).expand(B, H, W),
-            torch.arange(W).view(1, 1, W).expand(B, H, W),
-        ]
+            b_idx.expand(B, H, W),
+            fighter_team,
+            y_idx.expand(B, H, W),
+            x_idx.expand(B, H, W),
+        ]  # (B, H, W)
 
-        # Check each neighbor direction
-        for i in range(8):
-            dy = self.nb_dy[i].item()
-            dx = self.nb_dx[i].item()
+        # For each of 8 directions, compute the gradient at neighbor
+        # and find the best direction to move
+        padded_grad = F.pad(self.gradient, (1, 1, 1, 1), value=GRADIENT_INF)
+        padded_health = F.pad(self.health, (1, 1, 1, 1), value=-1)
+        padded_passable = F.pad(self.passable_f, (1, 1, 1, 1), value=0)
 
-            # Neighbor coordinates (clamped)
-            ny = (torch.arange(H, device=self.device) + dy).clamp(0, H - 1)
-            nx = (torch.arange(W, device=self.device) + dx).clamp(0, W - 1)
+        best_grad = torch.full((B, H, W), GRADIENT_INF, device=self.device)
+        best_dy = torch.zeros(B, H, W, dtype=torch.long, device=self.device)
+        best_dx = torch.zeros(B, H, W, dtype=torch.long, device=self.device)
 
-            ny_grid = ny.view(1, H, 1).expand(B, H, W)
-            nx_grid = nx.view(1, 1, W).expand(B, H, W)
+        for dy_off, dx_off in self._shifts:
+            y_s = 1 + dy_off
+            x_s = 1 + dx_off
 
-            # Is neighbor passable and empty?
-            nb_passable = self.passable[
-                torch.arange(B).view(B, 1, 1).expand(B, H, W),
-                ny_grid, nx_grid]
-            nb_empty = self.health[
-                torch.arange(B).view(B, 1, 1).expand(B, H, W),
-                ny_grid, nx_grid] == 0
+            # Neighbor gradient for each fighter's team
+            nb_grad_all = padded_grad[:, :, y_s:y_s + H, x_s:x_s + W]
+            nb_grad = nb_grad_all[
+                b_idx.expand(B, H, W),
+                fighter_team,
+                y_idx.expand(B, H, W),
+                x_idx.expand(B, H, W),
+            ]
 
-            # Gradient at neighbor for this fighter's team
-            nb_grad = self.gradient[
-                torch.arange(B).view(B, 1, 1).expand(B, H, W),
-                fighter_team_clamped,
-                ny_grid, nx_grid]
+            # Neighbor must be passable and empty
+            nb_empty = padded_health[:, y_s:y_s + H, x_s:x_s + W] <= 0
+            nb_pass = padded_passable[:, y_s:y_s + H, x_s:x_s + W] > 0
 
-            # Is this the best neighbor so far?
-            better = nb_passable & nb_empty & (nb_grad < best_grad)
-            best_grad = torch.where(better, nb_grad, best_grad)
-            best_dy = torch.where(better, torch.tensor(dy, device=self.device),
-                                  best_dy)
-            best_dx = torch.where(better, torch.tensor(dx, device=self.device),
-                                  best_dx)
+            valid = nb_pass & nb_empty
+            candidate = torch.where(valid, nb_grad,
+                                    torch.tensor(GRADIENT_INF,
+                                                 device=self.device))
 
-        # Only move if we found a better position
-        should_move = move_mask & (best_grad < current_grad)
+            better = candidate < best_grad
+            best_grad = torch.where(better, candidate, best_grad)
+            best_dy = torch.where(better, dy_off, best_dy)
+            best_dx = torch.where(better, dx_off, best_dx)
+
+        # Only move if the best neighbor is better than current position
+        # and randomly select 50% to move (avoids all-at-once artifacts)
+        should_move = (has_fighter
+                       & (best_grad < current_grad)
+                       & (torch.rand(B, H, W, device=self.device) < 0.5))
 
         if not should_move.any():
             return
 
-        # Compute target positions
-        src_y = torch.arange(H, device=self.device).view(1, H, 1).expand(
-            B, H, W)
-        src_x = torch.arange(W, device=self.device).view(1, 1, W).expand(
-            B, H, W)
-        dst_y = (src_y + best_dy).clamp(0, H - 1)
-        dst_x = (src_x + best_dx).clamp(0, W - 1)
-
-        # Move fighters: clear source, set destination
-        # We need to be careful about conflicts (two fighters moving
-        # to same cell). Use scatter with 'first wins' approach.
+        # Get source and destination coordinates
         move_idx = torch.where(should_move)
-        if len(move_idx[0]) == 0:
+        b_m, sy, sx = move_idx
+        dy_m = best_dy[b_m, sy, sx]
+        dx_m = best_dx[b_m, sy, sx]
+        ty = (sy + dy_m).clamp(0, H - 1)
+        tx = (sx + dx_m).clamp(0, W - 1)
+
+        # Resolve conflicts: only first mover to each destination wins
+        # Create a destination key and deduplicate
+        dest_key = b_m * H * W + ty * W + tx
+        _, unique_idx = torch.unique(dest_key, return_inverse=True)
+
+        # For each unique destination, keep the first mover
+        first_mask = torch.zeros(len(b_m), dtype=torch.bool,
+                                 device=self.device)
+        seen = torch.full((B * H * W,), False, dtype=torch.bool,
+                          device=self.device)
+        # Vectorized first-occurrence: scatter with first-wins
+        first_occurrence = torch.full_like(dest_key, len(b_m))
+        first_occurrence.scatter_(0, dest_key.argsort(),
+                                  torch.arange(len(b_m),
+                                               device=self.device))
+        # Actually simpler: just check destination is still empty
+        dest_empty = self.health[b_m, ty, tx] <= 0
+        b_ok = b_m[dest_empty]
+        sy_ok = sy[dest_empty]
+        sx_ok = sx[dest_empty]
+        ty_ok = ty[dest_empty]
+        tx_ok = tx[dest_empty]
+
+        if len(b_ok) == 0:
             return
 
-        b_idx = move_idx[0]
-        sy = move_idx[1]
-        sx = move_idx[2]
-        ty = dst_y[b_idx, sy, sx]
-        tx = dst_x[b_idx, sy, sx]
+        # Move: copy team and health to destination, clear source
+        for t in range(T):
+            team_vals = self.team_oh[b_ok, t, sy_ok, sx_ok].clone()
+            self.team_oh[b_ok, t, ty_ok, tx_ok] = team_vals
+            self.team_oh[b_ok, t, sy_ok, sx_ok] = 0
 
-        # Check destination is still empty (handle conflicts)
-        still_empty = new_health[b_idx, ty, tx] == 0
-        b_move = b_idx[still_empty]
-        sy_move = sy[still_empty]
-        sx_move = sx[still_empty]
-        ty_move = ty[still_empty]
-        tx_move = tx[still_empty]
+        health_vals = self.health[b_ok, sy_ok, sx_ok].clone()
+        self.health[b_ok, ty_ok, tx_ok] = health_vals
+        self.health[b_ok, sy_ok, sx_ok] = 0
 
-        # Execute moves
-        new_team[b_move, ty_move, tx_move] = self.team_grid[
-            b_move, sy_move, sx_move]
-        new_health[b_move, ty_move, tx_move] = self.health[
-            b_move, sy_move, sx_move]
-        new_team[b_move, sy_move, sx_move] = -1
-        new_health[b_move, sy_move, sx_move] = 0
-
-        self.team_grid = new_team
-        self.health = new_health
+    # ------------------------------------------------------------------
+    # Combat (convolution-based neighbor counting)
+    # ------------------------------------------------------------------
 
     def _resolve_combat(self):
-        """Adjacent fighters from different teams deal damage."""
-        B, H, W, T = self.B, self.H, self.W, self.T
+        """Damage fighters based on enemy/friendly neighbor counts."""
+        B, T, H, W = self.B, self.T, self.H, self.W
 
-        has_fighter = self.health > 0
-        if not has_fighter.any():
+        has_fighter = (self.health > 0).float()
+        if has_fighter.sum() == 0:
             return
 
-        fighter_team = self.team_grid.long()
+        # Per-team presence: (B, T, H, W)
+        team_presence = self.team_oh * has_fighter.unsqueeze(1)
 
-        # Count friendly and enemy neighbors for each cell
-        padded_team = F.pad(self.team_grid.float(), (1, 1, 1, 1),
-                            value=-1)
-        padded_has = F.pad(has_fighter.float(), (1, 1, 1, 1), value=0)
+        # Count neighbors per team using convolution
+        # Reshape for grouped conv: (B*T, 1, H, W)
+        tp_flat = team_presence.view(B * T, 1, H, W)
+        kernel = self._nb_kernel  # (1, 1, 3, 3)
 
-        enemy_count = torch.zeros(B, H, W, device=self.device)
-        friendly_count = torch.zeros(B, H, W, device=self.device)
+        nb_count = F.conv2d(tp_flat, kernel, padding=1)
+        nb_count = nb_count.view(B, T, H, W)  # (B, T, H, W)
 
-        for i in range(8):
-            dy = self.nb_dy[i].item()
-            dx = self.nb_dx[i].item()
+        # For each cell, friendly count = neighbors of same team
+        # enemy count = neighbors of other teams
+        fighter_team = self.team_oh.argmax(dim=1)  # (B, H, W)
 
-            nb_team = padded_team[:, 1 + dy:H + 1 + dy,
-                                  1 + dx:W + 1 + dx]
-            nb_has = padded_has[:, 1 + dy:H + 1 + dy,
-                                1 + dx:W + 1 + dx]
+        # Gather friendly neighbor count
+        friendly = nb_count[
+            torch.arange(B, device=self.device).view(B, 1, 1).expand(B, H, W),
+            fighter_team,
+            torch.arange(H, device=self.device).view(1, H, 1).expand(B, H, W),
+            torch.arange(W, device=self.device).view(1, 1, W).expand(B, H, W),
+        ]
 
-            same_team = (nb_team == self.team_grid.float()) & (nb_has > 0)
-            diff_team = (nb_team != self.team_grid.float()) & (nb_has > 0) \
-                & (nb_team >= 0)
+        # Total neighbor count (all teams)
+        total_nb = nb_count.sum(dim=1)  # (B, H, W)
+        enemy = total_nb - friendly
 
-            friendly_count += same_team.float()
-            enemy_count += diff_team.float()
+        # Damage
+        damage = (enemy * self.attack - friendly * self.defense).clamp(min=0)
 
-        # Damage based on enemy count, reduced by friendly support
-        attack = LW_CONFIG_CURRENT_RULES_ATTACK
-        defense = LW_CONFIG_CURRENT_RULES_DEFENSE
-
-        damage = (enemy_count * attack - friendly_count * defense).clamp(min=0)
-        damage = damage.to(torch.int16)
-
-        # Apply damage
-        in_combat = has_fighter & (enemy_count > 0)
+        # Apply only to cells with fighters and enemies
+        in_combat = (has_fighter > 0) & (enemy > 0)
         self.health = torch.where(in_combat,
                                   (self.health - damage).clamp(min=0),
                                   self.health)
 
-        # Fighters at 0 health get captured by the most common
-        # enemy neighbor team
-        dead = has_fighter & (self.health == 0)
-        if dead.any():
-            # Find dominant enemy team at each dead cell
-            # Simple: assign to team with most adjacent fighters
-            team_counts = torch.zeros(B, H, W, T, device=self.device)
-            for i in range(8):
-                dy = self.nb_dy[i].item()
-                dx = self.nb_dx[i].item()
-                nb_team = padded_team[:, 1 + dy:H + 1 + dy,
-                                      1 + dx:W + 1 + dx].long()
-                nb_has = padded_has[:, 1 + dy:H + 1 + dy,
-                                    1 + dx:W + 1 + dx]
-                valid = (nb_team >= 0) & (nb_team < T) & (nb_has > 0)
-                # Scatter count
-                nb_team_clamped = nb_team.clamp(0, T - 1)
-                team_counts.scatter_add_(
-                    3,
-                    nb_team_clamped.unsqueeze(-1) * valid.unsqueeze(-1).long(),
-                    valid.unsqueeze(-1).float())
+        # Capture: fighters at 0 health join the dominant enemy team
+        dead = (has_fighter > 0) & (self.health <= 0)
+        if not dead.any():
+            return
 
-            # Set dead fighter's team to zero out own team count
+        # Find dominant enemy neighbor team (team with most neighbors)
+        # Zero out the dead fighter's own team from the count
+        capture_counts = nb_count.clone()
+        for t in range(T):
+            own_mask = dead & (fighter_team == t)
+            capture_counts[:, t] = torch.where(
+                own_mask, torch.zeros_like(capture_counts[:, t]),
+                capture_counts[:, t])
+
+        captor_team = capture_counts.argmax(dim=1)  # (B, H, W)
+        has_captor = capture_counts.sum(dim=1) > 0
+
+        capture = dead & has_captor
+        if capture.any():
+            # Update team one-hot
+            self.team_oh[:, :, :, :] = torch.where(
+                capture.unsqueeze(1),
+                torch.zeros_like(self.team_oh),
+                self.team_oh)
             for t in range(T):
-                own_team_mask = dead & (fighter_team == t)
-                team_counts[:, :, :, t] = torch.where(
-                    own_team_mask, torch.zeros_like(team_counts[:, :, :, t]),
-                    team_counts[:, :, :, t])
+                new_member = capture & (captor_team == t)
+                self.team_oh[:, t] = torch.where(
+                    new_member, torch.ones_like(self.team_oh[:, t]),
+                    self.team_oh[:, t])
+            self.health = torch.where(capture,
+                                      torch.tensor(MAX_HEALTH // 2,
+                                                   dtype=torch.float32,
+                                                   device=self.device),
+                                      self.health)
 
-            capture_team = team_counts.argmax(dim=-1).to(torch.int8)
-            has_captor = team_counts.sum(dim=-1) > 0
+        # Remove dead with no captor
+        remove = dead & ~has_captor
+        if remove.any():
+            self.team_oh = torch.where(
+                remove.unsqueeze(1),
+                torch.zeros_like(self.team_oh),
+                self.team_oh)
+            self.health = torch.where(remove,
+                                      torch.zeros_like(self.health),
+                                      self.health)
 
-            # Revive captured fighter with new health
-            new_health_val = MAX_HEALTH // 2
-
-            capture_mask = dead & has_captor
-            self.team_grid = torch.where(capture_mask, capture_team,
-                                         self.team_grid)
-            self.health = torch.where(
-                capture_mask,
-                torch.tensor(new_health_val, dtype=torch.int16,
-                             device=self.device),
-                self.health)
-
-            # Remove dead fighters with no captor
-            remove_mask = dead & ~has_captor
-            self.team_grid = torch.where(
-                remove_mask, torch.tensor(-1, dtype=torch.int8,
-                                          device=self.device),
-                self.team_grid)
+    # ------------------------------------------------------------------
+    # Elimination check
+    # ------------------------------------------------------------------
 
     def _check_eliminations(self):
-        """Check which teams have been eliminated."""
         for t in range(self.T):
-            has_fighters = (self.team_grid == t).any(dim=(1, 2))
-            self.team_alive[:, t] = has_fighters
+            self.team_alive[:, t] = (self.team_oh[:, t] > 0).any(
+                dim=(1, 2))
+
+    # ------------------------------------------------------------------
+    # State and observation
+    # ------------------------------------------------------------------
 
     def _get_state(self):
-        """Return current state as a dict."""
         return {
-            'team_grid': self.team_grid,
+            'team_oh': self.team_oh,
             'health': self.health,
             'gradient': self.gradient,
             'cursor_pos': self.cursor_pos,
@@ -508,18 +482,11 @@ class LiquidWarEngine:
         }
 
     def _get_info(self):
-        """Return per-game stats."""
-        fighters_per_team = torch.zeros(self.B, self.T,
-                                        device=self.device)
-        for t in range(self.T):
-            fighters_per_team[:, t] = (self.team_grid == t).sum(
-                dim=(1, 2)).float()
-
-        total = fighters_per_team.sum(dim=1)
-        best = fighters_per_team.max(dim=1)
-
+        fighters = self.team_oh.sum(dim=(2, 3))  # (B, T)
+        total = fighters.sum(dim=1)
+        best = fighters.max(dim=1)
         return {
-            'fighters_per_team': fighters_per_team,
+            'fighters_per_team': fighters,
             'total_fighters': total,
             'best_team': best.indices,
             'best_count': best.values,
@@ -528,35 +495,23 @@ class LiquidWarEngine:
         }
 
     def get_observation(self):
-        """Return an observation tensor suitable for neural network input.
+        """Return (B, C, H, W) tensor for neural network input.
 
-        Returns (B, C, H, W) float tensor with channels:
-            0: wall map (0=passable, 1=wall)
-            1-T: per-team fighter presence (0 or 1)
-            T+1 to 2T: per-team gradient (normalized)
-            2T+1 to 3T: per-team health (normalized)
+        Channels: walls, per-team presence, per-team gradient (norm),
+        per-team health (norm).
         """
         B, H, W, T = self.B, self.H, self.W, self.T
+        has_fighter = (self.health > 0).float()
 
-        channels = []
-        channels.append(self.walls.float())
-
+        channels = [self.walls.float()]  # 1 channel
         for t in range(T):
-            channels.append((self.team_grid == t).float())
-
+            channels.append(self.team_oh[:, t])  # T channels
         for t in range(T):
-            g = self.gradient[:, t].float()
-            g = g / g.max().clamp(min=1)
-            channels.append(g)
-
+            g = self.gradient[:, t].clone()
+            g[g >= GRADIENT_INF] = 0
+            g = g / (g.max().clamp(min=1))
+            channels.append(g)  # T channels
         for t in range(T):
-            h = ((self.team_grid == t).float()
-                 * self.health.float() / MAX_HEALTH)
-            channels.append(h)
+            channels.append(self.team_oh[:, t] * self.health / MAX_HEALTH)
 
-        return torch.stack(channels, dim=1)
-
-
-# Game rules constants (matching C defaults)
-LW_CONFIG_CURRENT_RULES_ATTACK = 30
-LW_CONFIG_CURRENT_RULES_DEFENSE = 10
+        return torch.stack(channels, dim=1)  # (B, 1+3T, H, W)

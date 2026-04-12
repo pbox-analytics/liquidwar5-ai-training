@@ -41,27 +41,33 @@ def run_batch(batch_size=256, num_teams=4, max_ticks=24000,
     start = time.time()
     done = torch.zeros(batch_size, dtype=torch.bool, device=device)
 
-    # Simple AI: move cursor toward center of enemy mass
+    # Warmup
+    if device == 'cuda':
+        torch.cuda.synchronize()
+        start = time.time()
+
     for tick in range(max_ticks):
         if done.all():
             break
 
-        # AI: compute cursor actions
         actions = _simple_ai(engine)
-
         state, tick_done, info = engine.step(actions)
         done = done | tick_done
 
         if verbose and tick % 1000 == 0:
+            if device == 'cuda':
+                torch.cuda.synchronize()
             elapsed = time.time() - start
             games_done = done.sum().item()
             dom = info['dominance'].mean().item()
-            tps = (tick + 1) * batch_size / elapsed
+            tps = (tick + 1) * batch_size / elapsed if elapsed > 0 else 0
             print(f"  tick {tick:>5}/{max_ticks}  "
                   f"done={games_done}/{batch_size}  "
                   f"avg_dom={dom:.3f}  "
                   f"ticks/sec={tps:.0f}")
 
+    if device == 'cuda':
+        torch.cuda.synchronize()
     elapsed = time.time() - start
     info = engine._get_info()
 
@@ -88,31 +94,27 @@ def _simple_ai(engine):
     This is a placeholder — will be replaced by neural network.
     """
     B, T = engine.B, engine.T
+    H, W = engine.H, engine.W
     actions = torch.zeros(B, T, 2, dtype=torch.long, device=engine.device)
+
+    has_fighter = (engine.health > 0).float()  # (B, H, W)
+    y_coords = torch.arange(H, device=engine.device).float().view(1, H, 1)
+    x_coords = torch.arange(W, device=engine.device).float().view(1, 1, W)
 
     for t in range(T):
         alive = engine.team_alive[:, t]
         if not alive.any():
             continue
 
-        # Find centroid of enemy fighters
-        enemy_mask = (engine.team_grid >= 0) & (engine.team_grid != t)
-        if not enemy_mask.any():
-            continue
+        # Enemy = all fighters NOT on this team
+        own = engine.team_oh[:, t]  # (B, H, W)
+        enemy = has_fighter - own * has_fighter  # (B, H, W)
+        enemy = enemy.clamp(min=0)
 
-        # Compute enemy centroid per game
-        y_coords = torch.arange(engine.H, device=engine.device).float()
-        x_coords = torch.arange(engine.W, device=engine.device).float()
+        enemy_count = enemy.sum(dim=(1, 2)).clamp(min=1)
+        enemy_y = (enemy * y_coords).sum(dim=(1, 2)) / enemy_count
+        enemy_x = (enemy * x_coords).sum(dim=(1, 2)) / enemy_count
 
-        enemy_float = enemy_mask.float()
-        enemy_count = enemy_float.sum(dim=(1, 2)).clamp(min=1)
-
-        enemy_y = (enemy_float * y_coords.view(1, -1, 1)).sum(
-            dim=(1, 2)) / enemy_count
-        enemy_x = (enemy_float * x_coords.view(1, 1, -1)).sum(
-            dim=(1, 2)) / enemy_count
-
-        # Move cursor toward enemy centroid
         cy = engine.cursor_pos[:, t, 0].float()
         cx = engine.cursor_pos[:, t, 1].float()
 
