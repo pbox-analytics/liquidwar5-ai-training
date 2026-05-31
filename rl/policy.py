@@ -19,10 +19,10 @@ decoded to the (dy, dx) in {-1,0,1}^2 that engine.step expects.
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
-# 9 cursor moves -> (dy, dx). Index 8 = stay.
+# 9 cursor moves -> (dy, dx), row-major over {-1,0,1}^2. Index 4 = (0,0) = stay.
+# (Dead teams are forced to stay by zeroing dydx in act(), not by an index.)
 MOVE_DYDX = torch.tensor(
     [[-1, -1], [-1, 0], [-1, 1],
      [0, -1],  [0, 0],  [0, 1],
@@ -140,7 +140,7 @@ def act(policy, obs, num_teams, team_alive=None, deterministic=False):
 
     if team_alive is not None:
         dead = ~team_alive
-        # Dead teams: force "stay" (index 8 -> (0,0)) and zero logprob.
+        # Dead teams: force "stay" (zero the (dy,dx)) and zero logprob.
         dydx = torch.where(dead.unsqueeze(-1), torch.zeros_like(dydx), dydx)
         logprob = torch.where(dead, torch.zeros_like(logprob), logprob)
         value = torch.where(dead, torch.zeros_like(value), value)
