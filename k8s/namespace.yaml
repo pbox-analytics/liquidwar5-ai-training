@@ -1,0 +1,9 @@
+# Dedicated namespace for liquidwar training workloads (build jobs, cpu-worker,
+# gpu-evolve, coordinator). Kept separate from the data-platform/homer-ai
+# namespaces so liquidwar resources are easy to find and reason about.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: liquidwar
+  labels:
+    app.kubernetes.io/part-of: liquidwar5-ai

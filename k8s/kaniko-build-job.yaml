@@ -1,0 +1,84 @@
+# In-cluster Kaniko build for liquidwar-cpu-worker.
+#
+# An initContainer git-clones BOTH repos at pinned refs into a shared emptyDir
+# laid out as the combined context that docker/Dockerfile.cpu-worker.kaniko
+# expects:
+#   /workspace/            ← training repo (worker.py at root)
+#   /workspace/engine-src/ ← engine repo  (configure.ac, data/, src/)
+# Kaniko then builds that context and pushes to the in-cluster registry.
+#
+# Registry: pushed to the in-cluster service DNS (this Job runs inside the
+# cluster). The registry is self-signed + no-auth on a trusted LAN, so Kaniko
+# uses --skip-tls-verify and --insecure-pull; no pull/push secret needed.
+#
+# Tags are IMMUTABLE — bump IMAGE_TAG for every build (never reuse, no :latest).
+# To rebuild: edit the two *_REF values + IMAGE_TAG, then re-apply with a fresh
+# job name (Jobs are immutable once created; delete the old one or suffix -NN).
+#
+# amd64 first. For arm64 (swolf/air) later: a second Job with
+# nodeSelector kubernetes.io/arch: arm64 + a :<tag>-arm64 destination, then
+# `crane`/`docker manifest` to combine into a multi-arch manifest list.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: liquidwar-cpu-worker-build-0001   # bump suffix per build (Jobs are immutable)
+  namespace: liquidwar
+  labels:
+    app.kubernetes.io/name: liquidwar-cpu-worker
+    app.kubernetes.io/component: image-build
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 86400   # auto-clean a day after finish
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: liquidwar-cpu-worker
+        app.kubernetes.io/component: image-build
+    spec:
+      restartPolicy: Never
+      # amd64 only for this first image (engine compiles per-arch).
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      initContainers:
+        # Clone both repos at PINNED refs into the shared context dir.
+        # Pin to commit SHAs for reproducibility (branch names also work but
+        # are mutable). ENGINE_REF/TRAINING_REF below are the verified tips.
+        - name: clone
+          image: alpine/git:latest
+          env:
+            - name: TRAINING_REF
+              value: "8c962dc"                     # liquidwar5-ai-training @ gitops-containerize
+            - name: ENGINE_REF
+              value: "9923375"                     # liquidwar5-ai @ improve-opponent-ai (data/ committed)
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eux
+              cd /workspace
+              git clone https://github.com/pandora-wolf-meow/liquidwar5-ai-training.git .
+              git checkout "$TRAINING_REF"
+              git clone https://github.com/pandora-wolf-meow/liquidwar5-ai.git engine-src
+              git -C engine-src checkout "$ENGINE_REF"
+              echo "context ready:"; ls -la /workspace; ls -la /workspace/engine-src/data/liquidwar.dat
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+      containers:
+        - name: kaniko
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - "--context=dir:///workspace"
+            - "--dockerfile=/workspace/docker/Dockerfile.cpu-worker.kaniko"
+            - "--destination=registry.homer-ai.svc.cluster.local:5000/pbox/liquidwar-cpu-worker:0.1.0-amd64"
+            - "--skip-tls-verify"        # registry uses a self-signed cert
+            - "--insecure"               # push over the self-signed/no-auth registry
+            - "--insecure-pull"          # base images pulled fine over https, but be explicit
+            - "--cache=true"
+            - "--cache-repo=registry.homer-ai.svc.cluster.local:5000/pbox/liquidwar-cpu-worker-cache"
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+          resources:
+            requests: { cpu: "1", memory: 1Gi }
+            limits:   { cpu: "4", memory: 4Gi }
+      volumes:
+        - name: workspace
+          emptyDir: {}
