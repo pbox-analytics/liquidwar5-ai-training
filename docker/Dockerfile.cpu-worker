@@ -22,25 +22,47 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /engine
 COPY --from=engine . /engine
-# Clean first: the engine working tree may carry stale .o files from a
-# different toolchain/era (this exact issue broke an amd64 host). configure
-# regenerates the Makefiles; `make clean` guarantees a from-scratch build.
-RUN ./configure \
+# Regenerate `configure` from configure.ac: the committed configure script
+# (when present) is a stale generated artifact from the Allegro era and
+# still probes allegro-config; configure.ac itself is already migrated to
+# sdl2-config. `configure` is not git-tracked, so a fresh clone won't have
+# it at all. autoconf produces the current one either way.
+# Then `make clean` before building — the working tree may carry stale .o
+# files from a different toolchain (this broke an amd64 host).
+#
+# NOTE: we build ONLY the engine binary, NOT `make build_data`. The data-prep
+# utils in utils/ (liquidwarcol/map/tex) still call Allegro 4 and link against
+# SDL2 (half-migrated build system) so they cannot build liquidwar.dat in a
+# clean env. Instead we ship the prebuilt liquidwar.dat as a committed
+# artifact (COPY'd in the runtime stage). TODO: migrate utils/ to SDL2 and
+# restore from-source datafile generation.
+RUN autoconf \
+    && ./configure \
     && make -C src clean \
-    && make -C src liquidwar \
-    && make build_data
+    && make -C src liquidwar
 
 # ---- runtime stage: slim, headless ----
 FROM debian:bookworm-slim AS runtime
+# fonts-dejavu-core: the engine probes a hard-coded list of system TTF paths
+# (src/sdl_compat.c lw_font_search_paths[], first entry DejaVuSansMono) and
+# aborts asset loading if none exist. The slim base has no fonts, which made a
+# headless game exit 4 ("could not find a TTF font" → maps fail). This package
+# provides /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libsdl2-2.0-0 libsdl2-image-2.0-0 libsdl2-mixer-2.0-0 libsdl2-ttf-2.0-0 \
+      fonts-dejavu-core \
       xvfb \
       python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Engine binary + datafile from the build stage.
-COPY --from=build /engine/src/liquidwar      /opt/lw/bin/liquidwar
-COPY --from=build /engine/data/liquidwar.dat /opt/lw/data/liquidwar.dat
+# Engine binary from the build stage. The whole data/ tree comes straight from
+# the engine source: the SDL2 build loads maps/textures/fonts/etc. from loose
+# files under <data_dir>/{map,texture,font,...} (see src/disk_sdl.c), NOT just
+# from liquidwar.dat — so the full tree must be present at runtime.
+# NOTE: data/ must be committed in the engine repo for a Kaniko-from-git build
+# to have it (it was historically gitignored).
+COPY --from=build   /engine/src/liquidwar   /opt/lw/bin/liquidwar
+COPY --from=engine  data                    /opt/lw/data
 
 # Python trainer. Only the CPU-worker deps (no torch).
 WORKDIR /opt/training
