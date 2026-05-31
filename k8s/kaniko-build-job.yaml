@@ -21,7 +21,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: liquidwar-cpu-worker-build-0001   # bump suffix per build (Jobs are immutable)
+  name: liquidwar-cpu-worker-build-0002   # bump suffix per build (Jobs are immutable)
   namespace: liquidwar
   labels:
     app.kubernetes.io/name: liquidwar-cpu-worker
@@ -49,7 +49,7 @@ spec:
             - name: TRAINING_REF
               value: "e675eef"                     # liquidwar5-ai-training @ gitops-containerize (has the kaniko Dockerfile + k8s/)
             - name: ENGINE_REF
-              value: "9923375"                     # liquidwar5-ai @ improve-opponent-ai (data/ committed)
+              value: "a28a896"                     # liquidwar5-ai @ improve-opponent-ai (data/ committed)
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -73,7 +73,7 @@ spec:
           args:
             - "--context=dir:///workspace"
             - "--dockerfile=docker/Dockerfile.cpu-worker.kaniko"
-            - "--destination=registry.homer-ai.svc.cluster.local:5000/pbox/liquidwar-cpu-worker:0.1.0-amd64"
+            - "--destination=registry.homer-ai.svc.cluster.local:5000/pbox/liquidwar-cpu-worker:0.2.0-amd64"
             - "--skip-tls-verify"        # registry serves HTTPS with a self-signed cert
             - "--cache=true"
             - "--cache-repo=registry.homer-ai.svc.cluster.local:5000/pbox/liquidwar-cpu-worker-cache"
