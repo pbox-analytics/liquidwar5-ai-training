@@ -8,8 +8,8 @@
 # Kaniko then builds that context and pushes to the in-cluster registry.
 #
 # Registry: pushed to the in-cluster service DNS (this Job runs inside the
-# cluster). The registry is self-signed + no-auth on a trusted LAN, so Kaniko
-# uses --skip-tls-verify and --insecure-pull; no pull/push secret needed.
+# cluster). The registry serves HTTPS with a self-signed cert and no auth on a
+# trusted LAN, so Kaniko uses --skip-tls-verify; no pull/push secret needed.
 #
 # Tags are IMMUTABLE — bump IMAGE_TAG for every build (never reuse, no :latest).
 # To rebuild: edit the two *_REF values + IMAGE_TAG, then re-apply with a fresh
@@ -65,13 +65,16 @@ spec:
       containers:
         - name: kaniko
           image: gcr.io/kaniko-project/executor:latest
+          # --dockerfile is RELATIVE to the dir:// context root, so an absolute
+          # /workspace/... path fails ("error resolving dockerfile path"). Use a
+          # path relative to the context. The registry serves HTTPS with a
+          # self-signed cert, so --skip-tls-verify (TLS-ignore over HTTPS) is
+          # correct; --insecure would force plain HTTP and fail against it.
           args:
             - "--context=dir:///workspace"
-            - "--dockerfile=/workspace/docker/Dockerfile.cpu-worker.kaniko"
+            - "--dockerfile=docker/Dockerfile.cpu-worker.kaniko"
             - "--destination=registry.homer-ai.svc.cluster.local:5000/pbox/liquidwar-cpu-worker:0.1.0-amd64"
-            - "--skip-tls-verify"        # registry uses a self-signed cert
-            - "--insecure"               # push over the self-signed/no-auth registry
-            - "--insecure-pull"          # base images pulled fine over https, but be explicit
+            - "--skip-tls-verify"        # registry serves HTTPS with a self-signed cert
             - "--cache=true"
             - "--cache-repo=registry.homer-ai.svc.cluster.local:5000/pbox/liquidwar-cpu-worker-cache"
           volumeMounts:
