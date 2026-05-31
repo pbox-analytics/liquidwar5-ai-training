@@ -1,0 +1,57 @@
+# Liquid War 5 — headless CPU training worker
+#
+# Consumes Avro jobs from Kafka, runs headless liquidwar games, publishes
+# results back. Bundles the C engine (built clean from source) + the python
+# trainer. No torch — that's the GPU-evolve image.
+#
+# Two build contexts (engine source is a SEPARATE repo):
+#   docker buildx build \
+#     --build-context engine=../liquidwar5-ai \
+#     -f docker/Dockerfile.cpu-worker \
+#     -t pandoras-box.local:5000/pbox/liquidwar-cpu-worker:<ver> .
+# (main context = this training repo; `engine` = the liquidwar5-ai checkout)
+#
+# In-cluster builds (Kaniko) can't use --build-context; there the engine is
+# vendored via submodule/clone — see docs/GITOPS_DESIGN.md.
+
+# ---- build stage: compile the engine with the full toolchain ----
+FROM debian:bookworm-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential autoconf automake \
+      libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libsdl2-ttf-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /engine
+COPY --from=engine . /engine
+# Clean first: the engine working tree may carry stale .o files from a
+# different toolchain/era (this exact issue broke an amd64 host). configure
+# regenerates the Makefiles; `make clean` guarantees a from-scratch build.
+RUN ./configure \
+    && make -C src clean \
+    && make -C src liquidwar \
+    && make build_data
+
+# ---- runtime stage: slim, headless ----
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libsdl2-2.0-0 libsdl2-image-2.0-0 libsdl2-mixer-2.0-0 libsdl2-ttf-2.0-0 \
+      xvfb \
+      python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Engine binary + datafile from the build stage.
+COPY --from=build /engine/src/liquidwar      /opt/lw/bin/liquidwar
+COPY --from=build /engine/data/liquidwar.dat /opt/lw/data/liquidwar.dat
+
+# Python trainer. Only the CPU-worker deps (no torch).
+WORKDIR /opt/training
+COPY . /opt/training
+RUN pip install --no-cache-dir --break-system-packages \
+      'confluent-kafka[avro]>=2.3.0' 'fastavro>=1.9.0'
+
+ENV LW_BINARY=/opt/lw/bin/liquidwar \
+    LW_DAT=/opt/lw/data/liquidwar.dat
+
+# Kafka bootstrap + schema-registry are supplied at runtime (Helm values).
+ENTRYPOINT ["python3", "worker.py", \
+            "--game-binary", "/opt/lw/bin/liquidwar", \
+            "--dat-path", "/opt/lw/data/liquidwar.dat"]

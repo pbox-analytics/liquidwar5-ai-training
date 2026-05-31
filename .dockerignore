@@ -1,0 +1,10 @@
+# Keep the build context (this repo) lean — only worker.py + its python deps
+# are needed in the image; everything below is noise or large/irrelevant.
+.git
+__pycache__
+*.pyc
+results
+docs
+*.md
+uv.lock
+.venv
