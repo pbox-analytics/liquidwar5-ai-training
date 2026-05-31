@@ -33,7 +33,7 @@ spec:
           image: alpine/git:latest
           env:
             - name: TRAINING_REF
-              value: "REPLACE_WITH_COMMIT_SHA"   # bump to the commit that has rl/ + Dockerfile.gpu-trainer
+              value: "4ca9710"   # bump to the commit that has rl/ + Dockerfile.gpu-trainer
           command: ["/bin/sh", "-c"]
           args:
             - |
