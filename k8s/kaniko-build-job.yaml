@@ -47,7 +47,7 @@ spec:
           image: alpine/git:latest
           env:
             - name: TRAINING_REF
-              value: "8c962dc"                     # liquidwar5-ai-training @ gitops-containerize
+              value: "9159fb2"                     # liquidwar5-ai-training @ gitops-containerize (has the kaniko Dockerfile + k8s/)
             - name: ENGINE_REF
               value: "9923375"                     # liquidwar5-ai @ improve-opponent-ai (data/ committed)
           command: ["/bin/sh", "-c"]
