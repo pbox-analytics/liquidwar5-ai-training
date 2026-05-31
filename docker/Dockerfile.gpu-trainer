@@ -1,0 +1,50 @@
+# Liquid War 5 — GPU RL trainer (PPO self-play).
+#
+# Runs rl/train.py: a shared conv cursor-policy trained by PPO against the
+# batched GPU engine (simulator/engine.py). Pure torch — NO C engine, NO SDL,
+# NO Xvfb (unlike the cpu-worker image). Matches the fleet GPU stack:
+# nvidia/cuda 12.8 runtime + torch 2.7.0 on the cu128 wheel index (same pins
+# as project-homer's comfyui image, proven on these drivers).
+#
+# Single combined context = this training repo only (no engine repo needed):
+#   docker build -f docker/Dockerfile.gpu-trainer -t <reg>/pbox/liquidwar-gpu-trainer:<tag> .
+# In-cluster build: a Kaniko Job cloning just liquidwar5-ai-training.
+#
+# Deploy: GPU Deployment/Job requesting nvidia.com/gpu: 1, scheduled to a GPU
+# node (allocatable: ptow=1, storm=1, tank=2, swolf=1; pbox=0). amd64.
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
+
+ARG TORCH_VER=2.7.0
+ARG CUDA_INDEX=cu128
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3.11 python3.11-venv python3.11-dev python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Isolated venv on python3.11 (matches the comfyui image convention).
+RUN python3.11 -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+# torch (CUDA) first from the pinned wheel index, then the light deps.
+# numpy: torch warns without it (and some ops need it). confluent-kafka+fastavro
+# are for the OPTIONAL Kafka metrics publish (train runs fine without them, but
+# bake them in so --bootstrap-servers works).
+RUN pip install --no-cache-dir \
+      torch==${TORCH_VER} --index-url https://download.pytorch.org/whl/${CUDA_INDEX}
+RUN pip install --no-cache-dir \
+      numpy 'confluent-kafka[avro]>=2.3.0' 'fastavro>=1.9.0'
+
+# Trainer code: only what rl.train imports — simulator/, rl/, kafka_avro.py.
+WORKDIR /opt/training
+COPY simulator/ /opt/training/simulator/
+COPY rl/ /opt/training/rl/
+COPY kafka_avro.py /opt/training/kafka_avro.py
+
+# Defaults target a real GPU run; override via Helm args. Kafka off unless
+# --bootstrap-servers/--schema-registry are supplied.
+ENTRYPOINT ["python3", "-m", "rl.train"]
+CMD ["--device", "cuda", "--batch-size", "512", "--teams", "4", \
+     "--updates", "2000", "--steps", "128"]
