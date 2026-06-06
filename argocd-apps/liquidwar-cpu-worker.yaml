@@ -13,7 +13,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/pbox-analytics/liquidwar5-ai-training
-    targetRevision: master
+    targetRevision: main
     path: charts/liquidwar-cpu-worker
   destination:
     server: https://kubernetes.default.svc

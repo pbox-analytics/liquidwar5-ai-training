@@ -14,9 +14,9 @@ spec:
   source:
     # Self-hosted: the liquidwar deploy layer lives in this repo (full repo
     # independence from the data-platform / comfyui GitOps). targetRevision is
-    # the repo default branch — confirm master vs main before cut-over.
+    # the repo default branch — on `main` (renamed from master).
     repoURL: https://github.com/pbox-analytics/liquidwar5-ai-training
-    targetRevision: master
+    targetRevision: main
     path: charts/liquidwar-coordinator
     helm:
       valuesObject:
