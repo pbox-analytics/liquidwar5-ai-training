@@ -1,0 +1,6 @@
+apiVersion: v2
+name: liquidwar-cpu-worker
+description: Headless Liquid War 5 CPU training worker — consumes Avro game jobs from Kafka, runs headless games, publishes results.
+type: application
+version: 0.1.0
+appVersion: "0.1.0-amd64"

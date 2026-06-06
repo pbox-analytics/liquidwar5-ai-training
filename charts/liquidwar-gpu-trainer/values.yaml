@@ -1,0 +1,59 @@
+# Liquid War 5 GPU RL trainer (PPO self-play).
+#
+# Single GPU Deployment running rl/train.py. Requests one nvidia.com/gpu and
+# pins to a GPU node. Pure torch — no C engine, no Kafka required (metrics
+# publish is optional, off unless bootstrapServers/schemaRegistry are set).
+
+# Target namespace (injected by the ArgoCD app's helm.valuesObject).
+namespace: liquidwar
+
+nameOverride: ""
+
+image:
+  # Pull via pandoras-box.local:5000 — the ONLY registry host the nodes'
+  # registries.yaml trusts (the in-cluster svc DNS x509-fails on kubelet pull;
+  # same lesson as the cpu-worker chart).
+  repository: pandoras-box.local:5000/pbox/liquidwar-gpu-trainer
+  tag: "0.1.0-amd64"
+  pullPolicy: IfNotPresent
+
+# Exactly one trainer (single shared policy; self-play). Do not scale UP.
+# 2026-06-06: re-enabled for liquidwar development. ComfyUI was switched off
+# cluster-wide (gpus.yaml comfyui.replicas 0 on every card), so the 5090
+# contention that forced the 2026-06-04 unload is gone — the scheduler now has
+# free amd64 GPUs to place the trainer on.
+replicaCount: 1
+
+# Pin to ptow (pandoratower): its RTX 5090 (32 GB) is genuinely free now that
+# ComfyUI is off, and it's the only reliably-usable free GPU. NOT broad
+# arch:amd64 — the scheduler placed the pod on pandora-storm, whose GPU is
+# squatted by the NON-k8s ollama qwen-tagger (~21 GB; the device plugin still
+# advertises the card as free → the trainer CUDA-OOMs), and tank-a carries the
+# Xid-79 fall-off-bus fault. Revisit when ptow's GPU is wanted back for image-gen.
+nodeSelector:
+  kubernetes.io/hostname: pandoratower
+
+resources:
+  requests:
+    cpu: "2"
+    memory: 4Gi
+    nvidia.com/gpu: 1
+  limits:
+    cpu: "8"
+    memory: 16Gi
+    nvidia.com/gpu: 1
+
+config:
+  # PPO / env hyperparameters (passed as rl.train CLI args).
+  device: cuda
+  batchSize: 512
+  teams: 4
+  height: 80
+  width: 110
+  fighters: 500
+  steps: 128
+  updates: 5000
+  lr: "0.0003"
+  # Kafka metrics (optional). Empty = no publishing.
+  bootstrapServers: ""
+  schemaRegistry: ""

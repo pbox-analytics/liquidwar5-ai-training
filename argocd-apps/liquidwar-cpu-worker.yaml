@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: liquidwar-cpu-worker
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: liquidwar5-ai
+  annotations:
+    # After Kafka (wave 2) + schema-registry (wave 3) — the worker connects to
+    # both at startup, so order it later on a cold-cluster bootstrap.
+    argocd.argoproj.io/sync-wave: "7"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/pbox-analytics/liquidwar5-ai-training
+    targetRevision: master
+    path: charts/liquidwar-cpu-worker
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: liquidwar
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

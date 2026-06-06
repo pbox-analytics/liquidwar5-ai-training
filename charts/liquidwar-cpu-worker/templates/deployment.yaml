@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lwcpu.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ include "lwcpu.fullname" . }}
+    app.kubernetes.io/component: liquidwar-cpu-worker
+    app.kubernetes.io/part-of: liquidwar5-ai
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "lwcpu.fullname" . }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "lwcpu.fullname" . }}
+        app.kubernetes.io/component: liquidwar-cpu-worker
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # ndots:1 — same fix dispatcher-worker/oauth2-proxy use: the default
+      # ndots:5 makes FQDNs like my-cluster-kafka-bootstrap.kafka.svc.cluster.local
+      # hit the LAN search domain first and misresolve. Force >=1-dot names
+      # to be queried as-is.
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # worker.py is the ENTRYPOINT (with --game-binary/--dat-path baked
+          # in); these args append the Kafka wiring. worker.py is argparse-only
+          # (no env), so configuration MUST be passed as args, not env vars.
+          args:
+            - "--bootstrap-servers"
+            - {{ .Values.config.bootstrapServers | quote }}
+            - "--schema-registry"
+            - {{ .Values.config.schemaRegistry | quote }}
+            {{- with .Values.config.workers }}
+            - "--workers"
+            - {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.batchSize }}
+            - "--batch-size"
+            - {{ . | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

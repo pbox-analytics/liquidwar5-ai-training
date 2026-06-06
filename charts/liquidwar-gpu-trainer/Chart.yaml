@@ -1,0 +1,6 @@
+apiVersion: v2
+name: liquidwar-gpu-trainer
+description: Liquid War 5 GPU RL trainer — PPO self-play of a neural cursor policy against the batched GPU engine.
+type: application
+version: 0.1.0
+appVersion: "0.1.0-amd64"

@@ -1,0 +1,29 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: liquidwar-gpu-trainer
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: liquidwar5-ai
+  annotations:
+    # After Kafka (2) + schema-registry (3); same wave as the other lw apps.
+    argocd.argoproj.io/sync-wave: "7"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/pbox-analytics/liquidwar5-ai-training
+    targetRevision: master
+    path: charts/liquidwar-gpu-trainer
+    helm:
+      valuesObject:
+        namespace: liquidwar
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: liquidwar
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

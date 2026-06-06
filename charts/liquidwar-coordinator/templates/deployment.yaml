@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lwcoord.fullname" . }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ include "lwcoord.fullname" . }}
+    app.kubernetes.io/component: liquidwar-coordinator
+    app.kubernetes.io/part-of: liquidwar5-ai
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "lwcoord.fullname" . }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "lwcoord.fullname" . }}
+        app.kubernetes.io/component: liquidwar-coordinator
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # ndots:1 — same fix the cpu-worker/dispatcher-worker use so FQDNs like
+      # my-cluster-kafka-bootstrap.kafka.svc.cluster.local resolve as-is
+      # instead of hitting the LAN search domain first.
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
+      containers:
+        - name: coordinator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The image ENTRYPOINT is worker.py — override it to run the
+          # coordinator instead. WORKDIR is /opt/training so coordinator.py
+          # resolves. (k8s `command` overrides the Docker ENTRYPOINT.)
+          command:
+            - "python3"
+            - "coordinator.py"
+          args:
+            - "--bootstrap-servers"
+            - {{ .Values.config.bootstrapServers | quote }}
+            - "--schema-registry"
+            - {{ .Values.config.schemaRegistry | quote }}
+            - "--population"
+            - {{ .Values.config.population | quote }}
+            - "--generations"
+            - {{ .Values.config.generations | quote }}
+            - "--games-per-eval"
+            - {{ .Values.config.gamesPerEval | quote }}
+          env:
+            # GA progress logs are the whole point of the coordinator — make
+            # python flush stdout so `kubectl logs` shows them live.
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: liquidwar-coordinator
+description: Liquid War 5 training coordinator — runs the genetic algorithm, publishes game jobs to Kafka, consumes results, breeds the next generation.
+type: application
+version: 0.1.0
+appVersion: "0.1.0-amd64"

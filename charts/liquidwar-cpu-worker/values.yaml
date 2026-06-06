@@ -1,0 +1,58 @@
+# Liquid War 5 CPU training worker.
+#
+# Modeled on project-homer's dispatcher-worker (per-node worker pinned with
+# nodeSelector), but this worker consumes KAFKA (not redis) and is configured
+# via CLI ARGS appended to the image entrypoint (worker.py is argparse-only,
+# no env reads). It is CPU-only — no nvidia.com/gpu.
+#
+# Per-node deployment: set nameOverride + nodeSelector per release so multiple
+# workers (one per node) can coexist, the same pattern dispatcher-worker uses.
+
+# Target namespace (matches the ArgoCD app's destination.namespace).
+namespace: liquidwar
+
+# Override the resource name so multiple per-node releases coexist
+# (e.g. nameOverride: liquidwar-cpu-worker-pbox).
+nameOverride: ""
+
+image:
+  # Pull via pandoras-box.local:5000 — the ONLY registry host the nodes'
+  # /etc/rancher/k3s/registries.yaml trusts (insecure_skip_verify). Every
+  # existing in-cluster image (comfyui, dispatcher-submitter) uses this host.
+  # The in-cluster svc DNS registry.homer-ai.svc.cluster.local:5000 is NOT in
+  # the nodes' trust list, so pulling via it would x509-fail. (Kaniko PUSHED
+  # via the svc DNS, which is fine — that's a pod egress, not a kubelet pull.)
+  repository: pandoras-box.local:5000/pbox/liquidwar-cpu-worker
+  tag: "0.2.0-amd64"
+  pullPolicy: IfNotPresent
+
+# One worker process per node release.
+replicaCount: 1
+
+# Pin to a node/arch. The image is currently amd64-only (tag 0.1.0-amd64), so
+# constrain to amd64 nodes — otherwise the scheduler may place it on swolf
+# (arm64) and the container dies with "exec format error". Override per-node
+# with kubernetes.io/hostname once a multi-arch image exists.
+nodeSelector:
+  kubernetes.io/arch: amd64
+
+resources:
+  requests:
+    cpu: "2"
+    memory: 1Gi
+  limits:
+    # The worker fans games across CPUs via a process pool; give it room.
+    cpu: "8"
+    memory: 4Gi
+
+config:
+  # Kafka (Strimzi cluster, ns kafka) — in-cluster service DNS.
+  bootstrapServers: my-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092
+  schemaRegistry: http://schema-registry.kafka.svc.cluster.local:8081
+  # Parallel game workers. Empty = worker.py default (all CPUs). Pin it to
+  # stay within the resources.limits.cpu above (the pool is CPU-bound).
+  workers: ""
+  # Jobs fetched per poll. Empty = worker.py default (2x workers).
+  batchSize: ""
+  # The game binary + datafile are baked into the image entrypoint already
+  # (/opt/lw/bin/liquidwar, /opt/lw/data/liquidwar.dat); no need to set them.

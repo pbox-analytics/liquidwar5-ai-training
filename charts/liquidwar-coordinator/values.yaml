@@ -1,0 +1,54 @@
+# Liquid War 5 training coordinator.
+#
+# Runs the genetic-algorithm loop: publishes game-param jobs to Kafka
+# (ml.liquidwar5.game-jobs), consumes results (ml.liquidwar5.game-results),
+# breeds the next generation, writes evolution state (ml.liquidwar5.evolution-state).
+#
+# REUSES the cpu-worker image — coordinator.py is Kafka-only (no game binary,
+# verified: 0 references to the engine), and the image already bundles python3
+# + confluent-kafka[avro] + fastavro + all the training .py files at
+# /opt/training. We just OVERRIDE the entrypoint (which is worker.py) to run
+# coordinator.py instead. No separate image build needed.
+#
+# SINGLE replica only — one GA loop. Do NOT scale; multiple coordinators would
+# each breed independently and corrupt the shared evolution.
+
+# Target namespace (injected by the ArgoCD app's helm.valuesObject, same as the
+# cpu-worker chart).
+namespace: liquidwar
+
+nameOverride: ""
+
+image:
+  # Same image + host as the cpu-worker (see that chart's note on why the
+  # pull MUST use pandoras-box.local:5000, not the svc DNS).
+  repository: pandoras-box.local:5000/pbox/liquidwar-cpu-worker
+  tag: "0.2.0-amd64"
+  pullPolicy: IfNotPresent
+
+# Exactly one coordinator.
+replicaCount: 1
+
+# amd64-only image — pin to amd64 nodes (swolf is arm64).
+nodeSelector:
+  kubernetes.io/arch: amd64
+
+# The coordinator is orchestration (Kafka I/O + GA breeding), not CPU-heavy —
+# the actual games run on the workers. Keep it modest.
+resources:
+  requests:
+    cpu: "250m"
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+config:
+  # Kafka (Strimzi cluster, ns kafka) — in-cluster service DNS. These OVERRIDE
+  # coordinator.py's stale NodePort defaults (192.168.1.226:31487 / :30081).
+  bootstrapServers: my-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092
+  schemaRegistry: http://schema-registry.kafka.svc.cluster.local:8081
+  # Genetic-algorithm parameters (coordinator.py defaults shown).
+  population: 50
+  generations: 200
+  gamesPerEval: 10
