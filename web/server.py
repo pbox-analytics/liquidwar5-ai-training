@@ -36,7 +36,7 @@ from fastapi.staticfiles import StaticFiles
 
 from rl.eval import _heuristic_dydx
 from rl.policy import CursorPolicy, act
-from simulator.engine import LiquidWarEngine
+from simulator.engine import LiquidWarEngine, GRADIENT_INF
 
 CKPT_DIR = os.environ.get("LW_CKPT_DIR", "/opt/training/results")  # NFS mount
 DEVICE = os.environ.get("LW_PLAY_DEVICE", "cpu")
@@ -122,6 +122,20 @@ class GameSession:
         cell = oh.argmax(0).to(torch.int8)
         cell = torch.where(present, cell, torch.full_like(cell, -1))
         cell = torch.where(e.walls[0], torch.full_like(cell, -2), cell)  # -2 = wall
+        # Telemetry: gradient coverage (is the flood-fill complete?) and per-team
+        # army spread = mean fighter distance to its own cursor. Spread should
+        # FALL as the army flows in and packs around the cursor; a stuck/funneled
+        # army keeps a high spread — the quantitative read on "does it flow."
+        reach = int((~e.walls[0]).sum())
+        flood = int((e.gradient[0, 0] < GRADIENT_INF).sum())
+        spread = []
+        for t in range(e.T):
+            ys, xs = torch.where(oh[t] > 0)
+            if ys.numel():
+                cy, cx = e.cursor_pos[0, t].float()
+                spread.append(round(float(((ys.float() - cy) ** 2 + (xs.float() - cx) ** 2).sqrt().mean()), 1))
+            else:
+                spread.append(0.0)
         return {
             "tick": int(e.tick),
             "h": e.H, "w": e.W, "teams": e.T,
@@ -131,6 +145,8 @@ class GameSession:
             "fighters": oh.sum(dim=(1, 2)).long().tolist(),
             "alive": e.team_alive[0].tolist(),
             "done": self.done,
+            "flood_pct": round(100 * flood / max(reach, 1)),
+            "spread": spread,
         }
 
 
@@ -146,8 +162,12 @@ async def ws(sock: WebSocket) -> None:
         mode=q.get("mode", "play"),
         opponent=q.get("opponent", "latest"),
         teams=int(q.get("teams", "2")),
+        height=int(os.environ.get("LW_PLAY_H", "128")),     # finer grid + more,
+        width=int(os.environ.get("LW_PLAY_W", "192")),      # smaller units -> a
+        fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "2000")),  # fluid mass
     )
-    ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True, "reset": False}
+    ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True,
+                            "reset": False, "pulse": False}
 
     async def receiver() -> None:
         try:
@@ -155,6 +175,8 @@ async def ws(sock: WebSocket) -> None:
                 msg = await sock.receive_json()
                 if msg.get("reset"):
                     ctrl["reset"] = True
+                elif msg.get("pulse"):             # spacebar -> Pulse surge
+                    ctrl["pulse"] = True
                 elif "dir" in msg:                 # keyboard (arrows/WASD)
                     ctrl["dir"] = msg["dir"]
                 elif "target" in msg:              # mouse
@@ -165,20 +187,55 @@ async def ws(sock: WebSocket) -> None:
     async def game_loop() -> None:
         dt = 1.0 / TICK_HZ
         hold = 0                                       # ticks to linger on a finished game
+        fps = TICK_HZ                                  # achieved frame rate (EMA)
+        prev = None
+        logged = False                                 # one telemetry line per finished game
+        loop = asyncio.get_event_loop()
+        PULSE_DUR, PULSE_CD, PULSE_MULT = 18, 180, 6.0   # active ticks / cooldown ticks / dmg x
+        n = 0
+        pulse_start = -PULSE_CD                          # monotonic tick of the last Pulse
         while ctrl["alive"]:
             if ctrl["reset"]:
-                session.reset(); ctrl["reset"] = False; hold = 0
+                session.reset(); ctrl["reset"] = False; hold = 0; logged = False
+                pulse_start = -PULSE_CD; session.engine._surge = None   # clear pulse per game
             elif session.done:
                 hold += 1
                 if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
-                    session.reset(); hold = 0
+                    session.reset(); hold = 0; logged = False
+                    pulse_start = -PULSE_CD; session.engine._surge = None
             else:
+                if ctrl["pulse"]:                       # consume request; fire only if off cooldown
+                    if n - pulse_start >= PULSE_CD:
+                        pulse_start = n
+                    ctrl["pulse"] = False
+                if 0 <= n - pulse_start < PULSE_DUR:    # human team (0) surges
+                    s = torch.ones(1, session.engine.T, device=session.engine.device)
+                    s[0, 0] = PULSE_MULT
+                    session.engine._surge = s
+                else:
+                    session.engine._surge = None
                 session.step(ctrl["target"], ctrl["dir"])
+            st = session.state(); st["fps"] = round(fps, 1)
+            st["pulse_active"] = bool(0 <= n - pulse_start < PULSE_DUR)
+            st["pulse_cd"] = round(min(1.0, (n - pulse_start) / PULSE_CD), 2)  # 1.0 = ready
+            if session.done and not logged:
+                w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])
+                print(f"[telemetry] GAME END tick={st['tick']} winner=team{w} "
+                      f"counts={st['fighters']} spread={st['spread']} fps={fps:.1f}", flush=True)
+                logged = True
+            elif not session.done and st["tick"] and st["tick"] % 150 == 0:
+                print(f"[telemetry] tick={st['tick']} fps={fps:.1f} flood={st['flood_pct']}% "
+                      f"spread={st['spread']} counts={st['fighters']}", flush=True)
             try:
-                await sock.send_json(session.state())
+                await sock.send_json(st)
             except Exception:
                 break
             await asyncio.sleep(dt)
+            now = loop.time()
+            if prev is not None and now > prev:        # measure actual loop period
+                fps = 0.9 * fps + 0.1 / (now - prev)
+            prev = now
+            n += 1                                     # advance the pulse clock (was missing -> Pulse stuck on)
 
     await asyncio.gather(receiver(), game_loop())
 

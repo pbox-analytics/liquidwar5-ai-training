@@ -27,6 +27,10 @@
   <h1>Liquid War — <span id="modeLabel">play</span> vs <span id="opp" class="muted">…</span></h1>
   <div id="hud">
     <span class="pill">tick <b id="tick">0</b></span>
+    <span class="pill">fps <b id="fps">—</b></span>
+    <span class="pill">flood <b id="flood">—</b>%</span>
+    <span class="pill">spread <b id="spread">—</b></span>
+    <span class="pill" id="pulsePill">⚡ SPACE</span>
     <span class="pill" id="teams"></span>
     <select id="mode">
       <option value="play">Play (you = team 0)</option>
@@ -65,13 +69,37 @@ function render(st) {
     img.data[i*4]=r; img.data[i*4+1]=gg; img.data[i*4+2]=b; img.data[i*4+3]=255;
   }
   ctx.putImageData(img, 0, 0);
-  // cursors (draw a ring per team)
+  // cursors — glow + pulsate so they never get lost in the swarm. Player (team 0)
+  // is bigger, and flares yellow during a Pulse.
+  const beat = 1 + 0.3 * Math.sin(performance.now() / 170);
   st.cursors.forEach((c, t) => {
     if (!st.alive[t]) return;
-    ctx.strokeStyle = COLORS[t % COLORS.length]; ctx.lineWidth = 0.6;
-    ctx.beginPath(); ctx.arc(c[1] + .5, c[0] + .5, 1.6, 0, 7); ctx.stroke();
+    const col = COLORS[t % COLORS.length];
+    const cx = c[1] + .5, cy = c[0] + .5;
+    const surge = (t === 0 && st.pulse_active) ? 1.7 : 1;
+    const R = (t === 0 ? 3.6 : 2.7) * beat * surge;
+    ctx.globalAlpha = 0.22; ctx.strokeStyle = col; ctx.lineWidth = 2.6;
+    ctx.beginPath(); ctx.arc(cx, cy, R * 1.45, 0, 7); ctx.stroke();      // soft glow halo
+    ctx.globalAlpha = 0.75; ctx.lineWidth = 1.3;
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7); ctx.stroke();            // main team ring
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = (t === 0 && st.pulse_active) ? "#fde047" : "#fff"; ctx.lineWidth = 0.7;
+    ctx.beginPath(); ctx.arc(cx, cy, R * 0.5, 0, 7); ctx.stroke();      // bright inner ring
+    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(cx, cy, 1.0, 0, 7); ctx.fill();  // center dot
   });
+  ctx.globalAlpha = 1;
+  if (st.pulse_active) {                                                // Pulse screen flash
+    ctx.strokeStyle = "#fde047"; ctx.lineWidth = 2;
+    ctx.strokeRect(1, 1, W - 2, H - 2);
+  }
   document.getElementById("tick").textContent = st.tick;
+  document.getElementById("fps").textContent = st.fps ?? "—";
+  document.getElementById("flood").textContent = st.flood_pct ?? "—";
+  document.getElementById("spread").textContent = st.spread ? st.spread.map(s => Math.round(s)).join("/") : "—";
+  const pp = document.getElementById("pulsePill");
+  if (st.pulse_active) { pp.textContent = "⚡ PULSE!"; pp.style.background = "#fde047"; pp.style.color = "#000"; }
+  else if ((st.pulse_cd ?? 1) >= 1) { pp.textContent = "⚡ SPACE"; pp.style.background = "#14331f"; pp.style.color = "#4ade80"; }
+  else { pp.textContent = "⚡ " + Math.round((st.pulse_cd ?? 1) * 100) + "%"; pp.style.background = ""; pp.style.color = "#6b7280"; }
   document.getElementById("opp").textContent = st.opponent;
   const tdiv = document.getElementById("teams"); tdiv.innerHTML = "";
   st.fighters.forEach((f, t) => {
@@ -115,7 +143,10 @@ function sendDir() {
   const dir = [(down ? 1 : 0) - (up ? 1 : 0), (right ? 1 : 0) - (left ? 1 : 0)]; // +y = down
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ dir }));
 }
-window.addEventListener("keydown", (e) => { if (e.key in KEYS) { KEYS[e.key] = 1; e.preventDefault(); sendDir(); } });
+window.addEventListener("keydown", (e) => {
+  if (e.key === " ") { e.preventDefault(); if (ws && ws.readyState === 1) ws.send(JSON.stringify({ pulse: true })); return; }  // Pulse
+  if (e.key in KEYS) { KEYS[e.key] = 1; e.preventDefault(); sendDir(); }
+});
 window.addEventListener("keyup",   (e) => { if (e.key in KEYS) { KEYS[e.key] = 0; e.preventDefault(); sendDir(); } });
 document.getElementById("reset").onclick = () => ws && ws.send(JSON.stringify({reset:true}));
 document.getElementById("mode").onchange = connect;

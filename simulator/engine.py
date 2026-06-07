@@ -240,8 +240,14 @@ class LiquidWarEngine:
             moved[:, t] = ok
         # Seed decays whenever the cursor MOVES (or every 13th tick) so the
         # current cursor cell dominates the persistent field and fighters blob
-        # around it rather than smearing toward stale old positions.
-        dec = moved | (self.tick % 13 == 0)
+        # around it rather than smearing toward stale old positions. The decay
+        # must equal the cursor's per-tick OCTILE distance (orthogonal 10,
+        # diagonal 14 — matching the gradient step costs below), else a moving
+        # cursor leaves stale low values and the army smears.
+        adiag = (actions[:, :, 0].long() != 0) & (actions[:, :, 1].long() != 0)
+        step_cost = torch.where(adiag, 14, 10)
+        decay = 10 if (self.tick % 13 == 0) else 0
+        dec = torch.where(moved, step_cost, torch.full_like(step_cost, decay))
         self.cursor_val = (self.cursor_val - dec.to(torch.int32)).clamp(min=1)
 
     def _seed_and_spread_gradient(self) -> None:
@@ -274,8 +280,9 @@ class LiquidWarEngine:
                 for dx in (-1, 0, 1):
                     if dy == 0 and dx == 0:
                         continue
+                    cost = 14 if (dy != 0 and dx != 0) else 10   # octile: diagonal ~ sqrt(2)x orthogonal -> ROUND iso-distance rings (a round blob), not Chebyshev squares
                     shifted = p[:, :, 1 + dy:1 + dy + H, 1 + dx:1 + dx + W]
-                    torch.minimum(g, (shifted + 1).clamp(max=GRAD_INIT), out=g)
+                    torch.minimum(g, (shifted + cost).clamp(max=GRAD_INIT), out=g)
             g[wall] = GRAD_INIT
             if torch.equal(g, prev):
                 break
@@ -303,37 +310,121 @@ class LiquidWarEngine:
         return best_dir, best_g, cur
 
     def _move_fighters(self) -> None:
-        """Move each fighter one step down its gradient into a free cell,
-        resolving same-target contention by lowest slot index (deterministic
-        analogue of the C's sequential first-free-cell-wins)."""
+        """Move each fighter one step toward its cursor, trying its downhill
+        neighbours in steepest-first PRIORITY ORDER (not just the single best),
+        so a fighter whose best cell is taken REROUTES into its next-best free
+        cell instead of stalling. Without this the whole army funnels onto one
+        path and jams — a thin line reaches the cursor while the bulk deadlocks
+        behind it. Candidates are retried over up to 8 rounds with occupancy
+        rebuilt between rounds, so cells freed by movers open up for followers
+        and the mass flows + spreads like liquid. Same-cell contention in a
+        round is won by the lowest slot index (deterministic analogue of the
+        C engine's sequential first-free-cell-wins)."""
         B, N, H, W = self.B, self.N, self.H, self.W
-        best_dir, best_g, cur = self._best_dir()
-        wants = (best_dir >= 0) & (best_g < cur)                       # downhill move
-        dy = torch.where(best_dir >= 0, self._dy_t[best_dir.clamp(min=0)], 0)
-        dx = torch.where(best_dir >= 0, self._dx_t[best_dir.clamp(min=0)], 0)
-        ty = (self.fy + dy).clamp(0, H - 1)
-        tx = (self.fx + dx).clamp(0, W - 1)
-        tcell = ty * W + tx
-        # eligible target: in bounds, passable, currently empty.
-        empty = self.occ.view(B, -1).gather(1, tcell) == -1
-        passable = self.passable.view(B, -1).gather(1, tcell)
-        eligible = wants & empty & passable
-        # Contention: for each target cell, the lowest slot index wins.
+        b = self._barangeN.expand(B, N)
+        cur = self.gradient[b, self.fteam, self.fy, self.fx]           # (B,N)
+        BIGG = GRAD_INIT * 4
+        ng = torch.empty(B, N, 8, dtype=self.gradient.dtype, device=self.device)
+        ncell = torch.empty(B, N, 8, dtype=torch.long, device=self.device)
+        for i in range(8):
+            ny = (self.fy + _DY[i]).clamp(0, H - 1)
+            nx = (self.fx + _DX[i]).clamp(0, W - 1)
+            ng[:, :, i] = self.gradient[b, self.fteam, ny, nx]
+            ncell[:, :, i] = ny * W + nx
+        downhill = ng < cur.unsqueeze(-1)                              # strictly toward the cursor
+        # IDLE JITTER as a Dictyostelium-style TRAVELING WAVE. A uniform random
+        # twinkle felt flat; real slime-mold / social-amoeba colonies pulse in
+        # rings that ripple OUTWARD from the attractant. So restlessness is gated
+        # by a wave riding the distance field: fighters on a moving crest may step
+        # onto an EQUAL-gradient neighbour (same ring -> they shuffle tangentially
+        # without dispersing), and the crest travels outward over time -> the
+        # settled mass undulates like a living colony. A 3% random base keeps a
+        # little life off the crests. Strict-downhill flow is untouched (lower
+        # cells sort first) so a moving cursor still pulls the mass in. Per-fighter
+        # direction jitter (0..6) breaks lockstep -> independent-looking units.
+        # (k=0.25 -> ~25-cell wavelength; w=0.15 -> crest ~0.6 cells/tick outward.)
+        fcur_val = self.cursor_val.gather(1, self.fteam).float()       # (B,N) team seed value
+        dist = (cur.float() - fcur_val).clamp(min=0) / 10.0            # ~cells from the cursor
+        phase = dist * 0.25 - self.tick * 0.15                         # crest travels outward
+        # Broad crest (sin>0 => ~half the phase) so the wave band is wide enough
+        # to read as a rolling EDGE RIPPLE: boundary fighters (the only ones with
+        # empty cells to extend into) bulge outward as the crest sweeps past, then
+        # the downhill pull retracts them -> the silhouette undulates like a
+        # living membrane. Interior fighters can't bulge (no empty neighbour) so
+        # the body stays dense; only the rim ripples.
+        restless = ((torch.sin(phase) > 0.0)
+                    | (torch.rand(B, N, device=self.device) < 0.03)).unsqueeze(-1)
+        # +12 tolerance (not exact-equal): with octile costs neighbours sit at
+        # cur±10/14, so a restless fighter steps onto the next ring out and the
+        # downhill pull tugs it back -> a visible shimmer/undulation, not a freeze.
+        movable = downhill | (restless & (ng <= cur.unsqueeze(-1) + 12))
+        jitter = torch.randint(0, 7, ng.shape, device=self.device)
+        # MOMENTUM / INERTIA: bias each candidate's score toward the fighter's
+        # velocity, so a moving mass carries weight — it overshoots, banks around
+        # corners, and head-on clashes become collisions (momentum vs momentum) —
+        # instead of snapping to the gradient every tick. The bias (~±VEL_W) is
+        # comparable to one octile step (10/14), so it can pull a fighter slightly
+        # off the steepest line in its heading, but the gradient still dominates.
+        if not hasattr(self, "fvy") or self.fvy.shape != (B, N):
+            self.fvy = torch.zeros(B, N, device=self.device)
+            self.fvx = torch.zeros(B, N, device=self.device)
+        VEL_W = 6.0
+        align = self.fvy.unsqueeze(-1) * self._dy_t + self.fvx.unsqueeze(-1) * self._dx_t  # (B,N,8)
+        score = ng.float() + jitter.float() - VEL_W * align
+        order = torch.where(movable, score, score.new_full((), float(BIGG))).argsort(dim=-1)
+        ncell_s = ncell.gather(-1, order)                              # cells, best-first
+        down_s = movable.gather(-1, order)
         slots = torch.arange(N, device=self.device).expand(B, N)
-        BIG = N + 1
-        claim = torch.full((B, H * W), BIG, dtype=torch.long, device=self.device)
-        claim.scatter_reduce_(1, torch.where(eligible, tcell, tcell),
-                              torch.where(eligible, slots, torch.full_like(slots, BIG)),
-                              reduce='amin', include_self=True)
-        winner = claim.gather(1, tcell) == slots
-        moves = eligible & winner
-        # Commit: vacate old, fill new.
-        self.fy = torch.where(moves, ty, self.fy)
-        self.fx = torch.where(moves, tx, self.fx)
-        self._rebuild_occ()
-        # stash for combat: who was blocked + their intended front dir
-        self._blocked = wants & ~moves
-        self._front_dy, self._front_dx = dy, dx
+        BIGN = N + 1
+        moved = torch.zeros(B, N, dtype=torch.bool, device=self.device)
+        attacking = torch.zeros(B, N, dtype=torch.bool, device=self.device)
+        front = torch.zeros(B, N, dtype=torch.long, device=self.device)
+        for k in range(8):                                             # priority rounds
+            active = down_s[:, :, k] & ~moved & ~attacking
+            if not bool(active.any()):
+                break
+            kcell = ncell_s[:, :, k]
+            occ_slot = self.occ.view(B, -1).gather(1, kcell)
+            occ_team = torch.where(occ_slot >= 0,
+                                   self.fteam.gather(1, occ_slot.clamp(min=0)), self.fteam)
+            passable = self.passable.view(B, -1).gather(1, kcell)
+            is_empty = (occ_slot == -1) & passable
+            is_enemy = (occ_slot >= 0) & (occ_team != self.fteam)
+            # MOVE into the best free cell (lowest-slot wins contention).
+            elig = active & is_empty
+            claim = torch.full((B, H * W), BIGN, dtype=torch.long, device=self.device)
+            claim.scatter_reduce_(1, kcell,
+                                  torch.where(elig, slots, slots.new_full((), BIGN)),
+                                  reduce='amin', include_self=True)
+            kmoves = elig & (claim.gather(1, kcell) == slots)
+            self.fy = torch.where(kmoves, kcell // W, self.fy)
+            self.fx = torch.where(kmoves, kcell % W, self.fx)
+            moved = moved | kmoves
+            # ENEMY at this (best available) down-gradient cell -> ATTACK here,
+            # do NOT reroute past it. A teammate, by contrast, leaves the fighter
+            # active so it tries the next candidate (reroute). This is what makes
+            # contact compound into a takeover instead of sliding by.
+            atk = active & is_enemy & ~kmoves
+            front = torch.where(atk & ~attacking, order[:, :, k], front)
+            attacking = attacking | atk
+            if bool(kmoves.any()):
+                self._rebuild_occ()                                    # followers see freed cells
+        # combat: attackers push into the down-gradient enemy they committed to.
+        self._blocked = attacking
+        self._front_dy = torch.where(attacking, self._dy_t[front], front.new_zeros(()))
+        self._front_dx = torch.where(attacking, self._dx_t[front], front.new_zeros(()))
+        # every fighter's facing = its steepest direction toward its own cursor;
+        # the combat phase reads the DEFENDER's facing to tell a back-attack
+        # (defender facing away) from a defended head-on clash.
+        self._facing = order[:, :, 0]
+        # Carry velocity toward the chosen heading with high inertia (MOM); a
+        # settled fighter (nothing movable) coasts to rest. This is what gives the
+        # mass weight — momentum persists ~1/(1-MOM) ticks after the gradient shifts.
+        MOM = 0.85
+        best = order[:, :, 0]
+        any_mov = movable.any(-1)
+        self.fvy = MOM * self.fvy + (1 - MOM) * torch.where(any_mov, self._dy_t[best].float(), self.fvy.new_zeros(()))
+        self.fvx = MOM * self.fvx + (1 - MOM) * torch.where(any_mov, self._dx_t[best].float(), self.fvx.new_zeros(()))
 
     # ------------------------------------------------------------------
     # Combat — convert, never delete
@@ -359,10 +450,24 @@ class LiquidWarEngine:
         attack = self._blocked & is_enemy                             # (B,N) attackers
         if not bool(attack.any()):
             return
-        # Accumulate damage onto target slots.
+        # Accumulate DIRECTIONAL damage onto target slots. A defender hit while
+        # facing AWAY (its back to the attacker — the attacker pushes the same
+        # way the defender is moving) barely resists -> full ATTACK -> converts
+        # fast, so the attacker overtakes and SPREADS through the line. A head-on
+        # or side clash -> defender resists -> SIDE_ATTACK (a slow grind).
         dmg = torch.zeros(B, N, dtype=torch.int32, device=self.device)
         a_tgt = torch.where(attack, tgt_slot, torch.zeros_like(tgt_slot))
-        dmg.scatter_add_(1, a_tgt, torch.where(attack, torch.full_like(tgt_slot, ATTACK, dtype=torch.int32),
+        def_facing = self._facing.gather(1, tgt_slot.clamp(min=0))
+        align = (self._front_dy * self._dy_t[def_facing]
+                 + self._front_dx * self._dx_t[def_facing])             # dot(attack dir, defender facing)
+        hit = torch.where(align > 0, ATTACK, SIDE_ATTACK).to(torch.int32)
+        # Pulse / surge: a per-team damage multiplier (default absent = 1x). The
+        # play server sets ``_surge`` for the human team during a Pulse so the
+        # army's contact briefly overwhelms — a peristaltic burst.
+        surge = getattr(self, "_surge", None)
+        if surge is not None:
+            hit = (hit.float() * surge.gather(1, self.fteam)).to(torch.int32)
+        dmg.scatter_add_(1, a_tgt, torch.where(attack, hit,
                                                torch.zeros_like(tgt_slot, dtype=torch.int32)))
         self.fhealth = self.fhealth - dmg
         # Conversion: any slot now <0 defects to a (lowest-slot-index) attacker's team.
