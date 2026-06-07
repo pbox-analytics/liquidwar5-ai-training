@@ -217,8 +217,15 @@ class LiquidWarEngine:
         if cursor_actions is not None:
             self._move_cursors(cursor_actions)
         self._seed_and_spread_gradient()
-        self._move_fighters()
-        self._resolve_combat()
+        # Units advance multiple cells/tick (scaled to grid width, matching the
+        # cursor) so the army keeps pace instead of crawling behind a fast cursor.
+        # Each sub-step is a move + combat resolve down the same per-tick gradient;
+        # the army still trails because it's chasing the cursor's lead.
+        if not hasattr(self, "unit_speed"):
+            self.unit_speed = max(1, round(self.W / 96))
+        for _ in range(self.unit_speed):
+            self._move_fighters()
+            self._resolve_combat()
         self._rebuild_views()
         self.tick += 1
         teams_left = self.team_alive.sum(dim=1)
@@ -375,7 +382,16 @@ class LiquidWarEngine:
             self.fvx = torch.zeros(B, N, device=self.device)
         VEL_W = 6.0
         align = self.fvy.unsqueeze(-1) * self._dy_t + self.fvx.unsqueeze(-1) * self._dx_t  # (B,N,8)
-        score = ng.float() + jitter.float() - VEL_W * align
+        # SWIRL: a tangential bias so units spiral INTO the cursor along curved,
+        # magnetized field-lines instead of straight radial columns. The inward
+        # gradient (~10-14/step) still dominates SWIRL_W, so they converge — just
+        # on a curve, not a beeline. (b/fteam index each fighter's own cursor.)
+        cpos = self.cursor_pos[b, self.fteam]                          # (B,N,2)
+        ry = (cpos[..., 0] - self.fy).float(); rx = (cpos[..., 1] - self.fx).float()
+        rn = (ry * ry + rx * rx).sqrt().clamp(min=1.0)
+        SWIRL_W = 4.0
+        swirl = SWIRL_W * ((-rx / rn).unsqueeze(-1) * self._dy_t + (ry / rn).unsqueeze(-1) * self._dx_t)
+        score = ng.float() + jitter.float() - VEL_W * align - swirl
         order = torch.where(movable, score, score.new_full((), float(BIGG))).argsort(dim=-1)
         ncell_s = ncell.gather(-1, order)                              # cells, best-first
         down_s = movable.gather(-1, order)
