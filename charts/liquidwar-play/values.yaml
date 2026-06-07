@@ -1,0 +1,29 @@
+# liquidwar-play — the web front-end. Reuses the trainer image (it already has
+# torch + simulator/ + rl/ + web/), but runs the uvicorn server on CPU instead
+# of rl.train on the GPU. No GPU requested — it serves one live game in real
+# time on CPU. Reads checkpoints read-only from the same pbox NFS the trainer
+# writes to (opponent="latest" tracks training).
+namespace: liquidwar
+
+replicaCount: 1
+
+image:
+  repository: pandoras-box.local:5000/pbox/liquidwar-gpu-trainer
+  tag: "0.5.0-amd64"
+  pullPolicy: IfNotPresent
+
+# Hostname under the cluster's ingress domain (pandoratower.local). nginx class.
+host: liquidwar.pandoratower.local
+
+# Checkpoint NFS (same as the trainer's, mounted read-only).
+ckptNfs:
+  server: 192.168.1.226
+  path: /mnt/dlred1/datalake/liquidwar/results
+
+resources:
+  requests:
+    cpu: "1"
+    memory: 2Gi
+  limits:
+    cpu: "4"
+    memory: 6Gi

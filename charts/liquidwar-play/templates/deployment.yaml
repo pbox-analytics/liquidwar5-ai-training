@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: liquidwar-play
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: liquidwar-play
+    app.kubernetes.io/part-of: liquidwar5-ai
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: liquidwar-play
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: liquidwar-play
+    spec:
+      containers:
+        - name: play
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Override the image's rl.train entrypoint: run the websocket server.
+          command: ["uvicorn", "web.server:app", "--host", "0.0.0.0", "--port", "8080"]
+          workingDir: /opt/training
+          env:
+            - { name: PYTHONPATH, value: /opt/training }
+            - { name: LW_CKPT_DIR, value: /opt/training/results }   # NFS mount
+            - { name: LW_PLAY_DEVICE, value: cpu }                  # 1 game = real-time on CPU
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - { name: checkpoints, mountPath: /opt/training/results, readOnly: true }
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: checkpoints
+          nfs:
+            server: {{ .Values.ckptNfs.server }}
+            path: {{ .Values.ckptNfs.path }}

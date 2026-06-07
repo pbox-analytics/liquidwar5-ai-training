@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: liquidwar-play
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: liquidwar5-ai
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/pbox-analytics/liquidwar5-ai-training
+    targetRevision: main
+    path: charts/liquidwar-play
+    helm:
+      valuesObject:
+        namespace: liquidwar
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: liquidwar
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
