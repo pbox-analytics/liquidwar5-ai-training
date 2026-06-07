@@ -66,7 +66,7 @@ class GameSession:
         self.mode = mode
         self.engine = LiquidWarEngine(batch_size=1, height=height, width=width,
                                       num_teams=teams, fighters_per_team=fighters,
-                                      device=DEVICE)
+                                      device=DEVICE, grad_iters=24)
         self.engine.reset()
         self.policy: CursorPolicy | None = None
         self.ckpt_name = opponent
@@ -105,6 +105,11 @@ class GameSession:
                 ty, tx = human_target
                 dydx[0, 0, 0] = max(-1, min(1, ty - cy))
                 dydx[0, 0, 1] = max(-1, min(1, tx - cx))
+            else:
+                # No human input: team 0 stays put — never let the AI drive YOUR
+                # cursor (that read as "the cursor moves on its own").
+                dydx[0, 0, 0] = 0
+                dydx[0, 0, 1] = 0
         self.engine.step(dydx)
 
     def reset(self) -> None:

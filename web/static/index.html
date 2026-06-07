@@ -39,7 +39,7 @@
     <button id="reset">New game</button>
   </div>
   <canvas id="c" width="110" height="80"></canvas>
-  <div class="muted">Steer with your <b>mouse</b>, or <b>Arrow keys / WASD</b> — your blob (team 0, cyan) follows the cursor.</div>
+  <div class="muted">Steer with <b>Arrow keys / WASD</b> (or hold the mouse to steer) — your blob (team 0, cyan) follows the cursor.</div>
 
 <script>
 const COLORS = ["#38e0e0","#ff5470","#4ade80","#fbbf24","#c084fc","#fb923c"]; // team 0 = you
@@ -90,12 +90,20 @@ function connect() {
   ws.onmessage = (e) => render(JSON.parse(e.data));   // server streams frames; just render
 }
 
-cv.addEventListener("mousemove", (e) => {
+// Mouse is OPT-IN: it only steers while a button is held, so it doesn't fight
+// the keyboard (which is the default control). Releasing stops steering.
+let mouseDown = false;
+function updateTarget(e) {
   const r = cv.getBoundingClientRect();
   target = [Math.floor((e.clientY - r.top) / scale), Math.floor((e.clientX - r.left) / scale)];
+}
+cv.addEventListener("mousedown", (e) => { mouseDown = true; updateTarget(e); });
+window.addEventListener("mouseup", () => {
+  if (mouseDown && ws && ws.readyState === 1) ws.send(JSON.stringify({ target: null }));
+  mouseDown = false;
 });
-// Push the latest cursor target to the server async (decoupled from the frame stream).
-setInterval(() => { if (ws && ws.readyState === 1 && target) ws.send(JSON.stringify({ target })); }, 50);
+cv.addEventListener("mousemove", (e) => { if (mouseDown) updateTarget(e); });
+setInterval(() => { if (ws && ws.readyState === 1 && mouseDown && target) ws.send(JSON.stringify({ target })); }, 50);
 
 // Keyboard control (Arrow keys + WASD) — drives the cursor directly, LW-style.
 // While any movement key is held it overrides the mouse; releasing all keys

@@ -128,13 +128,18 @@ class LiquidWarEngine:
         return self._get_state()
 
     def _generate_random_maps(self) -> torch.Tensor:
+        """Clean arena: solid border only, no interior obstacles.
+
+        Real maze maps (``map.c`` + ``lwmapgen``) land later as a separate step;
+        the gradient flood-fill already routes fighters around any walls, so
+        obstacles can be reintroduced without movement changes.
+        """
         B, H, W = self.B, self.H, self.W
         walls = torch.zeros(B, H, W, dtype=torch.bool)
         walls[:, 0, :] = True
         walls[:, -1, :] = True
         walls[:, :, 0] = True
         walls[:, :, -1] = True
-        walls[:, 1:-1, 1:-1] = torch.rand(B, H - 2, W - 2) < 0.08
         return walls
 
     def _place_teams(self) -> None:
@@ -225,15 +230,19 @@ class LiquidWarEngine:
         new[:, :, 0].clamp_(1, self.H - 2)
         new[:, :, 1].clamp_(1, self.W - 2)
         b = torch.arange(self.B, device=self.device)
+        moved = torch.zeros(self.B, self.T, dtype=torch.bool, device=self.device)
         for t in range(self.T):
             ny, nx = new[:, t, 0], new[:, t, 1]
-            ok = self.passable[b, ny, nx] & self.team_alive[:, t]
-            self.cursor_pos[:, t, 0] = torch.where(ok, ny, self.cursor_pos[:, t, 0])
-            self.cursor_pos[:, t, 1] = torch.where(ok, nx, self.cursor_pos[:, t, 1])
-        # cursor seed decays (val-- when moved or every 13th tick) — keep >0.
-        dec = (self.tick % 13 == 0)
-        if dec:
-            self.cursor_val = (self.cursor_val - 1).clamp(min=1)
+            oy, ox = self.cursor_pos[:, t, 0], self.cursor_pos[:, t, 1]
+            ok = self.passable[b, ny, nx] & self.team_alive[:, t] & ((ny != oy) | (nx != ox))
+            self.cursor_pos[:, t, 0] = torch.where(ok, ny, oy)
+            self.cursor_pos[:, t, 1] = torch.where(ok, nx, ox)
+            moved[:, t] = ok
+        # Seed decays whenever the cursor MOVES (or every 13th tick) so the
+        # current cursor cell dominates the persistent field and fighters blob
+        # around it rather than smearing toward stale old positions.
+        dec = moved | (self.tick % 13 == 0)
+        self.cursor_val = (self.cursor_val - dec.to(torch.int32)).clamp(min=1)
 
     def _seed_and_spread_gradient(self) -> None:
         """Overwrite each cursor cell with its seed, then relax the persistent
