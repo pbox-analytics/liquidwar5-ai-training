@@ -20,8 +20,15 @@ ARG CUDA_INDEX=cu128
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1
 
+# build-essential: torch 2.7 pulls in Triton, which JIT-compiles a small CUDA
+# helper (cuda_utils) on first GPU use — even with no explicit torch.compile in
+# the code. Without a C compiler the trainer crashes at startup with
+# "RuntimeError: Failed to find C compiler" (triton driver init). The cuda:*-
+# runtime base ships no compiler; Triton bundles its own CUDA headers, so gcc
+# (via build-essential) is all that's missing.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3.11 python3.11-venv python3.11-dev python3-pip \
+      build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Isolated venv on python3.11 (matches the comfyui image convention).
