@@ -8,7 +8,7 @@ replicaCount: 1
 
 image:
   repository: pandoras-box.local:5000/pbox/liquidwar-gpu-trainer
-  tag: "0.7.0-amd64"
+  tag: "0.7.1-amd64"
   pullPolicy: IfNotPresent
 
 # Hostname under the cluster's ingress domain (pandoratower.local). nginx class.
