@@ -255,7 +255,20 @@ class LiquidWarEngine:
             self.gradient[b, t, cy, cx] = self.cursor_val[:, t]
         g = self.gradient
         wall = self._wall_grad
-        for _ in range(self.grad_sweeps):
+        # Complete flood-fill: relax to CONVERGENCE (a full geodesic distance
+        # field) rather than a fixed ``grad_sweeps`` cap. Only a converged field
+        # reaches EVERY reachable cell, so fighters flow toward the cursor from
+        # anywhere on the map and pathfind around walls. The old capped relax
+        # (4 sweeps in training, 24 in play) left the far half of the army with
+        # no gradient at all — which read as "blobs just converge" and is the
+        # core gameplay break. Persistence + the per-move cursor-seed decrement
+        # make the converged field track a MOVING cursor exactly: the decrement
+        # offsets the cursor's displacement each tick, so no stale low values
+        # survive. Hard-capped at 2*(H+W) (the longest possible geodesic path)
+        # as a safety bound; the early-out keeps steady state cheap — a warm
+        # field reconverges in a couple of sweeps once it has flooded once.
+        for _ in range(2 * (H + W)):
+            prev = g.clone()
             p = torch.nn.functional.pad(g, (1, 1, 1, 1), value=GRAD_INIT)
             for dy in (-1, 0, 1):
                 for dx in (-1, 0, 1):
@@ -264,6 +277,8 @@ class LiquidWarEngine:
                     shifted = p[:, :, 1 + dy:1 + dy + H, 1 + dx:1 + dx + W]
                     torch.minimum(g, (shifted + 1).clamp(max=GRAD_INIT), out=g)
             g[wall] = GRAD_INIT
+            if torch.equal(g, prev):
+                break
 
     # ------------------------------------------------------------------
     # Fighter movement — gradient descent + priority-claim collision
