@@ -22,16 +22,17 @@ image:
 # cluster-wide (gpus.yaml comfyui.replicas 0 on every card), so the 5090
 # contention that forced the 2026-06-04 unload is gone — the scheduler now has
 # free amd64 GPUs to place the trainer on.
-replicaCount: 0
+replicaCount: 1
 
-# Pin to ptow (pandoratower): its RTX 5090 (32 GB) is genuinely free now that
-# ComfyUI is off, and it's the only reliably-usable free GPU. NOT broad
-# arch:amd64 — the scheduler placed the pod on pandora-storm, whose GPU is
-# squatted by the NON-k8s ollama qwen-tagger (~21 GB; the device plugin still
-# advertises the card as free → the trainer CUDA-OOMs), and tank-a carries the
-# Xid-79 fall-off-bus fault. Revisit when ptow's GPU is wanted back for image-gen.
+# Pin to pbox (pandoras-box): its PRO 6000 (96 GB) is now advertised to k8s
+# (nvidia-device-plugin affinity allowlist gained rtx_pro_6000) and the card is
+# idle — every former MPS/ComfyUI client is gone. NOT broad arch:amd64 — the
+# scheduler placed the pod on pandora-storm, whose GPU is squatted by the
+# NON-k8s ollama qwen-tagger (~21 GB; the device plugin still advertises the
+# card as free → the trainer CUDA-OOMs), and tank-a carries the Xid-79
+# fall-off-bus fault. The PRO 6000's 96 GB also unblocks the larger batch size.
 nodeSelector:
-  kubernetes.io/hostname: pandoratower
+  kubernetes.io/hostname: pandoras-box
 
 resources:
   requests:
@@ -46,7 +47,7 @@ resources:
 config:
   # PPO / env hyperparameters (passed as rl.train CLI args).
   device: cuda
-  batchSize: 64
+  batchSize: 128
   teams: 4
   height: 80
   width: 110
