@@ -27,7 +27,7 @@ image:
   pullPolicy: IfNotPresent
 
 # One worker process per node release.
-replicaCount: 1
+replicaCount: 0
 
 # Pin to a node/arch. The image is currently amd64-only (tag 0.1.0-amd64), so
 # constrain to amd64 nodes — otherwise the scheduler may place it on swolf

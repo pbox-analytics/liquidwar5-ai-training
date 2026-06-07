@@ -27,7 +27,7 @@ image:
   pullPolicy: IfNotPresent
 
 # Exactly one coordinator.
-replicaCount: 1
+replicaCount: 0
 
 # amd64-only image — pin to amd64 nodes (swolf is arm64).
 nodeSelector:
