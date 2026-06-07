@@ -86,16 +86,16 @@ function connect() {
   const mode = document.getElementById("mode").value;
   const opp = document.getElementById("opponent").value;
   document.getElementById("modeLabel").textContent = mode;
-  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?mode=${mode}&opponent=${opp}&teams=4`);
-  ws.onmessage = (e) => { const st = JSON.parse(e.data); render(st);
-    if (st.done) setTimeout(() => ws.send(JSON.stringify({reset:true})), 1200);
-    else setTimeout(() => ws.send(JSON.stringify({target})), 33); };  // ~30fps
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?mode=${mode}&opponent=${opp}&teams=2`);
+  ws.onmessage = (e) => render(JSON.parse(e.data));   // server streams frames; just render
 }
 
 cv.addEventListener("mousemove", (e) => {
   const r = cv.getBoundingClientRect();
   target = [Math.floor((e.clientY - r.top) / scale), Math.floor((e.clientX - r.left) / scale)];
 });
+// Push the latest cursor target to the server async (decoupled from the frame stream).
+setInterval(() => { if (ws && ws.readyState === 1 && target) ws.send(JSON.stringify({ target })); }, 50);
 document.getElementById("reset").onclick = () => ws && ws.send(JSON.stringify({reset:true}));
 document.getElementById("mode").onchange = connect;
 document.getElementById("opponent").onchange = connect;
