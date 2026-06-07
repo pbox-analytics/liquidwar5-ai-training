@@ -34,6 +34,12 @@ spec:
         - name: trainer
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # The torch-fallback gradient spread is memory-heavier than the fused
+            # Triton kernel; this lets PyTorch reuse fragmented reserved memory
+            # (the OOM showed ~6GB reserved-but-unallocated) instead of OOMing.
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "expandable_segments:True"
           # ENTRYPOINT is `python3 -m rl.train`; these args configure it.
           args:
             - "--device"

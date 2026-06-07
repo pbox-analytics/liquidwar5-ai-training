@@ -46,7 +46,7 @@ resources:
 config:
   # PPO / env hyperparameters (passed as rl.train CLI args).
   device: cuda
-  batchSize: 512
+  batchSize: 256
   teams: 4
   height: 80
   width: 110
