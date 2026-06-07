@@ -226,7 +226,12 @@ class LiquidWarEngine:
         return self._get_state(), done, self._get_info()
 
     def _move_cursors(self, actions: torch.Tensor) -> None:
-        new = self.cursor_pos + actions.long()
+        # Cursor speed scales with grid width so the on-screen feel stays constant
+        # as the map grows: 1 cell/tick suited the original ~110-wide grid; a
+        # 288-wide grid needs ~3. actions are unit directions (±1).
+        if not hasattr(self, "cursor_speed"):
+            self.cursor_speed = max(1, round(self.W / 96))
+        new = self.cursor_pos + actions.long().clamp(-1, 1) * self.cursor_speed
         new[:, :, 0].clamp_(1, self.H - 2)
         new[:, :, 1].clamp_(1, self.W - 2)
         b = torch.arange(self.B, device=self.device)
@@ -245,7 +250,7 @@ class LiquidWarEngine:
         # diagonal 14 — matching the gradient step costs below), else a moving
         # cursor leaves stale low values and the army smears.
         adiag = (actions[:, :, 0].long() != 0) & (actions[:, :, 1].long() != 0)
-        step_cost = torch.where(adiag, 14, 10)
+        step_cost = torch.where(adiag, 14, 10) * self.cursor_speed   # cursor moved cursor_speed cells
         decay = 10 if (self.tick % 13 == 0) else 0
         dec = torch.where(moved, step_cost, torch.full_like(step_cost, decay))
         self.cursor_val = (self.cursor_val - dec.to(torch.int32)).clamp(min=1)
