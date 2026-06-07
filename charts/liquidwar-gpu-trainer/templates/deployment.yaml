@@ -70,3 +70,15 @@ spec:
             {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            # Persist PPO checkpoints (results/rl/<timestamp>/*.pt) to the pbox
+            # NFS so they survive pod restarts and a separate eval Job can read
+            # them. train.py defaults --ckpt-dir to results/rl (relative to the
+            # /opt/training workdir), so mounting here captures it.
+            - name: checkpoints
+              mountPath: /opt/training/results
+      volumes:
+        - name: checkpoints
+          nfs:
+            server: 192.168.1.226                       # pbox (NFS server)
+            path: /mnt/dlred1/datalake/liquidwar/results
