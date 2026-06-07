@@ -391,7 +391,16 @@ class LiquidWarEngine:
         rn = (ry * ry + rx * rx).sqrt().clamp(min=1.0)
         SWIRL_W = 4.0
         swirl = SWIRL_W * ((-rx / rn).unsqueeze(-1) * self._dy_t + (ry / rn).unsqueeze(-1) * self._dx_t)
-        score = ng.float() + jitter.float() - VEL_W * align - swirl
+        # PERISTALTIC EDGE PUSH: a wave-modulated OUTWARD bias (rides the same
+        # traveling wave as the restless gate). On a crest the rim extends outward
+        # (a pseudopod bulge, up to unit_speed cells); off-crest the inward
+        # gradient retracts it -> the silhouette undulates like a living membrane.
+        # Interior fighters can't extend (neighbours occupied), so only the edge
+        # ripples; the body stays dense.
+        PUSH_W = 10.0
+        push = (PUSH_W * torch.sin(phase)).unsqueeze(-1)               # (B,N,1), oscillates ±
+        out_align = (-ry / rn).unsqueeze(-1) * self._dy_t + (-rx / rn).unsqueeze(-1) * self._dx_t
+        score = ng.float() + jitter.float() - VEL_W * align - swirl - push * out_align
         order = torch.where(movable, score, score.new_full((), float(BIGG))).argsort(dim=-1)
         ncell_s = ncell.gather(-1, order)                              # cells, best-first
         down_s = movable.gather(-1, order)
