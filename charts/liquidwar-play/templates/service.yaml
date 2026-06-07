@@ -6,9 +6,14 @@ metadata:
   labels:
     app.kubernetes.io/name: liquidwar-play
 spec:
+  # NodePort so it's reachable at http://<any-node-ip>:30900 with NO DNS
+  # (the *.pandoratower.local wildcard doesn't resolve via mDNS). The Ingress
+  # at {{ .Values.host }} still works once that host is in DNS/hosts.
+  type: NodePort
   selector:
     app.kubernetes.io/name: liquidwar-play
   ports:
     - name: http
       port: 8080
       targetPort: 8080
+      nodePort: 30900
