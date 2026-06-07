@@ -42,13 +42,14 @@ ENV PATH=/opt/venv/bin:$PATH
 RUN pip install --no-cache-dir \
       torch==${TORCH_VER} --index-url https://download.pytorch.org/whl/${CUDA_INDEX}
 RUN pip install --no-cache-dir \
-      numpy 'confluent-kafka[avro]>=2.3.0' 'fastavro>=1.9.0'
+      numpy 'confluent-kafka[avro]>=2.3.0' 'fastavro>=1.9.0' 'fastapi>=0.110' 'uvicorn[standard]>=0.29'
 
 # Trainer code: only what rl.train imports — simulator/, rl/, kafka_avro.py.
 WORKDIR /opt/training
 COPY simulator/ /opt/training/simulator/
 COPY rl/ /opt/training/rl/
 COPY kafka_avro.py /opt/training/kafka_avro.py
+COPY web/ /opt/training/web/
 
 # Defaults target a real GPU run; override via Helm args. Kafka off unless
 # --bootstrap-servers/--schema-registry are supplied.
