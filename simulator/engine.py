@@ -6,13 +6,23 @@ torch.compile-friendly operations. No Python loops in the hot path
 except the per-team cursor loop (T<=6 iterations).
 """
 
+import os
+
 import torch
 import torch.nn.functional as F
 
-try:
-    from simulator.triton_kernels import triton_gradient_spread
-    HAS_TRITON = True
-except ImportError:
+# Triton's compiler SIGSEGVs on Blackwell (sm_120) while building
+# triton_gradient_spread (crash in ast_to_ttir), so default to the pure-torch
+# min-shift fallback in _seed_and_spread_gradient — it's the same algorithm,
+# just unfused (slower, but correct and GPU-resident). Set LW_ENABLE_TRITON=1
+# to re-try the fused kernel once Triton ships working Blackwell support.
+if os.environ.get("LW_ENABLE_TRITON") == "1":
+    try:
+        from simulator.triton_kernels import triton_gradient_spread
+        HAS_TRITON = True
+    except ImportError:
+        HAS_TRITON = False
+else:
     HAS_TRITON = False
 
 
