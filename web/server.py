@@ -91,13 +91,20 @@ class GameSession:
         return dydx
 
     @torch.no_grad()
-    def step(self, human_target: list[int] | None) -> None:
+    def step(self, human_target: list[int] | None,
+             human_dir: list[int] | None = None) -> None:
         dydx = self._ai_dydx()
-        if self.mode == "play" and human_target is not None:
-            cy, cx = self.engine.cursor_pos[0, 0].tolist()
-            ty, tx = human_target
-            dydx[0, 0, 0] = max(-1, min(1, ty - cy))
-            dydx[0, 0, 1] = max(-1, min(1, tx - cx))
+        if self.mode == "play":
+            if human_dir is not None and (human_dir[0] or human_dir[1]):
+                # Keyboard (arrows/WASD): drive the cursor directly, LW-style.
+                dydx[0, 0, 0] = max(-1, min(1, human_dir[0]))
+                dydx[0, 0, 1] = max(-1, min(1, human_dir[1]))
+            elif human_target is not None:
+                # Mouse: cursor homes toward the pointed-at cell.
+                cy, cx = self.engine.cursor_pos[0, 0].tolist()
+                ty, tx = human_target
+                dydx[0, 0, 0] = max(-1, min(1, ty - cy))
+                dydx[0, 0, 1] = max(-1, min(1, tx - cx))
         self.engine.step(dydx)
 
     def reset(self) -> None:
@@ -135,7 +142,7 @@ async def ws(sock: WebSocket) -> None:
         opponent=q.get("opponent", "latest"),
         teams=int(q.get("teams", "2")),
     )
-    ctrl: dict[str, Any] = {"target": None, "alive": True, "reset": False}
+    ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True, "reset": False}
 
     async def receiver() -> None:
         try:
@@ -143,7 +150,9 @@ async def ws(sock: WebSocket) -> None:
                 msg = await sock.receive_json()
                 if msg.get("reset"):
                     ctrl["reset"] = True
-                elif "target" in msg:
+                elif "dir" in msg:                 # keyboard (arrows/WASD)
+                    ctrl["dir"] = msg["dir"]
+                elif "target" in msg:              # mouse
                     ctrl["target"] = msg["target"]
         except WebSocketDisconnect:
             ctrl["alive"] = False
@@ -159,7 +168,7 @@ async def ws(sock: WebSocket) -> None:
                 if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
                     session.reset(); hold = 0
             else:
-                session.step(ctrl["target"])
+                session.step(ctrl["target"], ctrl["dir"])
             try:
                 await sock.send_json(session.state())
             except Exception:

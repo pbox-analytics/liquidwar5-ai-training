@@ -39,7 +39,7 @@
     <button id="reset">New game</button>
   </div>
   <canvas id="c" width="110" height="80"></canvas>
-  <div class="muted">Move your mouse over the board — your blob (team 0, cyan) flows toward the cursor.</div>
+  <div class="muted">Steer with your <b>mouse</b>, or <b>Arrow keys / WASD</b> — your blob (team 0, cyan) follows the cursor.</div>
 
 <script>
 const COLORS = ["#38e0e0","#ff5470","#4ade80","#fbbf24","#c084fc","#fb923c"]; // team 0 = you
@@ -96,6 +96,19 @@ cv.addEventListener("mousemove", (e) => {
 });
 // Push the latest cursor target to the server async (decoupled from the frame stream).
 setInterval(() => { if (ws && ws.readyState === 1 && target) ws.send(JSON.stringify({ target })); }, 50);
+
+// Keyboard control (Arrow keys + WASD) — drives the cursor directly, LW-style.
+// While any movement key is held it overrides the mouse; releasing all keys
+// (dir = [0,0]) falls back to mouse homing.
+const KEYS = { ArrowUp:0, ArrowDown:0, ArrowLeft:0, ArrowRight:0, w:0, a:0, s:0, d:0 };
+function sendDir() {
+  const up = KEYS.ArrowUp || KEYS.w, down = KEYS.ArrowDown || KEYS.s;
+  const left = KEYS.ArrowLeft || KEYS.a, right = KEYS.ArrowRight || KEYS.d;
+  const dir = [(down ? 1 : 0) - (up ? 1 : 0), (right ? 1 : 0) - (left ? 1 : 0)]; // +y = down
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ dir }));
+}
+window.addEventListener("keydown", (e) => { if (e.key in KEYS) { KEYS[e.key] = 1; e.preventDefault(); sendDir(); } });
+window.addEventListener("keyup",   (e) => { if (e.key in KEYS) { KEYS[e.key] = 0; e.preventDefault(); sendDir(); } });
 document.getElementById("reset").onclick = () => ws && ws.send(JSON.stringify({reset:true}));
 document.getElementById("mode").onchange = connect;
 document.getElementById("opponent").onchange = connect;
