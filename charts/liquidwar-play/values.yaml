@@ -1,7 +1,6 @@
 # liquidwar-play — the web front-end. Reuses the trainer image (it already has
-# torch + simulator/ + rl/ + web/), but runs the uvicorn server on CPU instead
-# of rl.train on the GPU. No GPU requested — it serves one live game in real
-# time on CPU. Reads checkpoints read-only from the same pbox NFS the trainer
+# torch + simulator/ + rl/ + web/), running the uvicorn server instead of
+# rl.train. Reads checkpoints read-only from the same pbox NFS the trainer
 # writes to (opponent="latest" tracks training).
 namespace: liquidwar
 
@@ -15,6 +14,17 @@ image:
 # Hostname under the cluster's ingress domain (pandoratower.local). nginx class.
 host: liquidwar.pandoratower.local
 
+# Engine device for the live game. CPU pegs all cores on the gradient-spread
+# step (sluggish); cuda makes each step sub-ms (smooth). When cuda, gpu.enabled
+# must be true so a card is actually scheduled.
+playDevice: cuda
+
+# Run the live engine on a free GPU (pstorm 5090m — idle since image-gen/chat
+# off; NOT the PRO 6000 trainer). Set enabled=false to fall back to CPU.
+gpu:
+  enabled: true
+  node: pandora-storm
+
 # Checkpoint NFS (same as the trainer's, mounted read-only).
 ckptNfs:
   server: 192.168.1.226
@@ -24,6 +34,8 @@ resources:
   requests:
     cpu: "1"
     memory: 2Gi
+    nvidia.com/gpu: 1
   limits:
-    cpu: "4"
-    memory: 6Gi
+    cpu: "2"
+    memory: 8Gi
+    nvidia.com/gpu: 1

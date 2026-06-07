@@ -16,6 +16,15 @@ spec:
       labels:
         app.kubernetes.io/name: liquidwar-play
     spec:
+      {{- if .Values.gpu.enabled }}
+      # The engine step (gradient spread, torch fallback) is CPU-bound for one
+      # live game and pegs all cores -> sluggish frame rate. Run it on a free
+      # GPU (sub-ms steps). Separate card from the PRO 6000 trainer = no
+      # contention. nvidia.com/gpu:1 is requested via .Values.resources.
+      runtimeClassName: nvidia
+      nodeSelector:
+        kubernetes.io/hostname: {{ .Values.gpu.node }}
+      {{- end }}
       containers:
         - name: play
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -26,7 +35,7 @@ spec:
           env:
             - { name: PYTHONPATH, value: /opt/training }
             - { name: LW_CKPT_DIR, value: /opt/training/results }   # NFS mount
-            - { name: LW_PLAY_DEVICE, value: cpu }                  # 1 game = real-time on CPU
+            - { name: LW_PLAY_DEVICE, value: {{ .Values.playDevice | quote }} }
           ports:
             - { name: http, containerPort: 8080 }
           readinessProbe:
