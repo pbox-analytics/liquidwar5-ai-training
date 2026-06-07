@@ -380,7 +380,7 @@ class LiquidWarEngine:
         if not hasattr(self, "fvy") or self.fvy.shape != (B, N):
             self.fvy = torch.zeros(B, N, device=self.device)
             self.fvx = torch.zeros(B, N, device=self.device)
-        VEL_W = 6.0
+        VEL_W = 8.0
         align = self.fvy.unsqueeze(-1) * self._dy_t + self.fvx.unsqueeze(-1) * self._dx_t  # (B,N,8)
         # SWIRL: a tangential bias so units spiral INTO the cursor along curved,
         # magnetized field-lines instead of straight radial columns. The inward
@@ -389,7 +389,7 @@ class LiquidWarEngine:
         cpos = self.cursor_pos[b, self.fteam]                          # (B,N,2)
         ry = (cpos[..., 0] - self.fy).float(); rx = (cpos[..., 1] - self.fx).float()
         rn = (ry * ry + rx * rx).sqrt().clamp(min=1.0)
-        SWIRL_W = 4.0
+        SWIRL_W = 6.0
         swirl = SWIRL_W * ((-rx / rn).unsqueeze(-1) * self._dy_t + (ry / rn).unsqueeze(-1) * self._dx_t)
         # PERISTALTIC EDGE PUSH: a wave-modulated OUTWARD bias (rides the same
         # traveling wave as the restless gate). On a crest the rim extends outward
@@ -397,7 +397,7 @@ class LiquidWarEngine:
         # gradient retracts it -> the silhouette undulates like a living membrane.
         # Interior fighters can't extend (neighbours occupied), so only the edge
         # ripples; the body stays dense.
-        PUSH_W = 10.0
+        PUSH_W = 14.0
         push = (PUSH_W * torch.sin(phase)).unsqueeze(-1)               # (B,N,1), oscillates ±
         out_align = (-ry / rn).unsqueeze(-1) * self._dy_t + (-rx / rn).unsqueeze(-1) * self._dx_t
         score = ng.float() + jitter.float() - VEL_W * align - swirl - push * out_align
@@ -450,7 +450,7 @@ class LiquidWarEngine:
         # Carry velocity toward the chosen heading with high inertia (MOM); a
         # settled fighter (nothing movable) coasts to rest. This is what gives the
         # mass weight — momentum persists ~1/(1-MOM) ticks after the gradient shifts.
-        MOM = 0.85
+        MOM = 0.88
         best = order[:, :, 0]
         any_mov = movable.any(-1)
         self.fvy = MOM * self.fvy + (1 - MOM) * torch.where(any_mov, self._dy_t[best].float(), self.fvy.new_zeros(()))
