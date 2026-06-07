@@ -22,7 +22,7 @@ image:
 # cluster-wide (gpus.yaml comfyui.replicas 0 on every card), so the 5090
 # contention that forced the 2026-06-04 unload is gone — the scheduler now has
 # free amd64 GPUs to place the trainer on.
-replicaCount: 1
+replicaCount: 0
 
 # Pin to pbox (pandoras-box): its PRO 6000 (96 GB) is now advertised to k8s
 # (nvidia-device-plugin affinity allowlist gained rtx_pro_6000) and the card is
