@@ -7,6 +7,9 @@ metadata:
     app.kubernetes.io/name: liquidwar-play
     app.kubernetes.io/part-of: liquidwar5-ai
 spec:
+  # single GPU -> kill the old pod before creating the new (else GPU deadlock)
+  strategy:
+    type: Recreate
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
