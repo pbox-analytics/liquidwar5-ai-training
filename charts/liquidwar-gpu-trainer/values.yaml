@@ -22,7 +22,7 @@ image:
 # cluster-wide (gpus.yaml comfyui.replicas 0 on every card), so the 5090
 # contention that forced the 2026-06-04 unload is gone — the scheduler now has
 # free amd64 GPUs to place the trainer on.
-replicaCount: 1
+replicaCount: 0
 
 # Pin to ptow (pandoratower): its RTX 5090 (32 GB) is genuinely free now that
 # ComfyUI is off, and it's the only reliably-usable free GPU. NOT broad
