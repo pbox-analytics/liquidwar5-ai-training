@@ -278,11 +278,23 @@ class LiquidWarEngine:
         for t in range(T):
             x0 = 1 + t * strip_w
             x1 = min(x0 + strip_w, W - 1)
-            self.cursor_pos[:, t, 0] = H // 2
-            self.cursor_pos[:, t, 1] = (x0 + x1) // 2
             region = torch.zeros(B, H, W, dtype=torch.bool, device=dev)
             region[:, 2:H - 2, x0:x1] = True
             region &= self.passable
+            # Seat the cursor at the strip centre — but if the map dropped a wall
+            # block there, snap to the nearest passable cell, else the cursor is
+            # stuck inside a wall and the army can't gather on it. (Walls are the
+            # same across the batch, so cell from ``[0]`` applies to all.)
+            cy0, cx0 = H // 2, (x0 + x1) // 2
+            if not bool(self.passable[0, cy0, cx0]):
+                ys, xs = torch.where(region[0])
+                if ys.numel() == 0:                          # whole strip walled (rare) -> any open cell
+                    ys, xs = torch.where(self.passable[0])
+                if ys.numel():
+                    j = int(((ys - cy0) ** 2 + (xs - cx0) ** 2).argmin())
+                    cy0, cx0 = int(ys[j]), int(xs[j])
+            self.cursor_pos[:, t, 0] = cy0
+            self.cursor_pos[:, t, 1] = cx0
             flat = region.view(B, -1).float()
             avail = int(flat.sum(dim=1).min().item())
             k = min(per, max(avail, 1))
@@ -294,10 +306,10 @@ class LiquidWarEngine:
             self.fx[:, base:base + k] = sx
             self.fteam[:, base:base + k] = t
             # Any unfilled slots for this team (avail < per): park them on the
-            # cursor cell so the count stays exact (rare on real maps).
+            # (passable) cursor cell so the count stays exact — never in a wall now.
             if k < per:
-                self.fy[:, base + k:base + per] = H // 2
-                self.fx[:, base + k:base + per] = (x0 + x1) // 2
+                self.fy[:, base + k:base + per] = cy0
+                self.fx[:, base + k:base + per] = cx0
                 self.fteam[:, base + k:base + per] = t
 
     # ------------------------------------------------------------------
