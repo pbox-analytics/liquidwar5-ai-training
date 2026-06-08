@@ -579,6 +579,20 @@ class LiquidWarEngine:
         any_mov = movable.any(-1)
         self.fvy = MOM * self.fvy + (1 - MOM) * torch.where(any_mov, self._dy_t[best].float(), self.fvy.new_zeros(()))
         self.fvx = MOM * self.fvx + (1 - MOM) * torch.where(any_mov, self._dx_t[best].float(), self.fvx.new_zeros(()))
+        # WALL SLOSH: deflect velocity off adjacent walls — strip the component
+        # heading INTO a wall (keep the tangential) and bleed a little energy, so a
+        # mass hitting a barrier slides/sloshes ALONG it (fluid) instead of stopping
+        # dead. ``ncell`` holds each fighter's 8 (clamped) neighbour cells.
+        wall_n = self.walls.view(B, -1).gather(1, ncell.reshape(B, -1)).reshape(B, N, 8).float()
+        wny = (wall_n * self._dy_t).sum(-1)                           # net direction toward walls
+        wnx = (wall_n * self._dx_t).sum(-1)
+        wmag = (wny * wny + wnx * wnx).sqrt()
+        hit = wmag > 0
+        inv = 1.0 / wmag.clamp(min=1e-6)
+        wyh, wxh = wny * inv, wnx * inv                               # unit into-wall normal
+        into = (self.fvy * wyh + self.fvx * wxh).clamp(min=0)         # velocity heading INTO the wall
+        self.fvy = torch.where(hit, (self.fvy - into * wyh) * 0.88, self.fvy)
+        self.fvx = torch.where(hit, (self.fvx - into * wxh) * 0.88, self.fvx)
 
     # ------------------------------------------------------------------
     # Combat — convert, never delete
