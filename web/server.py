@@ -73,6 +73,7 @@ class GameSession:
         self.engine._grad_cap = 48
         self.engine._spin = torch.ones(1, teams, device=DEVICE)  # per-team orbit sign; player flips team 0
         self.engine._burst = torch.zeros(1, teams, device=DEVICE)  # gather(-1)/burst(+1) phase; player drives 0
+        self.engine._drill = torch.zeros(1, teams, 2, device=DEVICE)  # per-team thrust dir (drill move)
         self.engine.reset()
         self.policy: CursorPolicy | None = None
         self.ckpt_name = opponent
@@ -182,7 +183,7 @@ async def ws(sock: WebSocket) -> None:
         fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),  # dense fluid mass
     )
     ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True, "reset": False,
-                            "pulse": False, "map": None, "spin": None, "burst": False}
+                            "pulse": False, "map": None, "spin": None, "burst": False, "drill": False}
 
     async def receiver() -> None:
         try:
@@ -196,9 +197,11 @@ async def ws(sock: WebSocket) -> None:
                     ctrl["reset"] = True
                 elif "spin" in msg:                # Q/E -> flip swarm orbit CW/CCW (or 0 = stop)
                     ctrl["spin"] = float(msg["spin"])
-                elif msg.get("burst"):             # F -> gather-then-burst wave
+                elif msg.get("burst"):             # 2 -> Wave (gather then burst outward)
                     ctrl["burst"] = True
-                elif msg.get("pulse"):             # spacebar -> Pulse surge
+                elif msg.get("drill"):             # 3 -> Drill (gather then pierce forward)
+                    ctrl["drill"] = True
+                elif msg.get("pulse"):             # 1 -> Pulse surge
                     ctrl["pulse"] = True
                 elif "dir" in msg:                 # keyboard (arrows/WASD)
                     ctrl["dir"] = msg["dir"]
@@ -216,9 +219,12 @@ async def ws(sock: WebSocket) -> None:
         loop = asyncio.get_event_loop()
         PULSE_DUR, PULSE_CD, PULSE_MULT = 18, 180, 6.0   # active ticks / cooldown ticks / dmg x
         BURST_GATHER, BURST_PUSH, BURST_CD = 20, 32, 240  # gather ticks / push ticks / cooldown ticks
+        DRILL_GATHER, DRILL_THRUST, DRILL_CD = 12, 28, 260  # gather / thrust / cooldown ticks
         n = 0
         pulse_start = -PULSE_CD                          # monotonic tick of the last Pulse
         burst_start = -BURST_CD                          # monotonic tick of the last Burst
+        drill_start = -DRILL_CD                          # monotonic tick of the last Drill
+        last_dir = [0, 1]                                # last steer heading (drill aims here); default right
         next_dl = loop.time()                            # absolute frame deadline (drift-corrected)
         while ctrl["alive"]:
             t0 = loop.time()                                  # frame start, for steady pacing
@@ -230,6 +236,7 @@ async def ws(sock: WebSocket) -> None:
                 session.reset(); ctrl["reset"] = False; hold = 0; logged = False
                 pulse_start = -PULSE_CD; session.engine._surge = None   # clear pulse per game
                 burst_start = -BURST_CD; session.engine._burst.zero_()  # clear burst per game
+                drill_start = -DRILL_CD; session.engine._drill.zero_()  # clear drill per game
             elif session.done:
                 hold += 1
                 if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
@@ -237,6 +244,7 @@ async def ws(sock: WebSocket) -> None:
                     session.reset(); hold = 0; logged = False
                     pulse_start = -PULSE_CD; session.engine._surge = None
                     burst_start = -BURST_CD; session.engine._burst.zero_()
+                    drill_start = -DRILL_CD; session.engine._drill.zero_()
             else:
                 if ctrl["pulse"]:                       # consume request; fire only if off cooldown
                     if n - pulse_start >= PULSE_CD:
@@ -248,16 +256,27 @@ async def ws(sock: WebSocket) -> None:
                     session.engine._surge = s
                 else:
                     session.engine._surge = None
-                if ctrl["burst"]:                       # F -> fire if off cooldown
+                if ctrl["burst"]:                       # F -> Wave (fire if off cooldown)
                     if n - burst_start >= BURST_CD:
                         burst_start = n
                     ctrl["burst"] = False
-                bp = n - burst_start
-                session.engine._burst.zero_()
-                if 0 <= bp < BURST_GATHER:              # phase 1: gather the army onto the cursor
+                if ctrl["drill"]:                       # R -> Drill (fire if off cooldown)
+                    if n - drill_start >= DRILL_CD:
+                        drill_start = n
+                    ctrl["drill"] = False
+                if ctrl["dir"] and (ctrl["dir"][0] or ctrl["dir"][1]):
+                    last_dir = ctrl["dir"]              # remember heading so the drill aims where you steer
+                bp, dp = n - burst_start, n - drill_start
+                session.engine._burst.zero_(); session.engine._drill.zero_()
+                if 0 <= bp < BURST_GATHER:                                          # Wave phase 1: gather
                     session.engine._burst[0, 0] = -1.0
-                elif BURST_GATHER <= bp < BURST_GATHER + BURST_PUSH:  # phase 2: blast it outward
+                elif BURST_GATHER <= bp < BURST_GATHER + BURST_PUSH:                # Wave phase 2: burst out
                     session.engine._burst[0, 0] = 1.0
+                if 0 <= dp < DRILL_GATHER:                                          # Drill phase 1: gather
+                    session.engine._burst[0, 0] = -1.0
+                elif DRILL_GATHER <= dp < DRILL_GATHER + DRILL_THRUST:              # Drill phase 2: thrust
+                    session.engine._drill[0, 0, 0] = float(last_dir[0])
+                    session.engine._drill[0, 0, 1] = float(last_dir[1])
                 session.step(ctrl["target"], ctrl["dir"])
             st = session.state(); st["fps"] = round(fps, 1)
             st["pulse_active"] = bool(0 <= n - pulse_start < PULSE_DUR)
@@ -265,6 +284,9 @@ async def ws(sock: WebSocket) -> None:
             bp2 = n - burst_start
             st["burst_active"] = bool(0 <= bp2 < BURST_GATHER + BURST_PUSH)
             st["burst_cd"] = round(min(1.0, bp2 / BURST_CD), 2)
+            dp2 = n - drill_start
+            st["drill_active"] = bool(0 <= dp2 < DRILL_GATHER + DRILL_THRUST)
+            st["drill_cd"] = round(min(1.0, dp2 / DRILL_CD), 2)
             if session.done and not logged:
                 w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])
                 print(f"[telemetry] GAME END map={st['map']} tick={st['tick']} winner=team{w} "

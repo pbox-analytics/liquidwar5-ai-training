@@ -524,6 +524,15 @@ class LiquidWarEngine:
         movable = downhill | (restless & (ng <= cur.unsqueeze(-1) + 12))
         if burst_f is not None:
             movable = movable | ((burst_f > 0).unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 36))
+        # DRILL move: a per-team thrust direction ``_drill`` (dy,dx); the team
+        # pierces FORWARD along it with concentrated speed, regardless of gradient.
+        drill = getattr(self, "_drill", None)
+        drill_fwd = None
+        if drill is not None:
+            dd = drill.gather(1, self.fteam.unsqueeze(-1).expand(B, N, 2))     # (B,N,2) per-fighter thrust dir
+            drill_fwd = dd[..., 0:1] * self._dy_t + dd[..., 1:2] * self._dx_t   # (B,N,8) forward alignment
+            on = (dd.abs().sum(-1, keepdim=True) > 0)                           # (B,N,1) is this team drilling?
+            movable = movable | (on & (drill_fwd > 0) & (ng <= cur.unsqueeze(-1) + 44))
         jitter = torch.randint(0, 7, ng.shape, device=self.device)
         # MOMENTUM / INERTIA: bias each candidate's score toward the fighter's
         # velocity, so a moving mass carries weight — it overshoots, banks around
@@ -565,6 +574,8 @@ class LiquidWarEngine:
         score = ng.float() + jitter.float() - VEL_W * align - swirl - push * out_align
         if burst_f is not None:                                       # gather (-1) inward / burst (+1) outward
             score = score - 15.0 * burst_f.unsqueeze(-1) * out_align
+        if drill_fwd is not None:                                     # DRILL: pierce forward, concentrated
+            score = score - 16.0 * drill_fwd
         order = torch.where(movable, score, score.new_full((), float(BIGG))).argsort(dim=-1)
         ncell_s = ncell.gather(-1, order)                              # cells, best-first
         down_s = movable.gather(-1, order)
