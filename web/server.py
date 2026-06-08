@@ -237,21 +237,21 @@ async def ws(sock: WebSocket) -> None:
             if ctrl["reset"]:
                 session.engine._map_choice = ctrl["map"]   # apply the picked map (None=random)
                 session.reset(); ctrl["reset"] = False; hold = 0; logged = False
-                _e = session.engine; _e._surge = None                   # clear all stance knobs per game
+                _e = session.engine; _e._surge = None; _e._blackhole_pos = None                   # clear all stance knobs per game
                 _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_()
             elif session.done:
                 hold += 1
                 if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
                     session.engine._map_choice = ctrl["map"]   # keep the picked map across games
                     session.reset(); hold = 0; logged = False
-                    _e = session.engine; _e._surge = None
+                    _e = session.engine; _e._surge = None; _e._blackhole_pos = None
                     _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_()
             else:
                 if ctrl["dir"] and (ctrl["dir"][0] or ctrl["dir"][1]):
                     last_dir = ctrl["dir"]                  # heading the Drill/Wall point at
                 _e = session.engine
                 _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_()
-                _e._surge = None
+                _e._surge = None; _e._blackhole_pos = None
                 stance = ctrl["stance"]                     # 0 Swarm 1 Spin 2 Drill 3 Wall 4 Pulse
                 if stance == 0:                             # Swarm: loose, varied-radius orbits (electron cloud)
                     _e._spin[0, 0] = 0.5 * spin_sign
@@ -280,8 +280,10 @@ async def ws(sock: WebSocket) -> None:
                 elif stance == 5:                           # Doom: violent black-hole implosion
                     sgn = spin_sign if spin_sign != 0 else 1
                     _e._spin[0, 0] = 0.25 * sgn             # almost no swirl — pure radial collapse
-                    _e._burst[0, 0] = -6.5                  # OVERWHELMING inward pull — suck every unit to the point
+                    _e._burst[0, 0] = -6.5                  # OVERWHELMING inward pull on its own mass
                     s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = 6.0; _e._surge = s  # tidal devastation
+                    _e._blackhole_pos = _e.cursor_pos[:, 0].float().clone()  # gravity well at YOUR cursor:
+                    _e._blackhole_team = 0; _e._blackhole_str = 22.0         # drags ENEMY units in to be shredded
                 elif stance == 6:                           # Maelstrom: fast wide orbiting shell (whirlpool)
                     sgn = spin_sign if spin_sign != 0 else 1
                     _e._spin[0, 0] = 2.0 * sgn              # whirl fast and wide around the cursor

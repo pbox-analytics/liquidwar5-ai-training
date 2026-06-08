@@ -611,6 +611,21 @@ class LiquidWarEngine:
             fwd_comp = (-ry) * wdd[..., 0] + (-rx) * wdd[..., 1]      # how far ahead/behind that line
             c_face = wdd[..., 0:1] * self._dy_t + wdd[..., 1:2] * self._dx_t
             score = score + 14.0 * torch.sign(fwd_comp).unsqueeze(-1) * c_face
+        # BLACK HOLE (Doom): a cross-team gravity well at one team's cursor that drags
+        # the OTHER teams' fighters in (overriding their own gradient) so they get pulled
+        # into the singularity and devastated. ``_blackhole_pos`` is (B,2); set by the
+        # play server while a team holds Doom.
+        bh = getattr(self, "_blackhole_pos", None)
+        if bh is not None:
+            bh_team = getattr(self, "_blackhole_team", 0)
+            bh_str = getattr(self, "_blackhole_str", 20.0)
+            bhy = bh[:, 0:1] - self.fy                                  # (B,N) toward the well
+            bhx = bh[:, 1:2] - self.fx
+            bhn = (bhy * bhy + bhx * bhx).sqrt().clamp(min=1.0)
+            is_en = (self.fteam != bh_team).unsqueeze(-1)              # (B,N,1) not the well's own team
+            bh_align = (bhy / bhn).unsqueeze(-1) * self._dy_t + (bhx / bhn).unsqueeze(-1) * self._dx_t
+            score = score - bh_str * is_en.float() * bh_align          # enemies prefer the toward-well cell
+            movable = movable | (is_en & (ng <= cur.unsqueeze(-1) + 40))  # let them be dragged even "uphill"
         order = torch.where(movable, score, score.new_full((), float(BIGG))).argsort(dim=-1)
         ncell_s = ncell.gather(-1, order)                              # cells, best-first
         down_s = movable.gather(-1, order)
