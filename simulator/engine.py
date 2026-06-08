@@ -30,6 +30,8 @@ the policy, ``collect_rollout``, eval, and the play server keep working unchange
 """
 from __future__ import annotations
 
+import random
+
 import torch
 
 MAX_TEAMS = 6
@@ -128,27 +130,130 @@ class LiquidWarEngine:
         return self._get_state()
 
     def _generate_random_maps(self) -> torch.Tensor:
-        """One maze: solid border + a central barrier you must flank around (top
-        or bottom lane) + a pillar in each lane. Point-symmetric so both teams
-        get equal terrain. The gradient flood-fill already routes fighters around
-        walls, so the army winds through the gaps and the map plays strategically
-        — hold a chokepoint, or flank the other lane. (Wall thickness scales with
-        the grid; more archetypes can be added + chosen at random later.)
+        """Procedural map generator — each ``reset`` draws a random ARCHETYPE with
+        randomized parameters, always point-symmetric (180° rotation, so both
+        teams get identical terrain) and connectivity-checked (no walled-off
+        pockets where fighters would strand). Archetypes: open arena, central
+        barrier (gapped), pillars, scattered blocks, four rooms, quadrant blocks.
+        The random parameters yield far more than 100 distinct maps; every game is
+        a fresh one. The gradient flood-fill routes the army around whatever walls
+        appear, so no per-map movement code is needed.
+
+        :returns: ``(B, H, W)`` bool wall grid (same map across the batch).
         """
         B, H, W = self.B, self.H, self.W
-        walls = torch.zeros(B, H, W, dtype=torch.bool)
-        walls[:, 0, :] = True
-        walls[:, -1, :] = True
-        walls[:, :, 0] = True
-        walls[:, :, -1] = True
-        th = max(2, round(H / 40))
-        cx = W // 2
-        # central vertical barrier across the middle half -> flank top or bottom
-        walls[:, H // 4:3 * H // 4, cx - th:cx + th + 1] = True
-        # a pillar in each flanking lane (point-symmetric)
-        walls[:, H // 8 - th:H // 8 + th, W // 3 - th:W // 3 + th] = True
-        walls[:, H - H // 8 - th:H - H // 8 + th, W - W // 3 - th:W - W // 3 + th] = True
-        return walls
+        w = self._gen_one_map()
+        for _ in range(11):                              # redraw until connected
+            if self._is_connected(w):
+                break
+            w = self._gen_one_map()
+        return w.unsqueeze(0).expand(B, H, W).contiguous()
+
+    def _gen_one_map(self) -> torch.Tensor:
+        """Draw one random point-symmetric wall layout (no connectivity guarantee
+        — :meth:`_generate_random_maps` retries). Returns an ``(H, W)`` bool grid.
+
+        :returns: ``(H, W)`` bool wall grid on ``self.device``.
+        """
+        H, W, dev = self.H, self.W, self.device
+        w = torch.zeros(H, W, dtype=torch.bool, device=dev)
+        w[0, :] = w[-1, :] = w[:, 0] = w[:, -1] = True       # solid border
+
+        def box(y0: float, y1: float, x0: float, x1: float) -> None:
+            """Fill a rectangle and its 180° rotation (keeps the map fair)."""
+            iy0, iy1 = max(1, int(y0)), min(H - 1, int(y1))
+            ix0, ix1 = max(1, int(x0)), min(W - 1, int(x1))
+            if iy1 > iy0 and ix1 > ix0:
+                w[iy0:iy1, ix0:ix1] = True
+                w[H - iy1:H - iy0, W - ix1:W - ix0] = True
+
+        th = max(2, round(H / 48))
+        arch = random.randint(0, 5)
+        if arch == 0:                                        # open arena (border only)
+            pass
+        elif arch == 1:                                      # central barrier with gaps
+            gaps = random.randint(1, 3)
+            if random.random() < 0.5:                        # vertical barrier
+                cx = W // 2
+                for a, b in self._gapped(H, gaps):
+                    box(a, b, cx - th, cx + th + 1)
+            else:                                            # horizontal barrier
+                cy = H // 2
+                for a, b in self._gapped(W, gaps):
+                    box(cy - th, cy + th + 1, a, b)
+        elif arch == 2:                                      # a few pillars
+            for _ in range(random.randint(2, 5)):
+                ph, pw = random.randint(H // 10, H // 3), random.randint(W // 12, W // 4)
+                py, px = random.randint(3, max(4, H - 3 - ph)), random.randint(3, max(4, W // 2 - pw))
+                box(py, py + ph, px, px + pw)
+        elif arch == 3:                                      # scattered blocks
+            for _ in range(random.randint(8, 18)):
+                s = random.randint(2 * th, max(2 * th + 1, H // 9))
+                py, px = random.randint(3, max(4, H - 3 - s)), random.randint(3, max(4, W // 2 - s))
+                box(py, py + s, px, px + s)
+        elif arch == 4:                                      # four rooms (cross + doorways)
+            cy, cx = H // 2, W // 2
+            dh, dw = random.randint(H // 12, H // 6), random.randint(W // 12, W // 6)
+            w[cy - th:cy + th, :] = True
+            w[:, cx - th:cx + th] = True
+            for dx in (W // 4, 3 * W // 4):                  # doorways through the horizontal wall
+                w[cy - th:cy + th, dx - dw:dx + dw] = False
+            for dy in (H // 4, 3 * H // 4):                  # doorways through the vertical wall
+                w[dy - dh:dy + dh, cx - th:cx + th] = False
+            w[0, :] = w[-1, :] = w[:, 0] = w[:, -1] = True   # re-seal the border
+        else:                                                # walled corners, open center
+            bh, bw = random.randint(H // 6, H // 3), random.randint(W // 8, W // 4)
+            box(2, 2 + bh, 2, 2 + bw)                        # top-left (+ rot bottom-right)
+            box(2, 2 + bh, W - 2 - bw, W - 2)                # top-right (+ rot bottom-left)
+        return w
+
+    def _gapped(self, length: int, gaps: int) -> list[tuple[int, int]]:
+        """Wall segments spanning ``[1, length-1]`` broken by ``gaps`` random
+        chokepoint gaps, so a barrier never fully seals the arena.
+
+        :param length: Span to fill (the barrier's long axis).
+        :param gaps: Number of chokepoint gaps to leave.
+        :returns: List of ``(start, end)`` wall segments along the span.
+        """
+        gw = max(self.H // 14, 6)                            # gap (chokepoint) width
+        lo, hi = length // 6, max(length // 6 + 1, 5 * length // 6)
+        cuts = sorted(random.sample(range(lo, hi), min(gaps, hi - lo)))
+        segs: list[tuple[int, int]] = []
+        a = 1
+        for c in cuts:
+            if c - gw // 2 > a:
+                segs.append((a, c - gw // 2))
+            a = c + gw // 2
+        if length - 1 > a:
+            segs.append((a, length - 1))
+        return segs
+
+    def _is_connected(self, w: torch.Tensor) -> bool:
+        """True if the passable area is essentially one region (>=85% reachable
+        from a seed via 4-connectivity) — rejects walled-off pockets.
+
+        :param w: ``(H, W)`` bool wall grid.
+        :returns: Whether the open area is one connected region.
+        """
+        H, W = self.H, self.W
+        passable = ~w
+        total = int(passable.sum())
+        if total == 0:
+            return False
+        seed = int(passable.view(-1).nonzero()[0])
+        reach = torch.zeros_like(w)
+        reach.view(-1)[seed] = True
+        for _ in range(H + W):                               # iterative 4-conn flood
+            nxt = reach.clone()
+            nxt[1:, :] |= reach[:-1, :]
+            nxt[:-1, :] |= reach[1:, :]
+            nxt[:, 1:] |= reach[:, :-1]
+            nxt[:, :-1] |= reach[:, 1:]
+            nxt &= passable
+            if torch.equal(nxt, reach):
+                break
+            reach = nxt
+        return int(reach.sum()) >= 0.85 * total
 
     def _place_teams(self) -> None:
         """Place ``fighters_per_team`` fighters per team in vertical strips, one

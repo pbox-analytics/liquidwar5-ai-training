@@ -40,7 +40,8 @@ from simulator.engine import LiquidWarEngine, GRADIENT_INF
 
 CKPT_DIR = os.environ.get("LW_CKPT_DIR", "/opt/training/results")  # NFS mount
 DEVICE = os.environ.get("LW_PLAY_DEVICE", "cpu")
-TICK_HZ = float(os.environ.get("LW_TICK_HZ", "22"))               # game + frame rate
+TICK_HZ = float(os.environ.get("LW_TICK_HZ", "60"))               # game + frame rate (60fps;
+#   the deploy over-targets 63 so asyncio's ~1ms sleep granularity lands on a true 60)
 _STATIC = Path(__file__).parent / "static"
 
 
@@ -170,9 +171,9 @@ async def ws(sock: WebSocket) -> None:
         mode=q.get("mode", "play"),
         opponent=q.get("opponent", "latest"),
         teams=int(q.get("teams", "2")),
-        height=int(os.environ.get("LW_PLAY_H", "128")),     # finer grid + more,
-        width=int(os.environ.get("LW_PLAY_W", "192")),      # smaller units -> a
-        fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "2000")),  # fluid mass
+        height=int(os.environ.get("LW_PLAY_H", "192")),     # finer grid + more,
+        width=int(os.environ.get("LW_PLAY_W", "288")),      # smaller units -> a
+        fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),  # dense fluid mass
     )
     ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True,
                             "reset": False, "pulse": False}
