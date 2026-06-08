@@ -282,8 +282,10 @@ async def ws(sock: WebSocket) -> None:
                     _e._spin[0, 0] = 0.25 * sgn             # almost no swirl — pure radial collapse
                     _e._burst[0, 0] = -6.5                  # OVERWHELMING inward pull on its own mass
                     s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = 6.0; _e._surge = s  # tidal devastation
-                    _e._blackhole_pos = _e.cursor_pos[:, 0].float().clone()  # gravity well at YOUR cursor:
-                    _e._blackhole_team = 0; _e._blackhole_str = 22.0         # drags ENEMY units in to be shredded
+                    _e._blackhole_pos = _e.cursor_pos[:, 0].float().clone()  # gravity well at YOUR cursor;
+                    _e._blackhole_team = 0                                    # pull ∝ YOUR mass (real black hole):
+                    _mass = float(_e.team_oh[0, 0].sum())                     # full army -> devastating well,
+                    _e._blackhole_str = 34.0 * _mass / max(1.0, _e.fighters_per_team)  # whittled down -> it fizzles
                 elif stance == 6:                           # Maelstrom: fast wide orbiting shell (whirlpool)
                     sgn = spin_sign if spin_sign != 0 else 1
                     _e._spin[0, 0] = 2.0 * sgn              # whirl fast and wide around the cursor
