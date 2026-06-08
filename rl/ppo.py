@@ -16,7 +16,7 @@ gradient of signal every tick instead of a single sparse end reward.
 
 import torch
 
-from rl.policy import act
+from rl.policy import act, apply_stances
 
 
 def _team_share(engine):
@@ -36,6 +36,7 @@ def collect_rollout(engine, policy, steps, device):
     B, T = engine.B, engine.T
     obs_buf = []
     act_buf = torch.zeros(steps, B, T, dtype=torch.long, device=device)
+    stance_buf = torch.zeros(steps, B, T, dtype=torch.long, device=device)
     logp_buf = torch.zeros(steps, B, T, device=device)
     val_buf = torch.zeros(steps, B, T, device=device)
     rew_buf = torch.zeros(steps, B, T, device=device)
@@ -47,13 +48,12 @@ def collect_rollout(engine, policy, steps, device):
     for s in range(steps):
         obs = engine.get_observation()                  # (B,1+3T,H,W)
         alive = engine.team_alive.clone()
-        # We re-derive move index from dydx is lossy; instead re-call policy
-        # storing the categorical sample. Use act() but we need the discrete
-        # move index for the update, so recompute logits path here.
-        dydx, logprob, value, _ = act(policy, obs, T, alive)
-        # Recover discrete move index from dydx for storage (inverse of MOVE_DYDX)
+        # Policy picks a cursor move AND a tactical stance per team; the joint
+        # log-prob (move + stance) is stored for the PPO ratio.
+        dydx, stance, logprob, value, _ = act(policy, obs, T, alive)
         move_idx = (dydx[..., 0] + 1) * 3 + (dydx[..., 1] + 1)  # (B,T) in 0..8
 
+        apply_stances(engine, stance, dydx)            # drive each team's stance knobs (self-play)
         _, done, info = engine.step(dydx)
 
         share = _team_share(engine)
@@ -62,6 +62,7 @@ def collect_rollout(engine, policy, steps, device):
 
         obs_buf.append(obs)
         act_buf[s] = move_idx
+        stance_buf[s] = stance
         logp_buf[s] = logprob
         val_buf[s] = value
         alive_buf[s] = alive
@@ -85,11 +86,12 @@ def collect_rollout(engine, policy, steps, device):
     # Bootstrap value for the final obs.
     with torch.no_grad():
         last_obs = engine.get_observation()
-        _, _, last_val, _ = act(policy, last_obs, T, engine.team_alive)
+        _, _, _, last_val, _ = act(policy, last_obs, T, engine.team_alive)
 
     return {
         "obs": torch.stack(obs_buf, dim=0),             # (steps,B,1+3T,H,W)
         "actions": act_buf,
+        "stances": stance_buf,
         "logprobs": logp_buf,
         "values": val_buf,
         "rewards": rew_buf,
@@ -146,6 +148,7 @@ def ppo_update(policy, optimizer, rollout, num_teams,
     # Flatten (steps,B,T) -> (N,), keep only alive transitions.
     alive = rollout["alive"].reshape(-1)                  # (steps*B*T,)
     actions = rollout["actions"].reshape(-1)
+    stances = rollout["stances"].reshape(-1)
     old_logp = rollout["logprobs"].reshape(-1)
     adv_f = adv.reshape(-1)
     ret_f = ret.reshape(-1)
@@ -173,16 +176,17 @@ def ppo_update(policy, optimizer, rollout, num_teams,
         perm = idx_alive[torch.randperm(n, device=device)]
         for start in range(0, n, mb_size):
             mb = perm[start:start + mb_size]
-            logits, value = policy(ego[mb])
-            dist = torch.distributions.Categorical(logits=logits)
-            new_logp = dist.log_prob(actions[mb])
+            move_logits, stance_logits, value = policy(ego[mb])
+            mdist = torch.distributions.Categorical(logits=move_logits)
+            sdist = torch.distributions.Categorical(logits=stance_logits)
+            new_logp = mdist.log_prob(actions[mb]) + sdist.log_prob(stances[mb])
             ratio = (new_logp - old_logp[mb]).exp()
             a = adv_f[mb]
             l1 = ratio * a
             l2 = torch.clamp(ratio, 1 - clip, 1 + clip) * a
             policy_loss = -torch.min(l1, l2).mean()
             value_loss = (value - ret_f[mb]).pow(2).mean()
-            entropy = dist.entropy().mean()
+            entropy = (mdist.entropy() + sdist.entropy()).mean()
             loss = policy_loss + vf_coef * value_loss - ent_coef * entropy
 
             optimizer.zero_grad()

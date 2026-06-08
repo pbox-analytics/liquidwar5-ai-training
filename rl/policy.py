@@ -31,6 +31,10 @@ MOVE_DYDX = torch.tensor(
 )
 NUM_MOVES = 9
 EGO_CHANNELS = 6
+#: Tactical stances the policy can hold (mirror the play server / engine knobs):
+#: 0 Swarm / 1 Spin / 2 Drill / 3 Wall / 4 Pulse. The stance head picks one per
+#: team per tick; ``apply_stances`` maps it onto the engine's per-team knobs.
+NUM_STANCES = 5
 
 
 def build_egocentric_obs(obs, num_teams):
@@ -74,7 +78,8 @@ class CursorPolicy(nn.Module):
     team-views; caller reshapes back to (B, T, ...).
     """
 
-    def __init__(self, ego_channels=EGO_CHANNELS, hidden=64, num_moves=NUM_MOVES):
+    def __init__(self, ego_channels=EGO_CHANNELS, hidden=64,
+                 num_moves=NUM_MOVES, num_stances=NUM_STANCES):
         super().__init__()
         self.body = nn.Sequential(
             nn.Conv2d(ego_channels, hidden, 3, padding=1), nn.ReLU(),
@@ -82,9 +87,13 @@ class CursorPolicy(nn.Module):
             nn.Conv2d(hidden, hidden, 3, padding=1, stride=2), nn.ReLU(),
         )
         # Global average + max pool concatenated -> 2*hidden feature vector.
-        self.actor = nn.Sequential(
+        self.actor = nn.Sequential(                       # cursor-move head
             nn.Linear(2 * hidden, hidden), nn.ReLU(),
             nn.Linear(hidden, num_moves),
+        )
+        self.stance_head = nn.Sequential(                 # tactical-stance head
+            nn.Linear(2 * hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, num_stances),
         )
         self.critic = nn.Sequential(
             nn.Linear(2 * hidden, hidden), nn.ReLU(),
@@ -92,14 +101,15 @@ class CursorPolicy(nn.Module):
         )
 
     def forward(self, x):
-        """x: (N, EGO_CHANNELS, H, W) -> (logits (N, num_moves), value (N,))."""
+        """x: (N, EGO, H, W) -> (move_logits (N,moves), stance_logits (N,stances), value (N,))."""
         h = self.body(x)
         gap = h.mean(dim=(2, 3))
         gmp = h.amax(dim=(2, 3))
         feat = torch.cat([gap, gmp], dim=1)
-        logits = self.actor(feat)
+        move_logits = self.actor(feat)
+        stance_logits = self.stance_head(feat)
         value = self.critic(feat).squeeze(-1)
-        return logits, value
+        return move_logits, stance_logits, value
 
 
 def act(policy, obs, num_teams, team_alive=None, deterministic=False):
@@ -114,24 +124,29 @@ def act(policy, obs, num_teams, team_alive=None, deterministic=False):
 
     Returns:
         actions: (B, T, 2) long in {-1,0,1} for engine.step.
-        logprob: (B, T) log-prob of the chosen move (0 for dead teams).
+        stance:  (B, T) long in 0..NUM_STANCES-1 (feed to :func:`apply_stances`).
+        logprob: (B, T) joint log-prob of (move, stance) (0 for dead teams).
         value:   (B, T) critic value.
-        entropy: (B, T) policy entropy.
+        entropy: (B, T) joint policy entropy.
     """
     B = obs.shape[0]
     T = num_teams
     ego = build_egocentric_obs(obs, T)            # (B,T,EGO,H,W)
     flat = ego.reshape(B * T, EGO_CHANNELS, *ego.shape[-2:])
-    logits, value = policy(flat)                   # (B*T, 9), (B*T,)
-    dist = torch.distributions.Categorical(logits=logits)
+    move_logits, stance_logits, value = policy(flat)       # (B*T,9), (B*T,5), (B*T,)
+    mdist = torch.distributions.Categorical(logits=move_logits)
+    sdist = torch.distributions.Categorical(logits=stance_logits)
     if deterministic:
-        move = logits.argmax(dim=-1)
+        move = move_logits.argmax(dim=-1)
+        stance = stance_logits.argmax(dim=-1)
     else:
-        move = dist.sample()
-    logprob = dist.log_prob(move)
-    entropy = dist.entropy()
+        move = mdist.sample()
+        stance = sdist.sample()
+    logprob = mdist.log_prob(move) + sdist.log_prob(stance)   # joint (independent heads)
+    entropy = mdist.entropy() + sdist.entropy()
 
     move = move.view(B, T)
+    stance = stance.view(B, T)
     logprob = logprob.view(B, T)
     value = value.view(B, T)
     entropy = entropy.view(B, T)
@@ -140,10 +155,43 @@ def act(policy, obs, num_teams, team_alive=None, deterministic=False):
 
     if team_alive is not None:
         dead = ~team_alive
-        # Dead teams: force "stay" (zero the (dy,dx)) and zero logprob.
+        # Dead teams: force "stay" + Swarm, zero logprob/value/entropy.
         dydx = torch.where(dead.unsqueeze(-1), torch.zeros_like(dydx), dydx)
+        stance = torch.where(dead, torch.zeros_like(stance), stance)
         logprob = torch.where(dead, torch.zeros_like(logprob), logprob)
         value = torch.where(dead, torch.zeros_like(value), value)
         entropy = torch.where(dead, torch.zeros_like(entropy), entropy)
 
-    return dydx, logprob, value, entropy
+    return dydx, stance, logprob, value, entropy
+
+
+def apply_stances(engine, stance, dydx):
+    """Set the engine's per-team knobs from each team's chosen stance — the exact
+    Swarm/Spin/Drill/Wall/Pulse mapping the play server applies from player keys,
+    but vectorized over all (B, T) teams. Call right before ``engine.step``.
+
+    :param engine: the :class:`LiquidWarEngine` being driven.
+    :param stance: ``(B, T)`` long in 0..4 (the chosen stance per team).
+    :param dydx: ``(B, T, 2)`` the cursor move, reused as the Drill/Wall aim.
+    """
+    B, T = stance.shape
+    dev = stance.device
+    spin = torch.zeros(B, T, device=dev)
+    burst = torch.zeros(B, T, device=dev)
+    drill = torch.zeros(B, T, 2, device=dev)
+    wall = torch.zeros(B, T, 2, device=dev)
+    surge = torch.ones(B, T, device=dev)
+    aim = dydx.float()
+    sw, sp, dr, wl, pu = (stance == 0), (stance == 1), (stance == 2), (stance == 3), (stance == 4)
+    spin = torch.where(sw, torch.full_like(spin, 0.5), spin)      # Swarm: loose orbit
+    burst = torch.where(sw, torch.full_like(burst, 0.15), burst)
+    spin = torch.where(sp, torch.full_like(spin, 1.7), spin)      # Spin: tight fast vortex
+    burst = torch.where(sp, torch.full_like(burst, -0.4), burst)
+    spin = torch.where(dr, torch.full_like(spin, 0.5), spin)      # Drill: pierce (medium mode)
+    drill = torch.where(dr.unsqueeze(-1), aim * 0.62, drill)
+    surge = torch.where(dr, torch.full_like(surge, 2.0), surge)
+    wall = torch.where(wl.unsqueeze(-1), aim, wall)              # Wall: shield across the aim
+    ring = float(torch.sin(torch.as_tensor(float(engine.tick) * 0.33)))   # Pulse: concentric rings
+    burst = torch.where(pu, torch.full_like(burst, 1.0 if ring > 0 else -0.6), burst)
+    surge = torch.where(pu, torch.full_like(surge, 4.0 if ring > 0.5 else 1.0), surge)
+    engine._spin, engine._burst, engine._drill, engine._wall, engine._surge = spin, burst, drill, wall, surge

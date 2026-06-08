@@ -39,7 +39,7 @@ from pathlib import Path
 
 import torch
 
-from rl.policy import CursorPolicy, act
+from rl.policy import CursorPolicy, act, apply_stances
 from simulator.engine import LiquidWarEngine
 
 
@@ -82,7 +82,7 @@ def _opponent_dydx(opponent, engine: LiquidWarEngine, obs: torch.Tensor) -> torc
         return _heuristic_dydx(engine)
     if opponent == "random":
         return torch.randint(-1, 2, (B, T, 2), device=engine.device)
-    dydx, _, _, _ = act(opponent, obs, T, engine.team_alive, deterministic=True)
+    dydx, _, _, _, _ = act(opponent, obs, T, engine.team_alive, deterministic=True)
     return dydx
 
 
@@ -106,10 +106,16 @@ def win_rate(eval_policy: CursorPolicy, opponent, *, games: int = 128,
     winners = torch.full((B,), -1, dtype=torch.long, device=device)  # -1 = unfinished
     for _ in range(max_ticks):
         obs = engine.get_observation()
-        eval_dydx, _, _, _ = act(eval_policy, obs, T, engine.team_alive,
-                                 deterministic=True)
+        eval_dydx, eval_stance, _, _, _ = act(eval_policy, obs, T, engine.team_alive,
+                                              deterministic=True)
         dydx = _opponent_dydx(opponent, engine, obs)
         dydx[:, 0] = eval_dydx[:, 0]                  # team 0 = eval policy
+        # team 0 holds its chosen stance; opponents (1..) stay un-stanced (default).
+        st = torch.zeros(B, T, dtype=torch.long, device=device)
+        st[:, 0] = eval_stance[:, 0]
+        apply_stances(engine, st, dydx)
+        engine._spin[:, 1:] = 1.0; engine._burst[:, 1:] = 0.0
+        engine._drill[:, 1:] = 0.0; engine._wall[:, 1:] = 0.0; engine._surge[:, 1:] = 1.0
         _, done, _ = engine.step(dydx)
         newly = done & (winners < 0)
         if newly.any():
