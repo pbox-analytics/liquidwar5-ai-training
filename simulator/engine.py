@@ -389,7 +389,7 @@ class LiquidWarEngine:
         cpos = self.cursor_pos[b, self.fteam]                          # (B,N,2)
         ry = (cpos[..., 0] - self.fy).float(); rx = (cpos[..., 1] - self.fx).float()
         rn = (ry * ry + rx * rx).sqrt().clamp(min=1.0)
-        SWIRL_W = 9.0
+        SWIRL_W = 11.0
         swirl = SWIRL_W * ((-rx / rn).unsqueeze(-1) * self._dy_t + (ry / rn).unsqueeze(-1) * self._dx_t)
         # PERISTALTIC EDGE PUSH: a wave-modulated OUTWARD bias (rides the same
         # traveling wave as the restless gate). On a crest the rim extends outward
