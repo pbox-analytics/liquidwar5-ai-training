@@ -180,9 +180,9 @@ async def ws(sock: WebSocket) -> None:
         mode=q.get("mode", "play"),
         opponent=q.get("opponent", "latest"),
         teams=int(q.get("teams", "2")),
-        height=int(os.environ.get("LW_PLAY_H", "272")),     # 2x-area battlefield, density
-        width=int(os.environ.get("LW_PLAY_W", "408")),      # kept (16k/team) — ~12ms warm,
-        fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "16000")),  # stays at 60fps (4x area dips under)
+        height=int(os.environ.get("LW_PLAY_H", "272")),     # 2x-area battlefield (roomier;
+        width=int(os.environ.get("LW_PLAY_W", "408")),      # holds 60fps), 8000/team
+        fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),
     )
     ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True, "reset": False,
                             "map": None, "spin": None, "stance": 0, "drill_mode": 0}

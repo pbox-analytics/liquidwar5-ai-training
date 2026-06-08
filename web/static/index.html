@@ -50,6 +50,12 @@
       <option value="latest">Latest checkpoint</option>
       <option value="heuristic">Heuristic AI</option>
     </select>
+    <select id="oppcount" title="Number of AI opponents">
+      <option value="1">1 opponent</option>
+      <option value="2">2 opponents</option>
+      <option value="3">3 opponents</option>
+      <option value="4">4 opponents</option>
+    </select>
     <select id="mapsel" title="Pick the map (Random = a fresh one each game)">
       <option value="-1">Map: Random</option>
       <option value="0">Map: Open</option>
@@ -195,7 +201,8 @@ function connect() {
   const mode = document.getElementById("mode").value;
   const opp = document.getElementById("opponent").value;
   document.getElementById("modeLabel").textContent = mode;
-  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?mode=${mode}&opponent=${opp}&teams=2`);
+  const teams = parseInt(document.getElementById("oppcount").value) + 1;   // you + N opponents
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?mode=${mode}&opponent=${opp}&teams=${teams}`);
   ws.onmessage = (e) => render(JSON.parse(e.data));   // server streams frames; just render
 }
 
@@ -238,6 +245,7 @@ window.addEventListener("keyup",   (e) => { if (e.key in KEYS) { KEYS[e.key] = 0
 document.getElementById("reset").onclick = () => ws && ws.send(JSON.stringify({reset:true}));
 document.getElementById("mode").onchange = connect;
 document.getElementById("opponent").onchange = connect;
+document.getElementById("oppcount").onchange = connect;
 document.getElementById("mapsel").onchange = () => {     // pick map -> tell server, start new game
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ map: parseInt(document.getElementById("mapsel").value) }));
 };
