@@ -88,11 +88,17 @@ function render(st) {
   ctx.fillStyle = trails ? "rgba(5,7,12,0.30)" : EMPTY;
   ctx.fillRect(0, 0, W, H);
   ctx.drawImage(tmp, 0, 0);
-  // COLLISION FX: additive warm sparks along the clash front. They stack where
-  // the fighting is fiercest, and (with trails on) streak as the line shifts.
+  // COLLISION FX: team-tinted, layered sparks along the clash front (all additive,
+  // so dense fighting blows out bright). Wide team-colour halo -> tighter team
+  // core -> white-hot center. They stack where it's fiercest and streak with trails.
   if (clash.length) {
     ctx.globalCompositeOperation = "lighter";
-    ctx.fillStyle = "rgba(255,234,150,0.55)";
+    ctx.globalAlpha = 0.25;                                  // wide team-tinted halo
+    for (const i of clash) { ctx.fillStyle = COLORS[g[i] % COLORS.length]; ctx.fillRect((i % W) - 2, ((i / W) | 0) - 2, 5, 5); }
+    ctx.globalAlpha = 0.6;                                   // tighter, brighter team core
+    for (const i of clash) { ctx.fillStyle = COLORS[g[i] % COLORS.length]; ctx.fillRect((i % W) - 1, ((i / W) | 0) - 1, 3, 3); }
+    ctx.globalAlpha = 1;                                     // white-hot center
+    ctx.fillStyle = "#ffffff";
     for (const i of clash) ctx.fillRect(i % W, (i / W) | 0, 1, 1);
     ctx.globalCompositeOperation = "source-over";
   }
