@@ -197,4 +197,13 @@ def apply_stances(engine, stance, dydx, team_start=0):
     ring = float(torch.sin(torch.as_tensor(float(engine.tick) * 0.33)))   # Pulse: concentric rings
     burst = torch.where(pu, torch.full_like(burst, 1.0 if ring > 0 else -0.6), burst)
     surge = torch.where(pu, torch.full_like(surge, 4.0 if ring > 0.5 else 1.0), surge)
-    engine._spin, engine._burst, engine._drill, engine._wall, engine._surge = spin, burst, drill, wall, surge
+    if team_start <= 0:                                          # training: drive all teams
+        engine._spin, engine._burst, engine._drill, engine._wall, engine._surge = spin, burst, drill, wall, surge
+    else:                                                        # play: ONLY the AI opponents 1..; keep team 0 (human)
+        if engine._surge is None:
+            engine._surge = torch.ones(B, T, device=dev)
+        engine._spin[:, team_start:] = spin[:, team_start:]
+        engine._burst[:, team_start:] = burst[:, team_start:]
+        engine._drill[:, team_start:] = drill[:, team_start:]
+        engine._wall[:, team_start:] = wall[:, team_start:]
+        engine._surge[:, team_start:] = surge[:, team_start:]
