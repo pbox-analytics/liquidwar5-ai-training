@@ -619,13 +619,17 @@ class LiquidWarEngine:
         if bh is not None:
             bh_team = getattr(self, "_blackhole_team", 0)
             bh_str = getattr(self, "_blackhole_str", 20.0)
+            bh_R = getattr(self, "_blackhole_range", 55.0)             # FINITE reach -> distant forces escape
             bhy = bh[:, 0:1] - self.fy                                  # (B,N) toward the well
             bhx = bh[:, 1:2] - self.fx
             bhn = (bhy * bhy + bhx * bhx).sqrt().clamp(min=1.0)
-            is_en = (self.fteam != bh_team).unsqueeze(-1)              # (B,N,1) not the well's own team
+            falloff = (bh_R * bh_R) / (bhn * bhn + bh_R * bh_R)         # 1 at the well, ->0 far (no map-wide vacuum)
+            is_en = (self.fteam != bh_team)                            # (B,N) not the well's own team
+            in_range = bhn < bh_R * 2.5                                # only nearby enemies get caught/dragged
+            pull = (bh_str * falloff * is_en.float()).unsqueeze(-1)    # (B,N,1) distance-weighted
             bh_align = (bhy / bhn).unsqueeze(-1) * self._dy_t + (bhx / bhn).unsqueeze(-1) * self._dx_t
-            score = score - bh_str * is_en.float() * bh_align          # enemies prefer the toward-well cell
-            movable = movable | (is_en & (ng <= cur.unsqueeze(-1) + 40))  # let them be dragged even "uphill"
+            score = score - pull * bh_align                            # near enemies sucked in; distant ones free
+            movable = movable | ((is_en & in_range).unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 40))
         order = torch.where(movable, score, score.new_full((), float(BIGG))).argsort(dim=-1)
         ncell_s = ncell.gather(-1, order)                              # cells, best-first
         down_s = movable.gather(-1, order)
