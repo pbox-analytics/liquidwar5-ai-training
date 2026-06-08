@@ -71,6 +71,7 @@ class GameSession:
         # Cap gradient sweeps/tick so a fresh game's cold flood spreads over a few
         # frames (the persistent field accumulates) instead of one ~88ms stutter.
         self.engine._grad_cap = 48
+        self.engine._spin = torch.ones(1, teams, device=DEVICE)  # per-team orbit sign; player flips team 0
         self.engine.reset()
         self.policy: CursorPolicy | None = None
         self.ckpt_name = opponent
@@ -180,7 +181,7 @@ async def ws(sock: WebSocket) -> None:
         fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),  # dense fluid mass
     )
     ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True,
-                            "reset": False, "pulse": False, "map": None}  # map=None -> random
+                            "reset": False, "pulse": False, "map": None, "spin": None}
 
     async def receiver() -> None:
         try:
@@ -192,6 +193,8 @@ async def ws(sock: WebSocket) -> None:
                     m = msg["map"]
                     ctrl["map"] = None if m is None or m < 0 else int(m)
                     ctrl["reset"] = True
+                elif "spin" in msg:                # Q/E -> flip swarm orbit CW/CCW (or 0 = stop)
+                    ctrl["spin"] = float(msg["spin"])
                 elif msg.get("pulse"):             # spacebar -> Pulse surge
                     ctrl["pulse"] = True
                 elif "dir" in msg:                 # keyboard (arrows/WASD)
@@ -214,6 +217,9 @@ async def ws(sock: WebSocket) -> None:
         next_dl = loop.time()                            # absolute frame deadline (drift-corrected)
         while ctrl["alive"]:
             t0 = loop.time()                                  # frame start, for steady pacing
+            if ctrl["spin"] is not None:                      # apply spin control (persists across games)
+                session.engine._spin[0, 0] = ctrl["spin"]
+                ctrl["spin"] = None
             if ctrl["reset"]:
                 session.engine._map_choice = ctrl["map"]   # apply the picked map (None=random)
                 session.reset(); ctrl["reset"] = False; hold = 0; logged = False

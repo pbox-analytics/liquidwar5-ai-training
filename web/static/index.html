@@ -12,7 +12,14 @@
          display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px; }
   h1 { font-size: 16px; font-weight: 600; margin: 0; letter-spacing: .3px; }
   #hud { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; justify-content: center; }
-  #hud .pill { background: #161b27; border: 1px solid #232a3a; border-radius: 8px; padding: 5px 10px; }
+  #hud .pill { background: #161b27; border: 1px solid #232a3a; border-radius: 8px; padding: 5px 10px;
+               white-space: nowrap; }
+  /* Fixed-width numeric values so changing digits never reflow the toolbar. */
+  #hud .pill b { display: inline-block; text-align: right; font-variant-numeric: tabular-nums; }
+  #tick { min-width: 5ch } #fps { min-width: 4ch } #flood { min-width: 3ch } #spread { min-width: 7ch }
+  #mapname { min-width: 7ch; text-align: left }
+  #pulsePill, #spinPill { display: inline-block; min-width: 8ch; text-align: center }
+  #teams { font-variant-numeric: tabular-nums }
   #teams { display: flex; gap: 8px; }
   #teams .t { display: flex; align-items: center; gap: 5px; }
   #teams .swatch { width: 12px; height: 12px; border-radius: 3px; }
@@ -32,6 +39,7 @@
     <span class="pill">spread <b id="spread">—</b></span>
     <span class="pill">map <b id="mapname">—</b></span>
     <span class="pill" id="pulsePill">⚡ SPACE</span>
+    <span class="pill" id="spinPill">spin ↻</span>
     <span class="pill" id="teams"></span>
     <select id="mode">
       <option value="play">Play (you = team 0)</option>
@@ -53,7 +61,13 @@
     <button id="reset">New game</button>
   </div>
   <canvas id="c" width="110" height="80"></canvas>
-  <div class="muted">Steer with <b>Arrow keys / WASD</b> (or hold the mouse to steer) — your blob (team 0, cyan) follows the cursor.</div>
+  <div class="muted" style="text-align:center; line-height:1.8;">
+    <b>↑ ↓ ← → / WASD</b> steer (or hold mouse) &nbsp;·&nbsp;
+    <b>SPACE</b> Pulse ⚡ &nbsp;·&nbsp;
+    <b>Q</b> spin ↺ &nbsp;·&nbsp; <b>E</b> spin ↻ <span class="muted">(press again to stop)</span> &nbsp;·&nbsp;
+    <b>T</b> trails &nbsp;·&nbsp;
+    <b>New game</b> / <b>Map</b> picker above
+  </div>
 
 <script>
 const COLORS = ["#38e0e0","#ff5470","#4ade80","#fbbf24","#c084fc","#fb923c"]; // team 0 = you
@@ -63,6 +77,9 @@ const tmp = document.createElement("canvas"), tmpCtx = tmp.getContext("2d");  //
 let trails = true;   // motion trails: fade each frame so flow/swirl/undulation streak (toggle: T)
 let particles = [];  // collision-spark particles {x,y,vx,vy,life,col} that fly out + fade
 const MAXP = 1600;
+let spin = 1;        // swarm orbit sign mirrored to the server (1 / -1 / 0)
+function updateSpinPill() { document.getElementById("spinPill").textContent = "spin " + (spin === 1 ? "↻" : spin === -1 ? "↺" : "·"); }
+function sendSpin() { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ spin })); updateSpinPill(); }
 let W = 110, H = 80, TEAMS = 4, target = null, ws = null, scale = 7;
 
 function sizeCanvas() {
@@ -166,7 +183,7 @@ function render(st) {
   const tdiv = document.getElementById("teams"); tdiv.innerHTML = "";
   st.fighters.forEach((f, t) => {
     const el = document.createElement("span"); el.className = "t";
-    el.innerHTML = `<span class="swatch" style="background:${COLORS[t%COLORS.length]}"></span>${f}`;
+    el.innerHTML = `<span class="swatch" style="background:${COLORS[t%COLORS.length]}"></span><span style="display:inline-block;min-width:4ch;text-align:right">${f}</span>`;
     if (!st.alive[t]) el.style.opacity = .35; tdiv.appendChild(el);
   });
 }
@@ -208,6 +225,8 @@ function sendDir() {
 window.addEventListener("keydown", (e) => {
   if (e.key === " ") { e.preventDefault(); if (ws && ws.readyState === 1) ws.send(JSON.stringify({ pulse: true })); return; }  // Pulse
   if (e.key === "t" || e.key === "T") { trails = !trails; return; }   // toggle motion trails
+  if (e.key === "q" || e.key === "Q") { spin = spin === -1 ? 0 : -1; sendSpin(); return; }  // orbit CCW / off
+  if (e.key === "e" || e.key === "E") { spin = spin === 1 ? 0 : 1; sendSpin(); return; }    // orbit CW / off
   if (e.key in KEYS) { KEYS[e.key] = 1; e.preventDefault(); sendDir(); }
 });
 window.addEventListener("keyup",   (e) => { if (e.key in KEYS) { KEYS[e.key] = 0; e.preventDefault(); sendDir(); } });
@@ -218,7 +237,7 @@ document.getElementById("mapsel").onchange = () => {     // pick map -> tell ser
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ map: parseInt(document.getElementById("mapsel").value) }));
 };
 window.addEventListener("resize", sizeCanvas);
-sizeCanvas(); connect();
+sizeCanvas(); connect(); updateSpinPill();
 </script>
 </body>
 </html>
