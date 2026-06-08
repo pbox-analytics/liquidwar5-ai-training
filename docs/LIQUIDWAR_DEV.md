@@ -96,9 +96,9 @@ steps cell-by-cell so it can't slide through a barrier.
 
 - **Movement feel** — constants in `_move_fighters` / `_move_cursors` (`VEL_W`,
   `MOM`, `SWIRL_W`, `PUSH_W`, wave/jitter, `cursor_speed`, `unit_speed`).
-- **Play size / rate** — `web/server.py` defaults: grid **192×288**, **8000**
-  fighters/team, **60Hz** (deploy over-targets 63). Env-overridable: `LW_PLAY_H/W/
-  FIGHTERS`, `LW_TICK_HZ`.
+- **Play size / rate** — `web/server.py` defaults: grid **272×408** (2× area —
+  holds 60fps; 4× dips under), **16000** fighters/team, **60Hz** (deploy
+  over-targets 63). Env-overridable: `LW_PLAY_H/W/FIGHTERS`, `LW_TICK_HZ`.
 - **Combat / Pulse** — constants in the engine / `web/server.py`.
 
 ## 9. Next
