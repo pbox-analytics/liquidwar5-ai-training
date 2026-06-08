@@ -126,27 +126,35 @@ class GameSession:
         # army spread = mean fighter distance to its own cursor. Spread should
         # FALL as the army flows in and packs around the cursor; a stuck/funneled
         # army keeps a high spread — the quantitative read on "does it flow."
-        reach = int((~e.walls[0]).sum())
-        flood = int((e.gradient[0, 0] < GRADIENT_INF).sum())
-        spread = []
-        for t in range(e.T):
-            ys, xs = torch.where(oh[t] > 0)
-            if ys.numel():
-                cy, cx = e.cursor_pos[0, t].float()
-                spread.append(round(float(((ys.float() - cy) ** 2 + (xs.float() - cx) ** 2).sqrt().mean()), 1))
-            else:
-                spread.append(0.0)
+        # HUD metrics (counts / flood / spread) each force a GPU->CPU sync; they're
+        # display-only, so recompute at ~10Hz (every 6 ticks) and cache — keeps the
+        # per-frame sync count (hence the frame rate) low. Render-essential fields
+        # (grid, cursors, alive) stay per-frame.
+        if not hasattr(self, "_hud") or int(e.tick) % 6 == 0:
+            reach = int((~e.walls[0]).sum())
+            flood = int((e.gradient[0, 0] < GRADIENT_INF).sum())
+            spread = []
+            for t in range(e.T):
+                ys, xs = torch.where(oh[t] > 0)
+                if ys.numel():
+                    cy, cx = e.cursor_pos[0, t].float()
+                    spread.append(round(float(((ys.float() - cy) ** 2 + (xs.float() - cx) ** 2).sqrt().mean()), 1))
+                else:
+                    spread.append(0.0)
+            self._hud = {
+                "fighters": oh.sum(dim=(1, 2)).long().tolist(),
+                "flood_pct": round(100 * flood / max(reach, 1)),
+                "spread": spread,
+            }
         return {
             "tick": int(e.tick),
             "h": e.H, "w": e.W, "teams": e.T,
             "opponent": self.ckpt_name,
             "grid_b64": base64.b64encode(cell.cpu().numpy().tobytes()).decode(),
             "cursors": e.cursor_pos[0].tolist(),
-            "fighters": oh.sum(dim=(1, 2)).long().tolist(),
             "alive": e.team_alive[0].tolist(),
             "done": self.done,
-            "flood_pct": round(100 * flood / max(reach, 1)),
-            "spread": spread,
+            **self._hud,
         }
 
 
@@ -194,6 +202,7 @@ async def ws(sock: WebSocket) -> None:
         PULSE_DUR, PULSE_CD, PULSE_MULT = 18, 180, 6.0   # active ticks / cooldown ticks / dmg x
         n = 0
         pulse_start = -PULSE_CD                          # monotonic tick of the last Pulse
+        next_dl = loop.time()                            # absolute frame deadline (drift-corrected)
         while ctrl["alive"]:
             t0 = loop.time()                                  # frame start, for steady pacing
             if ctrl["reset"]:
@@ -231,10 +240,17 @@ async def ws(sock: WebSocket) -> None:
                 await sock.send_json(st)
             except Exception:
                 break
-            await asyncio.sleep(max(0.0, dt - (loop.time() - t0)))   # sleep only the remainder -> steady dt
+            t_work = loop.time()
+            next_dl += dt                                # advance the absolute deadline
+            sleep = next_dl - loop.time()
+            if sleep < -dt:                              # fell far behind -> resync (don't spiral)
+                next_dl = loop.time(); sleep = 0.0
+            await asyncio.sleep(max(0.0, sleep))
             now = loop.time()
             if prev is not None and now > prev:        # measure actual loop period
                 fps = 0.9 * fps + 0.1 / (now - prev)
+            if n % 120 == 0:
+                print(f"[perf] work={(t_work - t0) * 1000:.1f}ms period={(now - t0) * 1000:.1f}ms fps={fps:.0f}", flush=True)
             prev = now
             n += 1                                     # advance the pulse clock (was missing -> Pulse stuck on)
 
