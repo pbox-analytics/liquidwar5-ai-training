@@ -18,7 +18,7 @@
   #hud .pill b { display: inline-block; text-align: right; font-variant-numeric: tabular-nums; }
   #tick { min-width: 5ch } #fps { min-width: 4ch } #flood { min-width: 3ch } #spread { min-width: 7ch }
   #mapname { min-width: 7ch; text-align: left }
-  #stancePill { display: inline-block; min-width: 9ch; text-align: center; font-weight: 700 }
+  #stancePill { display: inline-block; min-width: 12ch; text-align: center; font-weight: 700 }
   #spinPill { display: inline-block; min-width: 8ch; text-align: center }
   #teams { font-variant-numeric: tabular-nums }
   #teams { display: flex; gap: 8px; }
@@ -64,7 +64,7 @@
   <canvas id="c" width="110" height="80"></canvas>
   <div class="muted" style="text-align:center; line-height:1.8;">
     <b>↑ ↓ ← → / WASD</b> steer (or hold mouse) &nbsp;·&nbsp;
-    <b>Stances</b> (hold one): <b>1</b> 🐝 Swarm &nbsp; <b>2</b> 🌀 Spin &nbsp; <b>3</b> ➤ Drill &nbsp; <b>4</b> 🛡 Wall &nbsp; <b>5</b> 💥 Pulse &nbsp;·&nbsp;
+    <b>Stances</b> (hold one): <b>1</b> 🐝 Swarm &nbsp; <b>2</b> 🌀 Spin &nbsp; <b>3</b> ➤ Drill <span class="muted">(tap to rev: slow→fast)</span> &nbsp; <b>4</b> 🛡 Wall &nbsp; <b>5</b> 💥 Pulse &nbsp;·&nbsp;
     <b>Q</b>/<b>E</b> spin direction &nbsp;·&nbsp;
     <b>T</b> trails &nbsp;·&nbsp;
     <b>New game</b> / <b>Map</b> picker above
@@ -179,7 +179,7 @@ function render(st) {
   const sp = document.getElementById("stancePill");
   const SC = { Swarm: "#1b2233", Spin: "#0c3a4a", Drill: "#5a3a0c", Wall: "#14401f", Pulse: "#3a1040" };
   const SI = { Swarm: "🐝", Spin: "🌀", Drill: "➤", Wall: "🛡", Pulse: "💥" };
-  sp.textContent = (SI[st.stance] || "") + " " + (st.stance ?? "—");
+  sp.textContent = (SI[st.stance] || "") + " " + (st.stance ?? "—") + (st.mode ? " ·" + st.mode : "");
   sp.style.background = SC[st.stance] || "#1b2233"; sp.style.color = "#fff";
   document.getElementById("opp").textContent = st.opponent;
   const tdiv = document.getElementById("teams"); tdiv.innerHTML = "";

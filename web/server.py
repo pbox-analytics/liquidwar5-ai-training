@@ -185,7 +185,7 @@ async def ws(sock: WebSocket) -> None:
         fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),  # dense fluid mass
     )
     ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True, "reset": False,
-                            "map": None, "spin": None, "stance": 0}
+                            "map": None, "spin": None, "stance": 0, "drill_mode": 0}
 
     async def receiver() -> None:
         try:
@@ -199,8 +199,13 @@ async def ws(sock: WebSocket) -> None:
                     ctrl["reset"] = True
                 elif "spin" in msg:                # Q/E -> orbit direction (Spin/Swarm stances)
                     ctrl["spin"] = float(msg["spin"])
-                elif "stance" in msg:              # 1-5 -> select the held tactical stance (0..4)
-                    ctrl["stance"] = max(0, min(4, int(msg["stance"])))
+                elif "stance" in msg:              # 1-5 -> select held stance; re-tap Drill(3) revs its mode
+                    s = max(0, min(4, int(msg["stance"])))
+                    if s == 2 and ctrl["stance"] == 2:
+                        ctrl["drill_mode"] = (ctrl["drill_mode"] + 1) % 3
+                    elif s == 2:
+                        ctrl["drill_mode"] = 0
+                    ctrl["stance"] = s
                 elif "dir" in msg:                 # keyboard (arrows/WASD)
                     ctrl["dir"] = msg["dir"]
                 elif "target" in msg:              # mouse
@@ -243,13 +248,21 @@ async def ws(sock: WebSocket) -> None:
                 _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_()
                 _e._surge = None
                 stance = ctrl["stance"]                     # 0 Swarm 1 Spin 2 Drill 3 Wall 4 Pulse
-                if stance == 0:                             # Swarm: gentle orbit + flow in
-                    _e._spin[0, 0] = 0.6 * spin_sign
-                elif stance == 1:                           # Spin: hard orbit, Q/E direction
-                    _e._spin[0, 0] = 1.5 * spin_sign
-                elif stance == 2:                           # Drill: tight spinning pierce (corkscrew)
-                    _e._spin[0, 0] = 0.5 * spin_sign        # light spin so the column stays narrow
-                    _e._drill[0, 0, 0] = float(last_dir[0]); _e._drill[0, 0, 1] = float(last_dir[1])
+                if stance == 0:                             # Swarm: loose, varied-radius orbits (electron cloud)
+                    _e._spin[0, 0] = 0.5 * spin_sign
+                    _e._burst[0, 0] = 0.15                  # slight loosen -> a diffuse orbiting cloud
+                elif stance == 1:                           # Spin: tighten in + whirl FAST -> a compact vortex
+                    _e._spin[0, 0] = 1.7 * spin_sign
+                    _e._burst[0, 0] = -0.4                  # pull tight so it spins fast (Q/E sets direction)
+                elif stance == 2:                           # Drill: 3 modes (slow/med/fast) — grind vs advance
+                    m = ctrl["drill_mode"]                  # 0 slow / 1 med / 2 fast (tap 3 to rev)
+                    DSPIN = (0.3, 0.7, 1.5); DSURGE = (1.0, 2.0, 4.0); DADV = (1.0, 0.62, 0.34)
+                    sgn = spin_sign if spin_sign != 0 else 1   # the bit always spins
+                    _e._spin[0, 0] = DSPIN[m] * sgn         # faster spin -> harder grind, but looser + slower
+                    _e._drill[0, 0, 0] = float(last_dir[0]) * DADV[m]  # |drill| = advance speed
+                    _e._drill[0, 0, 1] = float(last_dir[1]) * DADV[m]
+                    if DSURGE[m] > 1.0:                     # the spinning front grinds (chews) harder
+                        s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = DSURGE[m]; _e._surge = s
                 elif stance == 3:                           # Wall: dense shield bar across the facing
                     _e._wall[0, 0, 0] = float(last_dir[0]); _e._wall[0, 0, 1] = float(last_dir[1])
                 elif stance == 4:                           # Pulse: concentric rings + damage waves
@@ -262,6 +275,7 @@ async def ws(sock: WebSocket) -> None:
                 session.step(ctrl["target"], ctrl["dir"])
             st = session.state(); st["fps"] = round(fps, 1)
             st["stance"] = STANCES[ctrl["stance"]]      # held tactical state
+            st["mode"] = ("slow", "med", "fast")[ctrl["drill_mode"]] if ctrl["stance"] == 2 else ""
             st["spin_dir"] = spin_sign
             if session.done and not logged:
                 w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])
