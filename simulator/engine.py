@@ -576,9 +576,14 @@ class LiquidWarEngine:
         # cross at the center = a lemniscate / electron-orbital churn, not a flat spin.
         fig8 = getattr(self, "_fig8", None)
         if fig8 is not None:
-            on8 = (fig8.gather(1, self.fteam) > 0).unsqueeze(-1)       # (B,N,1) is this team in Atom?
-            side = torch.sign(rx).unsqueeze(-1)                        # which side of the cursor (±1)
-            swirl = torch.where(on8, swirl * side, swirl)
+            on8 = (fig8.gather(1, self.fteam) > 0)                     # (B,N) is this team in Atom?
+            R8 = 8.0                                                   # half-distance between the two lobe centers
+            s = torch.sign(-rx)                                        # +1 right of cursor, -1 left (fx-cx)
+            lrx = rx + s * R8                                          # radial to the per-side lobe centre (±R8 in x)
+            lrn = (lrx * lrx + ry * ry).sqrt().clamp(min=1.0)
+            tang = (-lrx / lrn).unsqueeze(-1) * self._dy_t + (ry / lrn).unsqueeze(-1) * self._dx_t
+            swirl8 = spin_f * SWIRL_W * swirl_jit * s.unsqueeze(-1) * tang   # lobes counter-rotate -> connect into a ∞
+            swirl = torch.where(on8.unsqueeze(-1), swirl8, swirl)
         # PERISTALTIC EDGE PUSH: a wave-modulated OUTWARD bias (rides the same
         # traveling wave as the restless gate). On a crest the rim extends outward
         # (a pseudopod bulge, up to unit_speed cells); off-crest the inward
