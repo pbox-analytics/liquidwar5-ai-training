@@ -72,6 +72,7 @@ class GameSession:
         # frames (the persistent field accumulates) instead of one ~88ms stutter.
         self.engine._grad_cap = 48
         self.engine._spin = torch.ones(1, teams, device=DEVICE)  # per-team orbit sign; player flips team 0
+        self.engine._burst = torch.zeros(1, teams, device=DEVICE)  # gather(-1)/burst(+1) phase; player drives 0
         self.engine.reset()
         self.policy: CursorPolicy | None = None
         self.ckpt_name = opponent
@@ -180,8 +181,8 @@ async def ws(sock: WebSocket) -> None:
         width=int(os.environ.get("LW_PLAY_W", "288")),      # smaller units -> a
         fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),  # dense fluid mass
     )
-    ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True,
-                            "reset": False, "pulse": False, "map": None, "spin": None}
+    ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True, "reset": False,
+                            "pulse": False, "map": None, "spin": None, "burst": False}
 
     async def receiver() -> None:
         try:
@@ -195,6 +196,8 @@ async def ws(sock: WebSocket) -> None:
                     ctrl["reset"] = True
                 elif "spin" in msg:                # Q/E -> flip swarm orbit CW/CCW (or 0 = stop)
                     ctrl["spin"] = float(msg["spin"])
+                elif msg.get("burst"):             # F -> gather-then-burst wave
+                    ctrl["burst"] = True
                 elif msg.get("pulse"):             # spacebar -> Pulse surge
                     ctrl["pulse"] = True
                 elif "dir" in msg:                 # keyboard (arrows/WASD)
@@ -212,8 +215,10 @@ async def ws(sock: WebSocket) -> None:
         logged = False                                 # one telemetry line per finished game
         loop = asyncio.get_event_loop()
         PULSE_DUR, PULSE_CD, PULSE_MULT = 18, 180, 6.0   # active ticks / cooldown ticks / dmg x
+        BURST_GATHER, BURST_PUSH, BURST_CD = 20, 32, 240  # gather ticks / push ticks / cooldown ticks
         n = 0
         pulse_start = -PULSE_CD                          # monotonic tick of the last Pulse
+        burst_start = -BURST_CD                          # monotonic tick of the last Burst
         next_dl = loop.time()                            # absolute frame deadline (drift-corrected)
         while ctrl["alive"]:
             t0 = loop.time()                                  # frame start, for steady pacing
@@ -224,12 +229,14 @@ async def ws(sock: WebSocket) -> None:
                 session.engine._map_choice = ctrl["map"]   # apply the picked map (None=random)
                 session.reset(); ctrl["reset"] = False; hold = 0; logged = False
                 pulse_start = -PULSE_CD; session.engine._surge = None   # clear pulse per game
+                burst_start = -BURST_CD; session.engine._burst.zero_()  # clear burst per game
             elif session.done:
                 hold += 1
                 if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
                     session.engine._map_choice = ctrl["map"]   # keep the picked map across games
                     session.reset(); hold = 0; logged = False
                     pulse_start = -PULSE_CD; session.engine._surge = None
+                    burst_start = -BURST_CD; session.engine._burst.zero_()
             else:
                 if ctrl["pulse"]:                       # consume request; fire only if off cooldown
                     if n - pulse_start >= PULSE_CD:
@@ -241,10 +248,23 @@ async def ws(sock: WebSocket) -> None:
                     session.engine._surge = s
                 else:
                     session.engine._surge = None
+                if ctrl["burst"]:                       # F -> fire if off cooldown
+                    if n - burst_start >= BURST_CD:
+                        burst_start = n
+                    ctrl["burst"] = False
+                bp = n - burst_start
+                session.engine._burst.zero_()
+                if 0 <= bp < BURST_GATHER:              # phase 1: gather the army onto the cursor
+                    session.engine._burst[0, 0] = -1.0
+                elif BURST_GATHER <= bp < BURST_GATHER + BURST_PUSH:  # phase 2: blast it outward
+                    session.engine._burst[0, 0] = 1.0
                 session.step(ctrl["target"], ctrl["dir"])
             st = session.state(); st["fps"] = round(fps, 1)
             st["pulse_active"] = bool(0 <= n - pulse_start < PULSE_DUR)
             st["pulse_cd"] = round(min(1.0, (n - pulse_start) / PULSE_CD), 2)  # 1.0 = ready
+            bp2 = n - burst_start
+            st["burst_active"] = bool(0 <= bp2 < BURST_GATHER + BURST_PUSH)
+            st["burst_cd"] = round(min(1.0, bp2 / BURST_CD), 2)
             if session.done and not logged:
                 w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])
                 print(f"[telemetry] GAME END map={st['map']} tick={st['tick']} winner=team{w} "

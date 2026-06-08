@@ -18,7 +18,7 @@
   #hud .pill b { display: inline-block; text-align: right; font-variant-numeric: tabular-nums; }
   #tick { min-width: 5ch } #fps { min-width: 4ch } #flood { min-width: 3ch } #spread { min-width: 7ch }
   #mapname { min-width: 7ch; text-align: left }
-  #pulsePill, #spinPill { display: inline-block; min-width: 8ch; text-align: center }
+  #pulsePill, #spinPill, #burstPill { display: inline-block; min-width: 8ch; text-align: center }
   #teams { font-variant-numeric: tabular-nums }
   #teams { display: flex; gap: 8px; }
   #teams .t { display: flex; align-items: center; gap: 5px; }
@@ -39,6 +39,7 @@
     <span class="pill">spread <b id="spread">—</b></span>
     <span class="pill">map <b id="mapname">—</b></span>
     <span class="pill" id="pulsePill">⚡ SPACE</span>
+    <span class="pill" id="burstPill">🌊 F</span>
     <span class="pill" id="spinPill">spin ↻</span>
     <span class="pill" id="teams"></span>
     <select id="mode">
@@ -64,6 +65,7 @@
   <div class="muted" style="text-align:center; line-height:1.8;">
     <b>↑ ↓ ← → / WASD</b> steer (or hold mouse) &nbsp;·&nbsp;
     <b>SPACE</b> Pulse ⚡ &nbsp;·&nbsp;
+    <b>F</b> Wave 🌊 <span class="muted">(gather → burst)</span> &nbsp;·&nbsp;
     <b>Q</b> spin ↺ &nbsp;·&nbsp; <b>E</b> spin ↻ <span class="muted">(press again to stop)</span> &nbsp;·&nbsp;
     <b>T</b> trails &nbsp;·&nbsp;
     <b>New game</b> / <b>Map</b> picker above
@@ -179,6 +181,10 @@ function render(st) {
   if (st.pulse_active) { pp.textContent = "⚡ PULSE!"; pp.style.background = "#fde047"; pp.style.color = "#000"; }
   else if ((st.pulse_cd ?? 1) >= 1) { pp.textContent = "⚡ SPACE"; pp.style.background = "#14331f"; pp.style.color = "#4ade80"; }
   else { pp.textContent = "⚡ " + Math.round((st.pulse_cd ?? 1) * 100) + "%"; pp.style.background = ""; pp.style.color = "#6b7280"; }
+  const bpill = document.getElementById("burstPill");
+  if (st.burst_active) { bpill.textContent = "🌊 WAVE!"; bpill.style.background = "#38bdf8"; bpill.style.color = "#000"; }
+  else if ((st.burst_cd ?? 1) >= 1) { bpill.textContent = "🌊 F"; bpill.style.background = "#0c2a3a"; bpill.style.color = "#38bdf8"; }
+  else { bpill.textContent = "🌊 " + Math.round((st.burst_cd ?? 1) * 100) + "%"; bpill.style.background = ""; bpill.style.color = "#6b7280"; }
   document.getElementById("opp").textContent = st.opponent;
   const tdiv = document.getElementById("teams"); tdiv.innerHTML = "";
   st.fighters.forEach((f, t) => {
@@ -227,6 +233,7 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "t" || e.key === "T") { trails = !trails; return; }   // toggle motion trails
   if (e.key === "q" || e.key === "Q") { spin = spin === -1 ? 0 : -1; sendSpin(); return; }  // orbit CCW / off
   if (e.key === "e" || e.key === "E") { spin = spin === 1 ? 0 : 1; sendSpin(); return; }    // orbit CW / off
+  if (e.key === "f" || e.key === "F") { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ burst: true })); return; }  // gather-burst wave
   if (e.key in KEYS) { KEYS[e.key] = 1; e.preventDefault(); sendDir(); }
 });
 window.addEventListener("keyup",   (e) => { if (e.key in KEYS) { KEYS[e.key] = 0; e.preventDefault(); sendDir(); } });

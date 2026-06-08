@@ -515,7 +515,15 @@ class LiquidWarEngine:
         # +12 tolerance (not exact-equal): with octile costs neighbours sit at
         # cur±10/14, so a restless fighter steps onto the next ring out and the
         # downhill pull tugs it back -> a visible shimmer/undulation, not a freeze.
+        # GATHER-BURST move: a per-team ``_burst`` (-1 gather inward / +1 burst
+        # outward), set by the play server over a short two-phase window. The burst
+        # phase relaxes the gate so the mass can flow OUTWARD a long way (a
+        # shockwave); the radial score term below sets the direction.
+        burst = getattr(self, "_burst", None)
+        burst_f = burst.gather(1, self.fteam) if burst is not None else None   # (B,N) or None
         movable = downhill | (restless & (ng <= cur.unsqueeze(-1) + 12))
+        if burst_f is not None:
+            movable = movable | ((burst_f > 0).unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 36))
         jitter = torch.randint(0, 7, ng.shape, device=self.device)
         # MOMENTUM / INERTIA: bias each candidate's score toward the fighter's
         # velocity, so a moving mass carries weight — it overshoots, banks around
@@ -535,12 +543,16 @@ class LiquidWarEngine:
         cpos = self.cursor_pos[b, self.fteam]                          # (B,N,2)
         ry = (cpos[..., 0] - self.fy).float(); rx = (cpos[..., 1] - self.fx).float()
         rn = (ry * ry + rx * rx).sqrt().clamp(min=1.0)
-        SWIRL_W = 11.0
+        SWIRL_W = 8.0
+        # Per-fighter, re-randomised swirl-strength jitter breaks the COHERENT
+        # spiral arms — which on an 8-direction grid read as angular spokes (a
+        # pinwheel) — into a smooth churn; the average orbit is unchanged.
+        swirl_jit = 0.3 + 1.4 * torch.rand(B, N, 1, device=self.device)
         # Spin sign per team: the player can flip the swarm's orbit CW/CCW (or 0 to
         # stop it). Default +1 when unset. ``_spin`` is (B, T).
         spin = getattr(self, "_spin", None)
         spin_f = spin.gather(1, self.fteam).unsqueeze(-1) if spin is not None else 1.0
-        swirl = spin_f * SWIRL_W * ((-rx / rn).unsqueeze(-1) * self._dy_t + (ry / rn).unsqueeze(-1) * self._dx_t)
+        swirl = spin_f * SWIRL_W * swirl_jit * ((-rx / rn).unsqueeze(-1) * self._dy_t + (ry / rn).unsqueeze(-1) * self._dx_t)
         # PERISTALTIC EDGE PUSH: a wave-modulated OUTWARD bias (rides the same
         # traveling wave as the restless gate). On a crest the rim extends outward
         # (a pseudopod bulge, up to unit_speed cells); off-crest the inward
@@ -551,6 +563,8 @@ class LiquidWarEngine:
         push = (PUSH_W * torch.sin(phase)).unsqueeze(-1)               # (B,N,1), oscillates ±
         out_align = (-ry / rn).unsqueeze(-1) * self._dy_t + (-rx / rn).unsqueeze(-1) * self._dx_t
         score = ng.float() + jitter.float() - VEL_W * align - swirl - push * out_align
+        if burst_f is not None:                                       # gather (-1) inward / burst (+1) outward
+            score = score - 15.0 * burst_f.unsqueeze(-1) * out_align
         order = torch.where(movable, score, score.new_full((), float(BIGG))).argsort(dim=-1)
         ncell_s = ncell.gather(-1, order)                              # cells, best-first
         down_s = movable.gather(-1, order)
