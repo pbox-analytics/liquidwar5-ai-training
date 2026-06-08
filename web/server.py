@@ -36,7 +36,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from rl.eval import _heuristic_dydx
-from rl.policy import CursorPolicy, act
+from rl.policy import CursorPolicy, act, apply_stances
 from simulator.engine import LiquidWarEngine, GRADIENT_INF, MAP_NAMES
 
 CKPT_DIR = os.environ.get("LW_CKPT_DIR", "/opt/training/results")  # NFS mount
@@ -90,19 +90,21 @@ class GameSession:
         return bool(self.engine.team_alive[0].sum() <= 1)
 
     @torch.no_grad()
-    def _ai_dydx(self) -> torch.Tensor:
-        """Actions for ALL teams from the configured AI (policy or heuristic)."""
+    def _ai_dydx(self):
+        """``(dydx, ai_stance)`` for ALL teams from the configured AI. ``ai_stance``
+        is the policy's chosen stance per team (``None`` for the heuristic, which
+        has no stances)."""
         if self.policy is None:
-            return _heuristic_dydx(self.engine)
+            return _heuristic_dydx(self.engine), None
         obs = self.engine.get_observation()
-        dydx, _, _, _ = act(self.policy, obs, self.engine.T,
-                            self.engine.team_alive, deterministic=True)
-        return dydx
+        dydx, stance, _, _, _ = act(self.policy, obs, self.engine.T,
+                                    self.engine.team_alive, deterministic=True)
+        return dydx, stance
 
     @torch.no_grad()
     def step(self, human_target: list[int] | None,
              human_dir: list[int] | None = None) -> None:
-        dydx = self._ai_dydx()
+        dydx, ai_stance = self._ai_dydx()
         if self.mode == "play":
             if human_dir is not None and (human_dir[0] or human_dir[1]):
                 # Keyboard (arrows/WASD): drive the cursor directly, LW-style.
@@ -119,6 +121,8 @@ class GameSession:
                 # cursor (that read as "the cursor moves on its own").
                 dydx[0, 0, 0] = 0
                 dydx[0, 0, 1] = 0
+        if ai_stance is not None:                  # AI opponents (teams 1..) hold their own stances
+            apply_stances(self.engine, ai_stance, dydx, team_start=1)
         self.engine.step(dydx)
 
     def reset(self) -> None:
@@ -180,8 +184,8 @@ async def ws(sock: WebSocket) -> None:
         mode=q.get("mode", "play"),
         opponent=q.get("opponent", "latest"),
         teams=int(q.get("teams", "2")),
-        height=int(os.environ.get("LW_PLAY_H", "272")),     # 2x-area battlefield (roomier;
-        width=int(os.environ.get("LW_PLAY_W", "408")),      # holds 60fps), 8000/team
+        height=int(os.environ.get("LW_PLAY_H", "384")),     # doubled-again battlefield
+        width=int(os.environ.get("LW_PLAY_W", "576")),      # (~4x original area; ~50fps at 8000)
         fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),
     )
     ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True, "reset": False,

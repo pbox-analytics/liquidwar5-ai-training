@@ -165,7 +165,7 @@ def act(policy, obs, num_teams, team_alive=None, deterministic=False):
     return dydx, stance, logprob, value, entropy
 
 
-def apply_stances(engine, stance, dydx):
+def apply_stances(engine, stance, dydx, team_start=0):
     """Set the engine's per-team knobs from each team's chosen stance — the exact
     Swarm/Spin/Drill/Wall/Pulse mapping the play server applies from player keys,
     but vectorized over all (B, T) teams. Call right before ``engine.step``.
@@ -173,6 +173,9 @@ def apply_stances(engine, stance, dydx):
     :param engine: the :class:`LiquidWarEngine` being driven.
     :param stance: ``(B, T)`` long in 0..4 (the chosen stance per team).
     :param dydx: ``(B, T, 2)`` the cursor move, reused as the Drill/Wall aim.
+    :param team_start: only write knobs for teams ``>= team_start`` (so the play
+        server can stance the AI opponents 1.. while leaving the human's team 0
+        knobs, already set from keys, intact). Default 0 = all teams (training).
     """
     B, T = stance.shape
     dev = stance.device
