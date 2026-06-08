@@ -7,7 +7,8 @@ playable game served at `web/server.py`. No C-engine bridge, no fidelity gap: yo
 play the exact engine the policy trains in.
 
 Deploy: `scripts/run-play.sh` → http://192.168.1.226:8099 (RTX PRO 6000, GPU-direct).
-Controls: **arrows / WASD** move the cursor, **SPACE** = Pulse, **T** = toggle trails.
+Controls: **arrows / WASD** move the cursor, **1–8** hold a stance (Swarm / Spin /
+Drill / Wall / Pulse / Doom / Maelstrom / Atom), **Q/E** spin direction, **T** trails.
 
 ---
 
@@ -32,7 +33,7 @@ All weights are constants near the top of `_move_fighters`:
 |---|---|---|
 | **gradient** | pulls down-field toward the cursor (the base attraction) | (octile cost) |
 | **momentum / inertia** | a per-fighter velocity blended with the gradient → weight, overshoot, banking; head-on masses collide | `VEL_W=8`, `MOM=0.88` |
-| **swirl** | a tangential bias → the army **spirals into** the cursor on curved, magnetised field-lines and **orbits** it as a churning swarm | `SWIRL_W=11` |
+| **swirl** | a tangential bias → the army **spirals into** the cursor on curved, magnetised field-lines and **orbits** it as a churning swarm | `SWIRL_W=8` |
 | **edge push** | a wave-modulated *outward* bias → the rim extends pseudopods on each crest then retracts → an **undulating membrane** | `PUSH_W=14` |
 | **traveling wave** | *Dictyostelium* cAMP-style restlessness gated by `sin(dist·k − tick·ω)` → idle undulation + the edge ripple | `> 0.0` crest, `0.07` base |
 | **jitter** | small per-fighter noise → independent-looking units, no lockstep | `randint(0,7)` |
@@ -50,23 +51,81 @@ the army keeps pace instead of crawling behind — each tick sub-steps move+comb
   grinds. So flanking a committed army snowballs.
 - **One-per-cell** `occ` grid — fighters pack, never overlap/collapse.
 
-## 4. Special move — Pulse (SPACE)
+## 4. Stances — the tactical system
 
-A peristaltic surge: the human team deals `6×` on contact for ~0.3s, ~3s cooldown
-(`PULSE_DUR/CD/MULT` in `web/server.py`). With momentum it's a burst you slam into
-the line. (Backlog of more slime-mold moves — Rally, Pheromone Tube, Split — in
+The blob has **eight held stances** on the number row (hold, not one-shot). Each is
+just a *preset of the per-team engine knobs* — the integration surface read in
+`_move_fighters` via `getattr`, so adding a stance is a knob preset, never a rewrite.
+The AI policy drives the **same** knobs via `rl/policy.apply_stances`.
+
+| key | stance | feel | knobs |
+|---|---|---|---|
+| **1** | 🐝 Swarm | loose orbiting electron-cloud | `_spin 0.5`, `_burst 0.15` |
+| **2** | 🌀 Spin | tight fast vortex (Q/E = direction) | `_spin 1.7`, `_burst -0.4` |
+| **3** | ➤ Drill | Ender's-Game piercing column; tap to rev **slow→med→fast** (faster spin grinds harder but advances slower) | `_drill` (aim×advance), `_spin`, `_surge` |
+| **4** | 🛡 Wall | dense shield bar across the cursor, perpendicular to the threat | `_wall` (facing) |
+| **5** | 💥 Pulse | concentric rings + `6×` damage waves on the crest | `_burst` rhythm, `_surge` |
+| **6** | 🕳 Doom | black-hole implosion (see below) | `_burst -6.5`, `_blackhole_*`, `_surge 6` |
+| **7** | 🌪 Maelstrom | fast wide orbiting shell / whirlpool | `_spin 2.0`, `_burst 0.6` |
+| **8** | ⚛ Atom | figure-8 electron orbitals | `_spin 1.8`, `_fig8 1` |
+
+Knobs: `_spin` (swirl mult, signed) · `_burst` (radial in/out) · `_drill` (thrust
+dir + advance speed) · `_wall` (shield facing) · `_surge` (damage mult) · `_fig8`
+(figure-8 flag) · `_blackhole_pos/_team/_str/_range` (Doom's well). **Atom's
+figure-8**: the swirl orbits two lobe-centres offset ±R in x and counter-rotates
+across the cursor's vertical axis, so the halves trace a ∞ instead of a flat spin.
+
+### Doom — the Interstellar black hole
+
+Doom is the finisher, modelled on *Gargantua*:
+
+- **Singularity** — `_burst -6.5` (near-zero spin) violently implodes your *own* mass
+  to the cursor point.
+- **Cross-team gravity well** — `_blackhole_pos` at your cursor drags *enemy* fighters
+  in too (a real black hole pulls everyone). Pull is **∝ your mass**
+  (`_blackhole_str = 34 · current/initial fighters`) with a **finite reach** (falloff
+  `R²/(d²+R²)`, range ~55) so distant/dispersed forces escape — no map-wide vacuum.
+  What it swallows meets the `6×` tidal surge.
+- **Counter:** strip its mass — Drill the dense core, or stay dispersed and convert
+  its small perimeter. Since pull ∝ mass, every fighter you take off it *weakens* the
+  well, so it unravels as you fight it; or kite beyond the reach. Net: a finisher for
+  a winning army, useless as a comeback button.
+
+(Backlog of more slime-mold moves — Rally, Pheromone Tube, Split — in
 `docs/POTENTIAL_FEATURES.md`.)
 
-## 5. Rendering / FX (client-side, `web/static/index.html`)
+## 5. Rendering — the particle (mote) pipeline (client, `web/static/index.html`)
 
-- **Glowing cursors** — halo + pulsate, player bigger, flares on Pulse.
-- **Motion trails** (the "shader") — each frame fades instead of clearing, so the
-  swirl reads as **flow-streaks** and the rim as a **shimmering undulating edge**.
-  `T` toggles; the fade alpha sets trail length.
-- **Collision particles** — real sparks spawn at the army-vs-army contact line,
-  **fly out, arc under gravity, slow, and fade** — white-hot at birth, cooling to
-  each team's colour. They stack bright where the fighting is fiercest and streak
-  with the trails.
+The army is drawn as individual **motes** — **a mote is one fighter rendered as a
+single point** — not a grid of lit cells. The server streams a stride-sampled set of
+fighter positions (`int16`) + team (`pos_b64`/`pteam_b64`/`pn` in `state()`, which is
+*less* data than the old cell grid); the client animates them. Three levers turn
+"blinking cells" into "flowing fluid":
+
+1. **Individual motes** — each fighter is its own dot, so you read the swarm, not a density.
+2. **Velocity streaks** — each mote draws a short tail along its per-tick displacement;
+   fast units smear, slow ones are round dots (round line-caps).
+3. **60fps interpolation** — the client renders on its own `requestAnimationFrame`
+   loop, independent of the ~45–63fps server, **gliding** each mote between frames
+   along a **quadratic arc** (3 buffered snapshots prevprev→prev→cur, control = prev +
+   `curve`·incoming-velocity), so swirls sweep smooth curves, not jagged chords.
+
+- **Normal blending, not additive** — dense armies read as solid *team colour*, not a
+  saturated white blob (the first additive pass lost blue-vs-red).
+- Walls are a **cached layer** (`tmp` canvas); only motes animate. Glowing cursors
+  (halo + pulsate, flare on Pulse), collision **sparks** (fly/arc/fade, white-hot →
+  team colour), and fading **trails** all remain and carry the flow.
+
+### Live Visuals sliders
+
+A **Visuals** row under the board exposes the render dials as live sliders (no
+redeploy): **streak** (tail length, 0 = dots) · **curve** (arc bend) · **size** (mote
+thickness) · **trail** (fade length) · **opacity**. They write `pTail/pCurve/pWidth/
+pTrail/pAlpha`, which `frame()` reads each tick — find a feel, then bake the numbers in.
+
+> The dense **core looks static** because it physically is: packed one-per-cell, the
+> swirl has no empty cell to flow into, so only the rim moves. Letting a packed core
+> rotate in place is an *engine* (move-resolution) change, not a render dial.
 
 ## 6. Hitting 60fps
 
@@ -95,10 +154,15 @@ steps cell-by-cell so it can't slide through a barrier.
 ## 8. Settings (where they live)
 
 - **Movement feel** — constants in `_move_fighters` / `_move_cursors` (`VEL_W`,
-  `MOM`, `SWIRL_W`, `PUSH_W`, wave/jitter, `cursor_speed`, `unit_speed`).
-- **Play size / rate** — `web/server.py` defaults: grid **272×408** (2× area —
-  holds 60fps; 4× dips under), **16000** fighters/team, **60Hz** (deploy
-  over-targets 63). Env-overridable: `LW_PLAY_H/W/FIGHTERS`, `LW_TICK_HZ`.
+  `MOM`, `SWIRL_W=8`, `PUSH_W`, wave/jitter, `cursor_speed`, `unit_speed`).
+- **Stance knobs** — the per-stance presets in `web/server.py`'s game loop
+  (`_spin/_burst/_drill/_wall/_surge/_fig8`, Doom's `_blackhole_*`); the AI mirror is
+  `rl/policy.apply_stances`.
+- **Play size / rate** — `web/server.py` defaults: grid **384×576** (doubled again for
+  room; ~40–50fps at this size vs a policy opponent), **8000** fighters/team, **60Hz**
+  (deploy over-targets 63). Env-overridable: `LW_PLAY_H/W/FIGHTERS`, `LW_TICK_HZ`.
+- **Visual feel** — the in-game **Visuals** sliders (live), or the `pTail/pCurve/
+  pWidth/pTrail/pAlpha` defaults in `web/static/index.html`.
 - **Combat / Pulse** — constants in the engine / `web/server.py`.
 
 ## 9. Next
