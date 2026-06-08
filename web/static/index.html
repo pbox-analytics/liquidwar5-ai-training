@@ -70,11 +70,11 @@
   <canvas id="c" width="110" height="80"></canvas>
   <div id="visuals" class="muted" style="margin-top:6px; font-size:13px; display:flex; gap:14px; flex-wrap:wrap; justify-content:center; align-items:center;">
     <b style="color:#9aa4b2">Visuals:</b>
-    <label>streak <input type="range" id="vStreak" min="0" max="1.5" step="0.05" value="0.6"><span id="vStreakN">0.60</span></label>
-    <label>curve <input type="range" id="vCurve" min="0" max="1" step="0.05" value="0.5"><span id="vCurveN">0.50</span></label>
+    <label>streak <input type="range" id="vStreak" min="0" max="1.5" step="0.05" value="0.45"><span id="vStreakN">0.45</span></label>
+    <label>curve <input type="range" id="vCurve" min="0" max="1" step="0.05" value="0.55"><span id="vCurveN">0.55</span></label>
     <label>size <input type="range" id="vWidth" min="0.5" max="3" step="0.1" value="1.2"><span id="vWidthN">1.2</span></label>
-    <label>trail <input type="range" id="vTrail" min="0" max="1" step="0.05" value="0.8"><span id="vTrailN">0.80</span></label>
-    <label>opacity <input type="range" id="vAlpha" min="0.2" max="1" step="0.04" value="0.72"><span id="vAlphaN">0.72</span></label>
+    <label>trail <input type="range" id="vTrail" min="0" max="1" step="0.05" value="0.25"><span id="vTrailN">0.25</span></label>
+    <label>opacity <input type="range" id="vAlpha" min="0.2" max="1" step="0.04" value="0.75"><span id="vAlphaN">0.75</span></label>
   </div>
   <div class="muted" style="text-align:center; line-height:1.8;">
     <b>↑ ↓ ← → / WASD</b> steer (or hold mouse) &nbsp;·&nbsp;
@@ -109,7 +109,7 @@ function sizeCanvas() {
 let prevP = null, curP = null, curPT = null, pn = 0, curSt = null, pp = null;
 let tLast = 0, dtServer = 22;                          // ms between server frames (EMA)
 // Live visual dials (wired to the on-screen sliders) — tune the look without redeploying.
-let pTail = 0.6, pCurve = 0.5, pWidth = 1.2, pTrail = 0.8, pAlpha = 0.72;
+let pTail = 0.45, pCurve = 0.55, pWidth = 1.2, pTrail = 0.25, pAlpha = 0.75;
 [["vStreak", v => pTail = v], ["vCurve", v => pCurve = v], ["vWidth", v => pWidth = v],
  ["vTrail", v => pTrail = v], ["vAlpha", v => pAlpha = v]].forEach(([id, set]) => {
   const el = document.getElementById(id), lbl = document.getElementById(id + "N");
