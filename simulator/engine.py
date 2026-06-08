@@ -571,6 +571,14 @@ class LiquidWarEngine:
         spin = getattr(self, "_spin", None)
         spin_f = spin.gather(1, self.fteam).unsqueeze(-1) if spin is not None else 1.0
         swirl = spin_f * SWIRL_W * swirl_jit * ((-rx / rn).unsqueeze(-1) * self._dy_t + (ry / rn).unsqueeze(-1) * self._dx_t)
+        # ATOM (figure-8): flip the orbit sense across the cursor's vertical axis, so
+        # the left and right halves counter-rotate -> the mass loops in two lobes that
+        # cross at the center = a lemniscate / electron-orbital churn, not a flat spin.
+        fig8 = getattr(self, "_fig8", None)
+        if fig8 is not None:
+            on8 = (fig8.gather(1, self.fteam) > 0).unsqueeze(-1)       # (B,N,1) is this team in Atom?
+            side = torch.sign(rx).unsqueeze(-1)                        # which side of the cursor (±1)
+            swirl = torch.where(on8, swirl * side, swirl)
         # PERISTALTIC EDGE PUSH: a wave-modulated OUTWARD bias (rides the same
         # traveling wave as the restless gate). On a crest the rim extends outward
         # (a pseudopod bulge, up to unit_speed cells); off-crest the inward

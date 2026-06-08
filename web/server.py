@@ -76,6 +76,7 @@ class GameSession:
         self.engine._burst = torch.zeros(1, teams, device=DEVICE)  # gather(-1)/burst(+1) phase; player drives 0
         self.engine._drill = torch.zeros(1, teams, 2, device=DEVICE)  # per-team thrust dir (drill move)
         self.engine._wall = torch.zeros(1, teams, 2, device=DEVICE)  # per-team shield facing (wall stance)
+        self.engine._fig8 = torch.zeros(1, teams, device=DEVICE)  # per-team figure-8 flag (Atom stance)
         self.engine.reset()
         self.policy: CursorPolicy | None = None
         self.ckpt_name = opponent
@@ -204,7 +205,7 @@ async def ws(sock: WebSocket) -> None:
                 elif "spin" in msg:                # Q/E -> orbit direction (Spin/Swarm stances)
                     ctrl["spin"] = float(msg["spin"])
                 elif "stance" in msg:              # 1-5 -> select held stance; re-tap Drill(3) revs its mode
-                    s = max(0, min(6, int(msg["stance"])))
+                    s = max(0, min(7, int(msg["stance"])))
                     if s == 2 and ctrl["stance"] == 2:
                         ctrl["drill_mode"] = (ctrl["drill_mode"] + 1) % 3
                     elif s == 2:
@@ -228,7 +229,7 @@ async def ws(sock: WebSocket) -> None:
         spin_sign = 1                                    # Q/E orbit direction (Spin/Swarm stances): +1/-1/0
         last_dir = [0, 1]                                # heading the Drill/Wall point at; default right
         next_dl = loop.time()                            # absolute frame deadline (drift-corrected)
-        STANCES = ("Swarm", "Spin", "Drill", "Wall", "Pulse", "Doom", "Atom")  # index = ctrl["stance"]
+        STANCES = ("Swarm", "Spin", "Drill", "Wall", "Pulse", "Doom", "Maelstrom", "Atom")  # index = ctrl["stance"]
         while ctrl["alive"]:
             t0 = loop.time()                                  # frame start, for steady pacing
             if ctrl["spin"] is not None:                      # Q/E -> orbit direction (Spin/Swarm stances)
@@ -237,19 +238,19 @@ async def ws(sock: WebSocket) -> None:
                 session.engine._map_choice = ctrl["map"]   # apply the picked map (None=random)
                 session.reset(); ctrl["reset"] = False; hold = 0; logged = False
                 _e = session.engine; _e._surge = None                   # clear all stance knobs per game
-                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_()
+                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_()
             elif session.done:
                 hold += 1
                 if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
                     session.engine._map_choice = ctrl["map"]   # keep the picked map across games
                     session.reset(); hold = 0; logged = False
                     _e = session.engine; _e._surge = None
-                    _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_()
+                    _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_()
             else:
                 if ctrl["dir"] and (ctrl["dir"][0] or ctrl["dir"][1]):
                     last_dir = ctrl["dir"]                  # heading the Drill/Wall point at
                 _e = session.engine
-                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_()
+                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_()
                 _e._surge = None
                 stance = ctrl["stance"]                     # 0 Swarm 1 Spin 2 Drill 3 Wall 4 Pulse
                 if stance == 0:                             # Swarm: loose, varied-radius orbits (electron cloud)
@@ -278,13 +279,18 @@ async def ws(sock: WebSocket) -> None:
                     _e._surge = s
                 elif stance == 5:                           # Doom: violent black-hole implosion
                     sgn = spin_sign if spin_sign != 0 else 1
-                    _e._spin[0, 0] = 0.8 * sgn              # only a little accretion swirl
-                    _e._burst[0, 0] = -3.4                  # VIOLENT collapse — yank EVERY unit to the point
+                    _e._spin[0, 0] = 0.25 * sgn             # almost no swirl — pure radial collapse
+                    _e._burst[0, 0] = -6.5                  # OVERWHELMING inward pull — suck every unit to the point
                     s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = 6.0; _e._surge = s  # tidal devastation
-                elif stance == 6:                           # Atom: fast wide orbiting shell (electron cloud)
+                elif stance == 6:                           # Maelstrom: fast wide orbiting shell (whirlpool)
                     sgn = spin_sign if spin_sign != 0 else 1
-                    _e._spin[0, 0] = 2.0 * sgn              # electrons whirl fast around the nucleus
-                    _e._burst[0, 0] = 0.6                   # pushed out into a shell ring, not a dense core
+                    _e._spin[0, 0] = 2.0 * sgn              # whirl fast and wide around the cursor
+                    _e._burst[0, 0] = 0.6                   # pushed out into a spinning ring, not a dense core
+                elif stance == 7:                           # Atom: figure-8 electron orbitals
+                    sgn = spin_sign if spin_sign != 0 else 1
+                    _e._spin[0, 0] = 1.8 * sgn              # orbital speed
+                    _e._burst[0, 0] = 0.4                   # a little room so the two lobes form
+                    _e._fig8[0, 0] = 1.0                    # flip orbit across the cursor -> figure-8 loops
                 session.step(ctrl["target"], ctrl["dir"])
             st = session.state(); st["fps"] = round(fps, 1)
             st["stance"] = STANCES[ctrl["stance"]]      # held tactical state
