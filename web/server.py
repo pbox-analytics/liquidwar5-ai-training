@@ -247,8 +247,8 @@ async def ws(sock: WebSocket) -> None:
                     _e._spin[0, 0] = 0.6 * spin_sign
                 elif stance == 1:                           # Spin: hard orbit, Q/E direction
                     _e._spin[0, 0] = 1.5 * spin_sign
-                elif stance == 2:                           # Drill: spinning forward pierce (corkscrew)
-                    _e._spin[0, 0] = 0.8 * spin_sign
+                elif stance == 2:                           # Drill: tight spinning pierce (corkscrew)
+                    _e._spin[0, 0] = 0.5 * spin_sign        # light spin so the column stays narrow
                     _e._drill[0, 0, 0] = float(last_dir[0]); _e._drill[0, 0, 1] = float(last_dir[1])
                 elif stance == 3:                           # Wall: dense shield bar across the facing
                     _e._wall[0, 0, 0] = float(last_dir[0]); _e._wall[0, 0, 1] = float(last_dir[1])

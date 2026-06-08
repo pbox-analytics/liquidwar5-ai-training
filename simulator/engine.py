@@ -585,6 +585,12 @@ class LiquidWarEngine:
             score = score - 15.0 * burst_f.unsqueeze(-1) * out_align
         if drill_fwd is not None:                                     # DRILL: pierce forward, concentrated
             score = score - 16.0 * drill_fwd
+            # Lateral squeeze onto the thrust axis -> a NARROW piercing column, not a
+            # wide shove: each fighter is pulled toward the line through the cursor
+            # ALONG the thrust (reduce its perpendicular offset). dd=(dy,dx) thrust.
+            perp_dot = self._dy_t * dd[..., 1:2] - self._dx_t * dd[..., 0:1]      # (B,N,8) candidate · perp
+            lateral = (-ry * dd[..., 1] + rx * dd[..., 0])                        # (B,N) offset · perp
+            score = score + 13.0 * torch.sign(lateral).unsqueeze(-1) * perp_dot
         if wdd is not None:                                           # WALL: collapse onto the cursor's perp line
             fwd_comp = (-ry) * wdd[..., 0] + (-rx) * wdd[..., 1]      # how far ahead/behind that line
             c_face = wdd[..., 0:1] * self._dy_t + wdd[..., 1:2] * self._dx_t
