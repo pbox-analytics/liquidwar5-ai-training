@@ -679,13 +679,19 @@ class LiquidWarEngine:
         def_facing = self._facing.gather(1, tgt_slot.clamp(min=0))
         align = (self._front_dy * self._dy_t[def_facing]
                  + self._front_dx * self._dx_t[def_facing])             # dot(attack dir, defender facing)
-        hit = torch.where(align > 0, ATTACK, SIDE_ATTACK).to(torch.int32)
+        hit = torch.where(align > 0, ATTACK, SIDE_ATTACK).float()
         # Pulse / surge: a per-team damage multiplier (default absent = 1x). The
         # play server sets ``_surge`` for the human team during a Pulse so the
         # army's contact briefly overwhelms — a peristaltic burst.
         surge = getattr(self, "_surge", None)
         if surge is not None:
-            hit = (hit.float() * surge.gather(1, self.fteam)).to(torch.int32)
+            hit = hit * surge.gather(1, self.fteam)
+        # MOMENTUM PIERCE (the inertia rule): a fast-moving attacker hits harder, so
+        # a charging mass — and especially the Drill, which builds forward speed —
+        # punches through, while a standing blob hits soft. Kept well under the 16x
+        # back-attack bonus so direction stays the bigger prize.
+        att_speed = (self.fvy ** 2 + self.fvx ** 2).sqrt()           # (B,N) attacker speed ~[0,1.4]
+        hit = (hit * (1.0 + 1.5 * att_speed)).to(torch.int32)
         dmg.scatter_add_(1, a_tgt, torch.where(attack, hit,
                                                torch.zeros_like(tgt_slot, dtype=torch.int32)))
         self.fhealth = self.fhealth - dmg
