@@ -195,6 +195,7 @@ async def ws(sock: WebSocket) -> None:
         n = 0
         pulse_start = -PULSE_CD                          # monotonic tick of the last Pulse
         while ctrl["alive"]:
+            t0 = loop.time()                                  # frame start, for steady pacing
             if ctrl["reset"]:
                 session.reset(); ctrl["reset"] = False; hold = 0; logged = False
                 pulse_start = -PULSE_CD; session.engine._surge = None   # clear pulse per game
@@ -230,7 +231,7 @@ async def ws(sock: WebSocket) -> None:
                 await sock.send_json(st)
             except Exception:
                 break
-            await asyncio.sleep(dt)
+            await asyncio.sleep(max(0.0, dt - (loop.time() - t0)))   # sleep only the remainder -> steady dt
             now = loop.time()
             if prev is not None and now > prev:        # measure actual loop period
                 fps = 0.9 * fps + 0.1 / (now - prev)
