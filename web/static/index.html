@@ -96,6 +96,7 @@ const tmp = document.createElement("canvas"), tmpCtx = tmp.getContext("2d");  //
 // then drawn back upscaled + additive so bright/dense mote areas blur into a glow.
 // Created once, resized only when W/H change. The downscale->upscale IS the blur.
 const bloom = document.createElement("canvas"), bloomCtx = bloom.getContext("2d");
+const glow = document.createElement("canvas"), gctx = glow.getContext("2d");  // clean per-frame army layer: composited for trails, sampled for bloom (no feedback)
 const BLOOM_DIV = 3;            // 1/3 resolution -> cheap, soft (lower = blurrier/cheaper)
 const BLOOM_ALPHA = 0.32;      // additive opacity of the glow pass — subtle, no white-out
 let trails = true;   // motion trails: fade each frame so flow/swirl/undulation streak (toggle: T)
@@ -134,6 +135,7 @@ function onWS(st) {                                     // a fresh server frame 
   if (tmp.width !== W) { tmp.width = W; tmp.height = H; }
   const bw = Math.max(1, (W / BLOOM_DIV) | 0), bh = Math.max(1, (H / BLOOM_DIV) | 0);
   if (bloom.width !== bw) { bloom.width = bw; bloom.height = bh; }
+  if (glow.width !== W) { glow.width = W; glow.height = H; }
   const now = performance.now();
   if (tLast) dtServer = 0.85 * dtServer + 0.15 * (now - tLast);
   tLast = now;
@@ -240,40 +242,44 @@ function frame() {                                     // 60fps interpolated ren
   // pack densely (the army mass) the fat translucent strokes overlap and sum into a soft
   // coloured glow hugging the silhouette; sparse edges barely register. Reuses the paths
   // already built (no new geometry) — 2 extra strokes/team, cheap at ~16000 motes.
-  ctx.lineCap = "round"; ctx.lineJoin = "round";
-  ctx.globalCompositeOperation = "lighter";                      // additive so overlap builds the halo
-  const HALO_W = pWidth * 5.5, HALO_A = pAlpha * 0.06;           // wide + faint -> soft rim, not garish
+  // The army is drawn to a CLEAN per-frame layer (glow), cleared each frame, so the
+  // bloom can sample it WITHOUT ever reading its own previous output (the white-out
+  // feedback bug). The layer is then composited onto the main canvas, where the trail
+  // fade gives it persistence.
+  gctx.clearRect(0, 0, W, H);
+  gctx.lineCap = "round"; gctx.lineJoin = "round";
+  // TEAM HALO — fat, faint, additive; dense overlap sums into a soft coloured rim.
+  gctx.globalCompositeOperation = "lighter";
+  const HALO_W = pWidth * 5.5, HALO_A = pAlpha * 0.06;
   for (let t = 0; t < TEAMS; t++) {
-    ctx.strokeStyle = HALO[t % HALO.length];
-    ctx.globalAlpha = HALO_A; ctx.lineWidth = HALO_W;
-    ctx.stroke(paths[t * NB]); ctx.stroke(paths[t * NB + 1]);    // halo over both rim + core buckets
+    gctx.strokeStyle = HALO[t % HALO.length];
+    gctx.globalAlpha = HALO_A; gctx.lineWidth = HALO_W;
+    gctx.stroke(paths[t * NB]); gctx.stroke(paths[t * NB + 1]);
   }
-  // Crisp motes on top, normal-blended (NOT additive) so a dense army reads as solid team
-  // colour instead of saturating to white. Two strokes per team (rim then core): rim
-  // translucent for a soft falloff, core nearer full opacity + a touch wider/brighter.
-  ctx.globalCompositeOperation = "source-over";
-  const RIM_A = pAlpha * 0.5, CORE_A = pAlpha;                    // rim dimmer/translucent, core brighter
+  // Crisp motes, normal-blended so a dense army stays solid team colour (rim then core).
+  gctx.globalCompositeOperation = "source-over";
+  const RIM_A = pAlpha * 0.5, CORE_A = pAlpha;
   for (let t = 0; t < TEAMS; t++) {
-    ctx.strokeStyle = COLORS[t % COLORS.length];
-    ctx.globalAlpha = RIM_A;  ctx.lineWidth = pWidth;        ctx.stroke(paths[t * NB]);     // rim
-    ctx.globalAlpha = CORE_A; ctx.lineWidth = pWidth * 1.15; ctx.stroke(paths[t * NB + 1]); // core
+    gctx.strokeStyle = COLORS[t % COLORS.length];
+    gctx.globalAlpha = RIM_A;  gctx.lineWidth = pWidth;        gctx.stroke(paths[t * NB]);
+    gctx.globalAlpha = CORE_A; gctx.lineWidth = pWidth * 1.15; gctx.stroke(paths[t * NB + 1]);
   }
-  ctx.globalAlpha = 1; ctx.lineWidth = pWidth;
+  gctx.globalAlpha = 1;
+  ctx.drawImage(glow, 0, 0);                                     // army onto the trail canvas
   drawSparks();
   drawFlashes();
-  // SOFT BLOOM: shrink everything drawn so far (army + sparks + flashes) into the
-  // 1/3-size buffer, then paint it back upscaled with additive blending + low alpha.
-  // The bilinear upscale smears bright/dense clusters into a soft glow; dark walls/
-  // empty cells contribute ~nothing, so only bright areas bloom. Cursors are drawn
-  // AFTER this so their crisp rings stay sharp.
+  // SOFT BLOOM — sample the CLEAN army layer (glow), not cv, so it can't compound.
+  // Downscale -> upscale is the blur; additive + low alpha = a soft glow around bright
+  // mote clusters. The dark background contributes ~nothing, so it stays dark.
   if (bloom.width) {
     bloomCtx.clearRect(0, 0, bloom.width, bloom.height);
-    bloomCtx.drawImage(cv, 0, 0, bloom.width, bloom.height);   // downscale main -> bloom buffer
+    bloomCtx.imageSmoothingEnabled = true;
+    bloomCtx.drawImage(glow, 0, 0, bloom.width, bloom.height);
     const prevSmooth = ctx.imageSmoothingEnabled;
-    ctx.imageSmoothingEnabled = true;                          // ensure the upscale blurs (not nearest)
-    ctx.globalCompositeOperation = "lighter";                  // additive glow (motes stay normal-blended)
+    ctx.imageSmoothingEnabled = true;
+    ctx.globalCompositeOperation = "lighter";
     ctx.globalAlpha = BLOOM_ALPHA;
-    ctx.drawImage(bloom, 0, 0, W, H);                          // upscale back over the scene
+    ctx.drawImage(bloom, 0, 0, W, H);
     ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
     ctx.imageSmoothingEnabled = prevSmooth;
   }
