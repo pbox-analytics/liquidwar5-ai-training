@@ -30,6 +30,7 @@
     <span class="pill">fps <b id="fps">—</b></span>
     <span class="pill">flood <b id="flood">—</b>%</span>
     <span class="pill">spread <b id="spread">—</b></span>
+    <span class="pill">map <b id="mapname">—</b></span>
     <span class="pill" id="pulsePill">⚡ SPACE</span>
     <span class="pill" id="teams"></span>
     <select id="mode">
@@ -39,6 +40,15 @@
     <select id="opponent">
       <option value="latest">Latest checkpoint</option>
       <option value="heuristic">Heuristic AI</option>
+    </select>
+    <select id="mapsel" title="Pick the map (Random = a fresh one each game)">
+      <option value="-1">Map: Random</option>
+      <option value="0">Map: Open</option>
+      <option value="1">Map: Barrier</option>
+      <option value="2">Map: Pillars</option>
+      <option value="3">Map: Scatter</option>
+      <option value="4">Map: Rooms</option>
+      <option value="5">Map: Corners</option>
     </select>
     <button id="reset">New game</button>
   </div>
@@ -147,6 +157,7 @@ function render(st) {
   document.getElementById("fps").textContent = st.fps ?? "—";
   document.getElementById("flood").textContent = st.flood_pct ?? "—";
   document.getElementById("spread").textContent = st.spread ? st.spread.map(s => Math.round(s)).join("/") : "—";
+  document.getElementById("mapname").textContent = st.map ?? "—";
   const pp = document.getElementById("pulsePill");
   if (st.pulse_active) { pp.textContent = "⚡ PULSE!"; pp.style.background = "#fde047"; pp.style.color = "#000"; }
   else if ((st.pulse_cd ?? 1) >= 1) { pp.textContent = "⚡ SPACE"; pp.style.background = "#14331f"; pp.style.color = "#4ade80"; }
@@ -203,6 +214,9 @@ window.addEventListener("keyup",   (e) => { if (e.key in KEYS) { KEYS[e.key] = 0
 document.getElementById("reset").onclick = () => ws && ws.send(JSON.stringify({reset:true}));
 document.getElementById("mode").onchange = connect;
 document.getElementById("opponent").onchange = connect;
+document.getElementById("mapsel").onchange = () => {     // pick map -> tell server, start new game
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ map: parseInt(document.getElementById("mapsel").value) }));
+};
 window.addEventListener("resize", sizeCanvas);
 sizeCanvas(); connect();
 </script>

@@ -35,6 +35,10 @@ import random
 import torch
 
 MAX_TEAMS = 6
+
+#: Map archetype names; index = the archetype id ``_gen_one_map`` draws. The play
+#: server's map picker (force one) and telemetry (log which one) both use these.
+MAP_NAMES = ("Open", "Barrier", "Pillars", "Scatter", "Rooms", "Corners")
 MAX_FIGHTER_HEALTH = 16384                 # health valid in [0, 16383]
 GRAD_INIT = 2_000_000                       # distance-field init / "unreachable"
 CURSOR_SEED = 1_000_000                     # gradient seed value at the cursor cell
@@ -168,7 +172,11 @@ class LiquidWarEngine:
                 w[H - iy1:H - iy0, W - ix1:W - ix0] = True
 
         th = max(2, round(H / 48))
-        arch = random.randint(0, 5)
+        # ``_map_choice`` (set by the play server's map picker) forces an archetype;
+        # None -> a random one each game.
+        choice = getattr(self, "_map_choice", None)
+        arch = choice if choice is not None else random.randint(0, 5)
+        self._last_arch = arch                               # remember archetype, for telemetry
         if arch == 0:                                        # open arena (border only)
             pass
         elif arch == 1:                                      # central barrier with gaps

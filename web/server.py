@@ -36,7 +36,7 @@ from fastapi.staticfiles import StaticFiles
 
 from rl.eval import _heuristic_dydx
 from rl.policy import CursorPolicy, act
-from simulator.engine import LiquidWarEngine, GRADIENT_INF
+from simulator.engine import LiquidWarEngine, GRADIENT_INF, MAP_NAMES
 
 CKPT_DIR = os.environ.get("LW_CKPT_DIR", "/opt/training/results")  # NFS mount
 DEVICE = os.environ.get("LW_PLAY_DEVICE", "cpu")
@@ -155,6 +155,7 @@ class GameSession:
             "cursors": e.cursor_pos[0].tolist(),
             "alive": e.team_alive[0].tolist(),
             "done": self.done,
+            "map": MAP_NAMES[e._last_arch] if 0 <= getattr(e, "_last_arch", -1) < len(MAP_NAMES) else "?",
             **self._hud,
         }
 
@@ -176,13 +177,17 @@ async def ws(sock: WebSocket) -> None:
         fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),  # dense fluid mass
     )
     ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True,
-                            "reset": False, "pulse": False}
+                            "reset": False, "pulse": False, "map": None}  # map=None -> random
 
     async def receiver() -> None:
         try:
             while True:
                 msg = await sock.receive_json()
                 if msg.get("reset"):
+                    ctrl["reset"] = True
+                elif "map" in msg:                 # map picker -> force archetype + new game
+                    m = msg["map"]
+                    ctrl["map"] = None if m is None or m < 0 else int(m)
                     ctrl["reset"] = True
                 elif msg.get("pulse"):             # spacebar -> Pulse surge
                     ctrl["pulse"] = True
@@ -207,11 +212,13 @@ async def ws(sock: WebSocket) -> None:
         while ctrl["alive"]:
             t0 = loop.time()                                  # frame start, for steady pacing
             if ctrl["reset"]:
+                session.engine._map_choice = ctrl["map"]   # apply the picked map (None=random)
                 session.reset(); ctrl["reset"] = False; hold = 0; logged = False
                 pulse_start = -PULSE_CD; session.engine._surge = None   # clear pulse per game
             elif session.done:
                 hold += 1
                 if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
+                    session.engine._map_choice = ctrl["map"]   # keep the picked map across games
                     session.reset(); hold = 0; logged = False
                     pulse_start = -PULSE_CD; session.engine._surge = None
             else:
@@ -231,7 +238,7 @@ async def ws(sock: WebSocket) -> None:
             st["pulse_cd"] = round(min(1.0, (n - pulse_start) / PULSE_CD), 2)  # 1.0 = ready
             if session.done and not logged:
                 w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])
-                print(f"[telemetry] GAME END tick={st['tick']} winner=team{w} "
+                print(f"[telemetry] GAME END map={st['map']} tick={st['tick']} winner=team{w} "
                       f"counts={st['fighters']} spread={st['spread']} fps={fps:.1f}", flush=True)
                 logged = True
             elif not session.done and st["tick"] and st["tick"] % 150 == 0:
