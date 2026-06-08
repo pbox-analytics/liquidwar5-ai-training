@@ -51,6 +51,8 @@ const WALL = "#1a2030", EMPTY = "#05070c";
 const cv = document.getElementById("c"), ctx = cv.getContext("2d");
 const tmp = document.createElement("canvas"), tmpCtx = tmp.getContext("2d");  // offscreen units layer
 let trails = true;   // motion trails: fade each frame so flow/swirl/undulation streak (toggle: T)
+let particles = [];  // collision-spark particles {x,y,vx,vy,life,col} that fly out + fade
+const MAXP = 1600;
 let W = 110, H = 80, TEAMS = 4, target = null, ws = null, scale = 7;
 
 function sizeCanvas() {
@@ -88,19 +90,35 @@ function render(st) {
   ctx.fillStyle = trails ? "rgba(5,7,12,0.30)" : EMPTY;
   ctx.fillRect(0, 0, W, H);
   ctx.drawImage(tmp, 0, 0);
-  // COLLISION FX: team-tinted, layered sparks along the clash front (all additive,
-  // so dense fighting blows out bright). Wide team-colour halo -> tighter team
-  // core -> white-hot center. They stack where it's fiercest and streak with trails.
+  // COLLISION FX: a faint front marker + real SPARKS that fly out from the clash,
+  // arc (slight gravity), slow, and fade — white-hot at birth, cooling to the team
+  // colour. With trails on they streak like embers off the battle line.
   if (clash.length) {
     ctx.globalCompositeOperation = "lighter";
-    ctx.globalAlpha = 0.25;                                  // wide team-tinted halo
-    for (const i of clash) { ctx.fillStyle = COLORS[g[i] % COLORS.length]; ctx.fillRect((i % W) - 2, ((i / W) | 0) - 2, 5, 5); }
-    ctx.globalAlpha = 0.6;                                   // tighter, brighter team core
+    ctx.globalAlpha = 0.35;                                  // subtle team-tinted front glow
     for (const i of clash) { ctx.fillStyle = COLORS[g[i] % COLORS.length]; ctx.fillRect((i % W) - 1, ((i / W) | 0) - 1, 3, 3); }
-    ctx.globalAlpha = 1;                                     // white-hot center
-    ctx.fillStyle = "#ffffff";
-    for (const i of clash) ctx.fillRect(i % W, (i / W) | 0, 1, 1);
-    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
+    for (const i of clash) {                                 // emit sparks sparingly
+      if (particles.length >= MAXP || Math.random() > 0.05) continue;
+      const a = Math.random() * 6.283, sp = 0.5 + Math.random() * 1.3;
+      particles.push({ x: (i % W) + 0.5, y: ((i / W) | 0) + 0.5,
+                       vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 0.3,
+                       life: 1, col: COLORS[g[i] % COLORS.length] });
+    }
+  }
+  if (particles.length) {                                   // travel, drag, gravity, fade
+    ctx.globalCompositeOperation = "lighter";
+    const next = [];
+    for (const p of particles) {
+      p.x += p.vx; p.y += p.vy; p.vx *= 0.95; p.vy = p.vy * 0.95 + 0.03; p.life -= 0.022;
+      if (p.life <= 0 || p.x < 0 || p.x >= W || p.y < 0 || p.y >= H) continue;
+      ctx.globalAlpha = p.life;
+      ctx.fillStyle = p.life > 0.7 ? "#ffffff" : p.col;      // white-hot -> team colour as it cools
+      ctx.fillRect(p.x - 0.7, p.y - 0.7, 1.8, 1.8);
+      next.push(p);
+    }
+    particles = next;
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
   }
   // cursors — glow + pulsate so they never get lost in the swarm. Player (team 0)
   // is bigger, and flares yellow during a Pulse.
