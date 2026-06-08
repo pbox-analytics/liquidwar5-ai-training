@@ -251,17 +251,22 @@ class LiquidWarEngine:
         seed = int(passable.view(-1).nonzero()[0])
         reach = torch.zeros_like(w)
         reach.view(-1)[seed] = True
-        for _ in range(H + W):                               # iterative 4-conn flood
+        thresh, last = 0.85 * total, 0
+        for it in range(H + W):                              # iterative 4-conn flood
             nxt = reach.clone()
             nxt[1:, :] |= reach[:-1, :]
             nxt[:-1, :] |= reach[1:, :]
             nxt[:, 1:] |= reach[:, :-1]
             nxt[:, :-1] |= reach[:, 1:]
-            nxt &= passable
-            if torch.equal(nxt, reach):
-                break
-            reach = nxt
-        return int(reach.sum()) >= 0.85 * total
+            reach = nxt & passable
+            if it % 24 == 23:                                # .sum() syncs -> check periodically
+                s = int(reach.sum())
+                if s >= thresh:                              # connected enough -> done early
+                    return True
+                if s == last:                                # flood stalled -> walled-off pocket
+                    break
+                last = s
+        return int(reach.sum()) >= thresh
 
     def _place_teams(self) -> None:
         """Place ``fighters_per_team`` fighters per team in vertical strips, one
@@ -409,7 +414,12 @@ class LiquidWarEngine:
         # survive. Hard-capped at 2*(H+W) (the longest possible geodesic path)
         # as a safety bound; the early-out keeps steady state cheap — a warm
         # field reconverges in a couple of sweeps once it has flooded once.
-        for _ in range(2 * (H + W)):
+        # Per-tick sweep cap (set by the play server via ``_grad_cap``) spreads a
+        # cold field's full flood over a few frames instead of one ~88ms stutter at
+        # game start; the field persists, so the convergence accumulates tick to
+        # tick. Default None -> full convergence each tick (training MDP unchanged).
+        cap = getattr(self, "_grad_cap", None)
+        for _ in range(min(2 * (H + W), cap) if cap else 2 * (H + W)):
             prev = g.clone()
             p = torch.nn.functional.pad(g, (1, 1, 1, 1), value=GRAD_INIT)
             for dy in (-1, 0, 1):

@@ -68,6 +68,9 @@ class GameSession:
         self.engine = LiquidWarEngine(batch_size=1, height=height, width=width,
                                       num_teams=teams, fighters_per_team=fighters,
                                       device=DEVICE, grad_iters=24)
+        # Cap gradient sweeps/tick so a fresh game's cold flood spreads over a few
+        # frames (the persistent field accumulates) instead of one ~88ms stutter.
+        self.engine._grad_cap = 48
         self.engine.reset()
         self.policy: CursorPolicy | None = None
         self.ckpt_name = opponent
