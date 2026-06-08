@@ -160,11 +160,23 @@ class GameSession:
                 "flood_pct": round(100 * flood / max(reach, 1)),
                 "spread": spread,
             }
+        # Particle stream for the animated client: a fixed-stride sample of fighter
+        # positions (identity-stable indices) + their team. The client interpolates
+        # each mote between frames and streaks it along its velocity (curr - prev),
+        # so motion is smooth 60fps flow rather than blinking cells. int16 positions
+        # pack tighter than the per-cell grid.
+        step = max(1, e.N // 9000)
+        pidx = torch.arange(0, e.N, step, device=e.device)
+        pos = torch.stack((e.fy[0, pidx], e.fx[0, pidx]), dim=1).reshape(-1).to(torch.int16)
+        pteam = e.fteam[0, pidx].to(torch.uint8)
         return {
             "tick": int(e.tick),
             "h": e.H, "w": e.W, "teams": e.T,
             "opponent": self.ckpt_name,
             "grid_b64": base64.b64encode(cell.cpu().numpy().tobytes()).decode(),
+            "pos_b64": base64.b64encode(pos.cpu().numpy().tobytes()).decode(),
+            "pteam_b64": base64.b64encode(pteam.cpu().numpy().tobytes()).decode(),
+            "pn": int(pidx.numel()),
             "cursors": e.cursor_pos[0].tolist(),
             "alive": e.team_alive[0].tolist(),
             "done": self.done,
