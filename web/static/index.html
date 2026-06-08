@@ -90,7 +90,9 @@ function sendSpin() { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ sp
 let W = 110, H = 80, TEAMS = 4, target = null, ws = null, scale = 7;
 
 function sizeCanvas() {
-  scale = Math.max(4, Math.floor(Math.min(window.innerWidth * 0.95 / W, (window.innerHeight - 180) / H)));
+  // Fit the whole grid on screen (no forced 4px/cell min, which overflowed the
+  // big map). Float scale; image-rendering:pixelated keeps cells crisp.
+  scale = Math.min(window.innerWidth * 0.95 / W, (window.innerHeight - 160) / H);
   cv.style.width = (W * scale) + "px"; cv.style.height = (H * scale) + "px";
   cv.width = W; cv.height = H;
 }
@@ -210,8 +212,9 @@ function connect() {
 // the keyboard (which is the default control). Releasing stops steering.
 let mouseDown = false;
 function updateTarget(e) {
-  const r = cv.getBoundingClientRect();
-  target = [Math.floor((e.clientY - r.top) / scale), Math.floor((e.clientX - r.left) / scale)];
+  const r = cv.getBoundingClientRect();          // map via the ACTUAL on-screen size
+  target = [Math.floor((e.clientY - r.top) * H / r.height),
+            Math.floor((e.clientX - r.left) * W / r.width)];
 }
 cv.addEventListener("mousedown", (e) => { mouseDown = true; updateTarget(e); });
 window.addEventListener("mouseup", () => {
