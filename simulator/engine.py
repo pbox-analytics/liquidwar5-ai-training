@@ -365,7 +365,7 @@ class LiquidWarEngine:
         # living membrane. Interior fighters can't bulge (no empty neighbour) so
         # the body stays dense; only the rim ripples.
         restless = ((torch.sin(phase) > 0.0)
-                    | (torch.rand(B, N, device=self.device) < 0.03)).unsqueeze(-1)
+                    | (torch.rand(B, N, device=self.device) < 0.07)).unsqueeze(-1)
         # +12 tolerance (not exact-equal): with octile costs neighbours sit at
         # cur±10/14, so a restless fighter steps onto the next ring out and the
         # downhill pull tugs it back -> a visible shimmer/undulation, not a freeze.
@@ -389,7 +389,7 @@ class LiquidWarEngine:
         cpos = self.cursor_pos[b, self.fteam]                          # (B,N,2)
         ry = (cpos[..., 0] - self.fy).float(); rx = (cpos[..., 1] - self.fx).float()
         rn = (ry * ry + rx * rx).sqrt().clamp(min=1.0)
-        SWIRL_W = 6.0
+        SWIRL_W = 9.0
         swirl = SWIRL_W * ((-rx / rn).unsqueeze(-1) * self._dy_t + (ry / rn).unsqueeze(-1) * self._dx_t)
         # PERISTALTIC EDGE PUSH: a wave-modulated OUTWARD bias (rides the same
         # traveling wave as the restless gate). On a crest the rim extends outward
