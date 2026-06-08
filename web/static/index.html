@@ -85,10 +85,19 @@
   </div>
 
 <script>
-const COLORS = ["#38e0e0","#ff5470","#4ade80","#fbbf24","#c084fc","#fb923c"]; // team 0 = you
+const COLORS = ["#2f7bff","#ff3a2e","#4ade80","#fbbf24","#c084fc","#fb923c"]; // team 0 = you (vivid blue) / team 1 = warm red
+// Halo tints: lifted/desaturated versions of the team colour, used for the soft additive
+// rim glow under the motes so blue-vs-red team identity reads at a glance.
+const HALO = ["#7db0ff","#ff7a55","#86efac","#fcd34d","#d8b4fe","#fdba74"];
 const WALL = "#1a2030", EMPTY = "#05070c";
 const cv = document.getElementById("c"), ctx = cv.getContext("2d");
 const tmp = document.createElement("canvas"), tmpCtx = tmp.getContext("2d");  // offscreen units layer
+// SOFT BLOOM scratch layer: the main canvas is shrunk into this ~1/3-size buffer,
+// then drawn back upscaled + additive so bright/dense mote areas blur into a glow.
+// Created once, resized only when W/H change. The downscale->upscale IS the blur.
+const bloom = document.createElement("canvas"), bloomCtx = bloom.getContext("2d");
+const BLOOM_DIV = 3;            // 1/3 resolution -> cheap, soft (lower = blurrier/cheaper)
+const BLOOM_ALPHA = 0.32;      // additive opacity of the glow pass — subtle, no white-out
 let trails = true;   // motion trails: fade each frame so flow/swirl/undulation streak (toggle: T)
 let particles = [];  // collision-spark particles {x,y,vx,vy,life,col} that fly out + fade
 const MAXP = 1600;
@@ -106,7 +115,9 @@ function sizeCanvas() {
 }
 
 // ---- two latest server snapshots, interpolated to 60fps on the client ----
-let prevP = null, curP = null, curPT = null, pn = 0, curSt = null, pp = null;
+let prevP = null, curP = null, curPT = null, prevPT = null, pn = 0, curSt = null, pp = null;
+let flashes = [];    // conversion flashes {x,y,life,col} popped when a mote changes team
+const MAXFLASH = 120;  // cap spawns per server frame (conversions can be hundreds)
 let tLast = 0, dtServer = 22;                          // ms between server frames (EMA)
 // Live visual dials (wired to the on-screen sliders) — tune the look without redeploying.
 let pTail = 0.45, pCurve = 0.55, pWidth = 1.2, pTrail = 0.25, pAlpha = 0.75;
@@ -121,11 +132,13 @@ function onWS(st) {                                     // a fresh server frame 
   W = st.w; H = st.h; TEAMS = st.teams; curSt = st;
   if (cv.width !== W) sizeCanvas();
   if (tmp.width !== W) { tmp.width = W; tmp.height = H; }
+  const bw = Math.max(1, (W / BLOOM_DIV) | 0), bh = Math.max(1, (H / BLOOM_DIV) | 0);
+  if (bloom.width !== bw) { bloom.width = bw; bloom.height = bh; }
   const now = performance.now();
   if (tLast) dtServer = 0.85 * dtServer + 0.15 * (now - tLast);
   tLast = now;
   // particle positions (int16 y,x interleaved) + team -> typed arrays
-  pp = prevP; prevP = curP;                            // shift 3 snapshots: prevprev, prev, cur
+  pp = prevP; prevP = curP; prevPT = curPT;            // shift 3 snapshots: prevprev, prev, cur (+ prev team)
   const pr = atob(st.pos_b64), pbuf = new Uint8Array(pr.length);
   for (let i = 0; i < pr.length; i++) pbuf[i] = pr.charCodeAt(i);
   curP = new Int16Array(pbuf.buffer);
@@ -134,6 +147,24 @@ function onWS(st) {                                     // a fresh server frame 
   pn = st.pn;
   if (!prevP || prevP.length !== curP.length) prevP = curP;   // first frame / team-count change
   if (!pp || pp.length !== curP.length) pp = prevP;           // ditto for the prevprev buffer
+  // Conversion flashes: a mote whose team changed since last frame just got
+  // converted in combat. Pop a bright flash at its new position, coloured by
+  // the NEW team. Cap spawns/frame (random sampling) — conversions can be hundreds.
+  if (prevPT && prevPT.length === curPT.length) {
+    const cn = Math.min(curPT.length, curP.length >> 1);
+    let conv = 0;
+    for (let i = 0; i < cn; i++) if (prevPT[i] !== curPT[i] && curPT[i] < TEAMS) conv++;
+    // Spawn probability keeps us at ~MAXFLASH even when conversions far exceed it.
+    const prob = conv > MAXFLASH ? MAXFLASH / conv : 1;
+    let spawned = 0;
+    for (let i = 0; i < cn && spawned < MAXFLASH; i++) {
+      const t = curPT[i];
+      if (prevPT[i] === t || t >= TEAMS) continue;
+      if (prob < 1 && Math.random() >= prob) continue;
+      flashes.push({ x: curP[2*i+1] + 0.5, y: curP[2*i] + 0.5, life: 1, col: COLORS[t % COLORS.length] });
+      spawned++;
+    }
+  }
   // walls -> cached layer (static between maps); army-vs-army contact -> spawn sparks
   const raw = atob(st.grid_b64), g = new Int8Array(raw.length);
   for (let i = 0; i < raw.length; i++) g[i] = (raw.charCodeAt(i) << 24) >> 24;
@@ -164,27 +195,88 @@ function frame() {                                     // 60fps interpolated ren
   // Each mote: interpolate prev->cur by f (smooth 60fps glide), and draw a short
   // streak back along its per-tick displacement = a velocity tail. Batched into one
   // additive Path2D per team so 9000 streaks cost ~TEAMS strokes.
-  const paths = []; for (let t = 0; t < TEAMS; t++) paths.push(new Path2D());
+  // DEPTH SHADING: two Path2D BUCKETS per team — rim (sparse edge of the army)
+  // and core (dense interior). Stroked at different globalAlpha (rim dimmer/
+  // translucent, core brighter) so the army reads as a volume instead of a flat
+  // sheet. Bucketing is by COARSE local density, computed in one binning pass.
+  const NB = 2;                                                  // density buckets per team (rim, core)
+  const paths = []; for (let t = 0; t < TEAMS; t++) { paths.push(new Path2D()); paths.push(new Path2D()); }
   // Curved glide: bend each mote's path prev->cur using its INCOMING velocity
   // (prev - prevprev) as a quadratic control handle, so swirls sweep smooth arcs
   // instead of straight chords. The short streak (TAIL) along the per-tick velocity
   // keeps the "little flowing line" look the player liked.
   const TAIL = pTail, n = Math.min(pn, prevP.length >> 1, curP.length >> 1, pp.length >> 1);
   const g0 = (1-f)*(1-f), g1 = 2*(1-f)*f, g2 = f*f;
+  // ---- pass 1: coarse density grid. Bin every mote into an 8x8-cell bucket
+  // (key = (y>>3)*gw + (x>>3)) and count occupants. One Uint16Array, reused-ish
+  // per frame (cheap: gw*gh cells ≈ (W/8)*(H/8), tiny vs ~16000 motes).
+  const gw = (W >> 3) + 1, gh = (H >> 3) + 1;
+  const dens = new Uint16Array(gw * gh);
+  for (let i = 0; i < n; i++) {
+    const t = curPT[i]; if (t >= TEAMS) continue;
+    const gy = prevP[2*i] >> 3, gx = prevP[2*i+1] >> 3;
+    if (gx < 0 || gy < 0 || gx >= gw || gy >= gh) continue;
+    dens[gy * gw + gx]++;
+  }
+  // Local-count threshold splitting rim (low) from core (high). With ~16000 motes
+  // over a coarse grid, cells in the army interior hold many; edge cells few.
+  const CORE_MIN = 6;                                            // >= this many neighbours in the 8x8 bin = core
+  // ---- pass 2: build curved streaks, routed into the right team+bucket path.
   for (let i = 0; i < n; i++) {
     const t = curPT[i]; if (t >= TEAMS) continue;
     const ay = pp[2*i], ax = pp[2*i+1], by = prevP[2*i], bx = prevP[2*i+1], cy = curP[2*i], cx = curP[2*i+1];
     const kx = bx + (bx-ax)*pCurve, ky = by + (by-ay)*pCurve;     // control = prev + curve*incoming velocity
     const x = g0*bx + g1*kx + g2*cx, y = g0*by + g1*ky + g2*cy;   // smooth-arc position at f
     const vx = cx - bx, vy = cy - by;                             // per-tick velocity = streak direction
-    paths[t].moveTo(x - vx*TAIL, y - vy*TAIL); paths[t].lineTo(x, y);
+    const gy = by >> 3, gx = bx >> 3;
+    const local = (gx >= 0 && gy >= 0 && gx < gw && gy < gh) ? dens[gy * gw + gx] : 0;
+    const b = local >= CORE_MIN ? 1 : 0;                          // 0 = rim, 1 = core
+    const pth = paths[t * NB + b];
+    pth.moveTo(x - vx*TAIL, y - vy*TAIL); pth.lineTo(x, y);
   }
-  // Normal blending (NOT additive) so a dense army reads as solid team colour
-  // instead of saturating to white. Streak + fading trail still convey motion.
-  ctx.globalCompositeOperation = "source-over"; ctx.lineWidth = pWidth; ctx.lineCap = "round"; ctx.globalAlpha = pAlpha;
-  for (let t = 0; t < TEAMS; t++) { ctx.strokeStyle = COLORS[t % COLORS.length]; ctx.stroke(paths[t]); }
-  ctx.globalAlpha = 1;
+  // Streak + fading trail convey motion; halo (below) then crisp motes layer the army.
+  // TEAM HALO: before the crisp motes, stroke each team's existing rim+core paths
+  // a second time at a much larger lineWidth with very low ADDITIVE alpha. Where motes
+  // pack densely (the army mass) the fat translucent strokes overlap and sum into a soft
+  // coloured glow hugging the silhouette; sparse edges barely register. Reuses the paths
+  // already built (no new geometry) — 2 extra strokes/team, cheap at ~16000 motes.
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+  ctx.globalCompositeOperation = "lighter";                      // additive so overlap builds the halo
+  const HALO_W = pWidth * 5.5, HALO_A = pAlpha * 0.06;           // wide + faint -> soft rim, not garish
+  for (let t = 0; t < TEAMS; t++) {
+    ctx.strokeStyle = HALO[t % HALO.length];
+    ctx.globalAlpha = HALO_A; ctx.lineWidth = HALO_W;
+    ctx.stroke(paths[t * NB]); ctx.stroke(paths[t * NB + 1]);    // halo over both rim + core buckets
+  }
+  // Crisp motes on top, normal-blended (NOT additive) so a dense army reads as solid team
+  // colour instead of saturating to white. Two strokes per team (rim then core): rim
+  // translucent for a soft falloff, core nearer full opacity + a touch wider/brighter.
+  ctx.globalCompositeOperation = "source-over";
+  const RIM_A = pAlpha * 0.5, CORE_A = pAlpha;                    // rim dimmer/translucent, core brighter
+  for (let t = 0; t < TEAMS; t++) {
+    ctx.strokeStyle = COLORS[t % COLORS.length];
+    ctx.globalAlpha = RIM_A;  ctx.lineWidth = pWidth;        ctx.stroke(paths[t * NB]);     // rim
+    ctx.globalAlpha = CORE_A; ctx.lineWidth = pWidth * 1.15; ctx.stroke(paths[t * NB + 1]); // core
+  }
+  ctx.globalAlpha = 1; ctx.lineWidth = pWidth;
   drawSparks();
+  drawFlashes();
+  // SOFT BLOOM: shrink everything drawn so far (army + sparks + flashes) into the
+  // 1/3-size buffer, then paint it back upscaled with additive blending + low alpha.
+  // The bilinear upscale smears bright/dense clusters into a soft glow; dark walls/
+  // empty cells contribute ~nothing, so only bright areas bloom. Cursors are drawn
+  // AFTER this so their crisp rings stay sharp.
+  if (bloom.width) {
+    bloomCtx.clearRect(0, 0, bloom.width, bloom.height);
+    bloomCtx.drawImage(cv, 0, 0, bloom.width, bloom.height);   // downscale main -> bloom buffer
+    const prevSmooth = ctx.imageSmoothingEnabled;
+    ctx.imageSmoothingEnabled = true;                          // ensure the upscale blurs (not nearest)
+    ctx.globalCompositeOperation = "lighter";                  // additive glow (motes stay normal-blended)
+    ctx.globalAlpha = BLOOM_ALPHA;
+    ctx.drawImage(bloom, 0, 0, W, H);                          // upscale back over the scene
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
+    ctx.imageSmoothingEnabled = prevSmooth;
+  }
   drawCursors(curSt);
   if (curSt.pulse_active) { ctx.strokeStyle = "#fde047"; ctx.lineWidth = 2; ctx.strokeRect(1, 1, W-2, H-2); }
 }
@@ -200,6 +292,24 @@ function drawSparks() {                                 // collision embers: tra
     ctx.fillRect(p.x - 0.7, p.y - 0.7, 1.8, 1.8); next.push(p);
   }
   particles = next; ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
+}
+
+function drawFlashes() {                                // conversion pops: white-hot core fading to team colour
+  if (!flashes.length) return;
+  ctx.globalCompositeOperation = "lighter";             // additive so flashes glow over the army
+  const next = [];
+  for (const fl of flashes) {
+    fl.life -= 0.055;                                   // ~0.3s lifespan at 60fps (1 / (60*0.3) ≈ 0.055)
+    if (fl.life <= 0) continue;
+    // White-hot at birth, easing to the new team's colour as it fades.
+    const hot = fl.life * fl.life;                      // bias the white core to the first instant
+    ctx.globalAlpha = Math.min(1, fl.life * 1.4);
+    ctx.fillStyle = hot > 0.55 ? "#ffffff" : fl.col;
+    const r = 0.8 + (1 - fl.life) * 2.2;                // expand outward as it dies
+    ctx.fillRect(fl.x - r, fl.y - r, r * 2, r * 2);
+    next.push(fl);
+  }
+  flashes = next; ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
 }
 
 function drawCursors(st) {                              // glow + pulsate so they never get lost
@@ -248,7 +358,7 @@ function connect() {
   const opp = document.getElementById("opponent").value;
   document.getElementById("modeLabel").textContent = mode;
   const teams = parseInt(document.getElementById("oppcount").value) + 1;   // you + N opponents
-  prevP = curP = curSt = pp = null; tLast = 0;        // reset interpolation across a new game
+  prevP = curP = curSt = pp = null; prevPT = curPT = null; flashes = []; tLast = 0;  // reset interpolation across a new game
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?mode=${mode}&opponent=${opp}&teams=${teams}`);
   ws.onmessage = (e) => onWS(JSON.parse(e.data));      // store frame; the rAF loop interpolates + draws
 }

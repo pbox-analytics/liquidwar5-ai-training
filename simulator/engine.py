@@ -668,6 +668,18 @@ class LiquidWarEngine:
             attacking = attacking | atk
             if bool(kmoves.any()):
                 self._rebuild_occ()                                    # followers see freed cells
+        # COORDINATED ROTATION: the priority loop above only resolves chains that
+        # terminate in an EMPTY cell — a rim fighter steps into open space, freeing
+        # its cell for the follower behind it, one ring inward per tick. A dense,
+        # swirling CORE has no such empty seed: every fighter's best (tangential)
+        # cell holds a same-team neighbour, and that neighbour is blocked the same
+        # way, so the whole interior deadlocks and only the rim ripples. This pass
+        # closes the gap — it lets a fighter FOLLOW a same-team occupant that is
+        # itself vacating this tick, which (for a ring of such followers) resolves
+        # as a simultaneous rotation cycle. Conservation + one-per-cell are kept:
+        # see :meth:`_resolve_rotation`.
+        rmoved = self._resolve_rotation(ncell_s, down_s, order, moved, attacking)
+        moved = moved | rmoved
         # combat: attackers push into the down-gradient enemy they committed to.
         self._blocked = attacking
         self._front_dy = torch.where(attacking, self._dy_t[front], front.new_zeros(()))
@@ -698,6 +710,127 @@ class LiquidWarEngine:
         into = (self.fvy * wyh + self.fvx * wxh).clamp(min=0)         # velocity heading INTO the wall
         self.fvy = torch.where(hit, (self.fvy - into * wyh) * 0.88, self.fvy)
         self.fvx = torch.where(hit, (self.fvx - into * wxh) * 0.88, self.fvx)
+
+    def _resolve_rotation(self, ncell_s: torch.Tensor, down_s: torch.Tensor,
+                          order: torch.Tensor, moved: torch.Tensor,
+                          attacking: torch.Tensor) -> torch.Tensor:
+        """Let a dense core ROTATE by following same-team occupants that vacate.
+
+        The priority loop in :meth:`_move_fighters` only advances a fighter into an
+        **empty** cell, so it resolves movement chains that terminate in open space
+        but never a closed rotation cycle: a ring of same-team fighters each wanting
+        the next cell, with no empty seed, deadlocks (only the rim, which borders
+        empty space, ever moves). This pass adds the missing move — a fighter may
+        follow a same-team occupant **that is itself vacating this tick** — so such a
+        ring resolves as a single simultaneous rotation.
+
+        It is a self-consistent simultaneous permutation, found by batched iterated
+        relaxation (no python loop over fighters):
+
+        - Each still-active fighter proposes its single best movable candidate cell
+          ``tgt`` (the rim already took empty cells, so for the core this is a
+          same-team-occupied cell). Enemy / wall / non-movable candidates never
+          propose — combat and the gradient flow are untouched.
+        - Same-cell contention is broken by lowest slot index (the loop's rule),
+          guaranteeing **one mover per target cell** → one-per-cell preserved.
+        - A proposer is *cleared* iff its target is empty **or** occupied by a
+          same-team fighter that is itself a cleared mover (it will vacate). Starting
+          from "all contention winners cleared", any proposer whose target's occupant
+          is a fighter that stays put has its clearance **revoked**; revocation
+          propagates until a fixpoint. What survives = chains into empty cells +
+          closed rotation cycles. Each cleared mover both claims exactly one target
+          and frees exactly its own (distinct) source cell, so total count is
+          invariant and no cell ends double-occupied.
+
+        :param ncell_s: ``(B, N, 8)`` candidate cells, best-first (post-argsort).
+        :param down_s: ``(B, N, 8)`` movable mask aligned with ``ncell_s``.
+        :param order: ``(B, N, 8)`` argsort mapping rank -> original slot.
+        :param moved: ``(B, N)`` bool — fighters that already moved this tick.
+        :param attacking: ``(B, N)`` bool — fighters committed to an attack.
+        :returns: ``(B, N)`` bool mask of fighters relocated by this rotation pass.
+
+        .. note::
+           Invariant-preserving by construction; see the relaxation argument above.
+           Pairs with the priority loop — together they cover empty-seeded chains
+           (there) and closed cycles (here).
+        """
+        B, N, H, W = self.B, self.N, self.H, self.W
+        device = self.device
+        # Per-fighter best MOVABLE candidate (rank order already encodes the swirl
+        # bias). ``down_s`` is False past a fighter's real candidates, so masked
+        # fighters get no proposal.
+        any_cand = down_s.any(-1)
+        first_rank = torch.argmax(down_s.to(torch.int8), dim=-1)            # (B,N) first True rank
+        br = first_rank.unsqueeze(-1)
+        tgt = ncell_s.gather(-1, br).squeeze(-1)                            # (B,N) best movable cell
+        # Eligible proposers: still active (not moved, not attacking) with a real
+        # movable candidate, whose best cell is PASSABLE and NOT an enemy. (Empty or
+        # same-team occupied — both are valid rotation targets; enemies go to combat
+        # via the priority loop, so we must not steal them here.)
+        active = any_cand & ~moved & ~attacking
+        passable = self.passable.view(B, -1).gather(1, tgt)
+        occ_slot = self.occ.view(B, -1).gather(1, tgt)
+        occ_team = torch.where(occ_slot >= 0,
+                               self.fteam.gather(1, occ_slot.clamp(min=0)), self.fteam)
+        is_enemy = (occ_slot >= 0) & (occ_team != self.fteam)
+        propose = active & passable & ~is_enemy
+        if not bool(propose.any()):
+            return torch.zeros(B, N, dtype=torch.bool, device=device)
+        slots = torch.arange(N, device=device).expand(B, N)
+        BIGN = N + 1
+        # Contention: at most one proposer (lowest slot) per target cell.
+        claim = torch.full((B, H * W), BIGN, dtype=torch.long, device=device)
+        claim.scatter_reduce_(1, tgt,
+                              torch.where(propose, slots, slots.new_full((), BIGN)),
+                              reduce='amin', include_self=True)
+        winner = propose & (claim.gather(1, tgt) == slots)                 # (B,N) one per target
+        tgt_empty = (occ_slot == -1)
+        src = (self.fy * W + self.fx)                                      # (B,N) each fighter's own cell
+        # ``cleared`` starts optimistic (every contention winner) and is MONOTONICALLY
+        # SHRUNK to a fixpoint: a winner survives only if its target is empty OR its
+        # target's occupant is itself a surviving cleared mover (it will vacate). We
+        # recompute from ``winner`` against a ``movers_grid`` built from the current
+        # ``cleared`` — which only shrinks — so the iteration is monotone and reaches
+        # a self-consistent fixpoint. ``movers_grid[b, c]`` is True iff a cleared
+        # mover currently sits on cell ``c`` (one-per-cell ⇒ exactly its occupant).
+        # The cap bounds the longest revocation chain we propagate; the FINAL
+        # consistency filter below guarantees no unjustified move is applied even if
+        # an (atypically long) chain hasn't fully converged.
+        cleared = winner.clone()
+
+        def _vacated(active_set: torch.Tensor) -> torch.Tensor:
+            """``(B,N)`` mask: winner whose target is empty or vacated by a mover."""
+            grid = torch.zeros(B, H * W, dtype=torch.bool, device=device)
+            grid.scatter_(1, src, active_set)
+            return winner & (tgt_empty | (grid.gather(1, tgt) & (occ_slot >= 0)))
+
+        # A closed rotation cycle is self-consistent immediately (one pass); chains
+        # into empty cells converge in chain-length passes. A small cap keeps this
+        # cheap (60fps budget). Only a TRUE fixpoint (``_vacated(cleared) ==
+        # cleared``) is self-consistent — every survivor justified by a survivor —
+        # and therefore safe to apply. If the cap is hit without convergence (an
+        # atypically long chain), we fall back to the unconditionally-safe subset
+        # (pure empty-target moves); the rest resolves over the next ticks. This
+        # makes the one-per-cell invariant impossible to violate.
+        converged = False
+        for _ in range(6):                                                # monotone shrink
+            new_cleared = _vacated(cleared)
+            if bool((new_cleared == cleared).all()):
+                converged = True
+                break
+            cleared = new_cleared
+        if not converged:
+            cleared = winner & tgt_empty                                   # safe fallback
+        if not bool(cleared.any()):
+            return torch.zeros(B, N, dtype=torch.bool, device=device)
+        # Apply the simultaneous permutation. Each cleared mover relocates to ``tgt``;
+        # its source cell is freed by whichever cleared mover follows it (or stays
+        # empty). One-per-cell holds: distinct winners hold distinct targets.
+        self.fy = torch.where(cleared, tgt // W, self.fy)
+        self.fx = torch.where(cleared, tgt % W, self.fx)
+        if bool(cleared.any()):
+            self._rebuild_occ()
+        return cleared
 
     # ------------------------------------------------------------------
     # Combat — convert, never delete
