@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import glob
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,7 @@ class GameSession:
         self.engine._spin = torch.ones(1, teams, device=DEVICE)  # per-team orbit sign; player flips team 0
         self.engine._burst = torch.zeros(1, teams, device=DEVICE)  # gather(-1)/burst(+1) phase; player drives 0
         self.engine._drill = torch.zeros(1, teams, 2, device=DEVICE)  # per-team thrust dir (drill move)
+        self.engine._wall = torch.zeros(1, teams, 2, device=DEVICE)  # per-team shield facing (wall stance)
         self.engine.reset()
         self.policy: CursorPolicy | None = None
         self.ckpt_name = opponent
@@ -183,7 +185,7 @@ async def ws(sock: WebSocket) -> None:
         fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),  # dense fluid mass
     )
     ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True, "reset": False,
-                            "pulse": False, "map": None, "spin": None, "burst": False, "drill": False}
+                            "map": None, "spin": None, "stance": 0}
 
     async def receiver() -> None:
         try:
@@ -195,14 +197,10 @@ async def ws(sock: WebSocket) -> None:
                     m = msg["map"]
                     ctrl["map"] = None if m is None or m < 0 else int(m)
                     ctrl["reset"] = True
-                elif "spin" in msg:                # Q/E -> flip swarm orbit CW/CCW (or 0 = stop)
+                elif "spin" in msg:                # Q/E -> orbit direction (Spin/Swarm stances)
                     ctrl["spin"] = float(msg["spin"])
-                elif msg.get("burst"):             # 2 -> Wave (gather then burst outward)
-                    ctrl["burst"] = True
-                elif msg.get("drill"):             # 3 -> Drill (gather then pierce forward)
-                    ctrl["drill"] = True
-                elif msg.get("pulse"):             # 1 -> Pulse surge
-                    ctrl["pulse"] = True
+                elif "stance" in msg:              # 1-5 -> select the held tactical stance (0..4)
+                    ctrl["stance"] = max(0, min(4, int(msg["stance"])))
                 elif "dir" in msg:                 # keyboard (arrows/WASD)
                     ctrl["dir"] = msg["dir"]
                 elif "target" in msg:              # mouse
@@ -217,76 +215,54 @@ async def ws(sock: WebSocket) -> None:
         prev = None
         logged = False                                 # one telemetry line per finished game
         loop = asyncio.get_event_loop()
-        PULSE_DUR, PULSE_CD, PULSE_MULT = 18, 180, 6.0   # active ticks / cooldown ticks / dmg x
-        BURST_GATHER, BURST_PUSH, BURST_CD = 20, 32, 240  # gather ticks / push ticks / cooldown ticks
-        DRILL_GATHER, DRILL_THRUST, DRILL_CD = 12, 28, 260  # gather / thrust / cooldown ticks
         n = 0
-        pulse_start = -PULSE_CD                          # monotonic tick of the last Pulse
-        burst_start = -BURST_CD                          # monotonic tick of the last Burst
-        drill_start = -DRILL_CD                          # monotonic tick of the last Drill
-        last_dir = [0, 1]                                # last steer heading (drill aims here); default right
+        spin_sign = 1                                    # Q/E orbit direction (Spin/Swarm stances): +1/-1/0
+        last_dir = [0, 1]                                # heading the Drill/Wall point at; default right
         next_dl = loop.time()                            # absolute frame deadline (drift-corrected)
+        STANCES = ("Swarm", "Spin", "Drill", "Wall", "Pulse")  # index = ctrl["stance"]
         while ctrl["alive"]:
             t0 = loop.time()                                  # frame start, for steady pacing
-            if ctrl["spin"] is not None:                      # apply spin control (persists across games)
-                session.engine._spin[0, 0] = ctrl["spin"]
-                ctrl["spin"] = None
+            if ctrl["spin"] is not None:                      # Q/E -> orbit direction (Spin/Swarm stances)
+                spin_sign = ctrl["spin"]; ctrl["spin"] = None
             if ctrl["reset"]:
                 session.engine._map_choice = ctrl["map"]   # apply the picked map (None=random)
                 session.reset(); ctrl["reset"] = False; hold = 0; logged = False
-                pulse_start = -PULSE_CD; session.engine._surge = None   # clear pulse per game
-                burst_start = -BURST_CD; session.engine._burst.zero_()  # clear burst per game
-                drill_start = -DRILL_CD; session.engine._drill.zero_()  # clear drill per game
+                _e = session.engine; _e._surge = None                   # clear all stance knobs per game
+                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_()
             elif session.done:
                 hold += 1
                 if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
                     session.engine._map_choice = ctrl["map"]   # keep the picked map across games
                     session.reset(); hold = 0; logged = False
-                    pulse_start = -PULSE_CD; session.engine._surge = None
-                    burst_start = -BURST_CD; session.engine._burst.zero_()
-                    drill_start = -DRILL_CD; session.engine._drill.zero_()
+                    _e = session.engine; _e._surge = None
+                    _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_()
             else:
-                if ctrl["pulse"]:                       # consume request; fire only if off cooldown
-                    if n - pulse_start >= PULSE_CD:
-                        pulse_start = n
-                    ctrl["pulse"] = False
-                if 0 <= n - pulse_start < PULSE_DUR:    # human team (0) surges
-                    s = torch.ones(1, session.engine.T, device=session.engine.device)
-                    s[0, 0] = PULSE_MULT
-                    session.engine._surge = s
-                else:
-                    session.engine._surge = None
-                if ctrl["burst"]:                       # F -> Wave (fire if off cooldown)
-                    if n - burst_start >= BURST_CD:
-                        burst_start = n
-                    ctrl["burst"] = False
-                if ctrl["drill"]:                       # R -> Drill (fire if off cooldown)
-                    if n - drill_start >= DRILL_CD:
-                        drill_start = n
-                    ctrl["drill"] = False
                 if ctrl["dir"] and (ctrl["dir"][0] or ctrl["dir"][1]):
-                    last_dir = ctrl["dir"]              # remember heading so the drill aims where you steer
-                bp, dp = n - burst_start, n - drill_start
-                session.engine._burst.zero_(); session.engine._drill.zero_()
-                if 0 <= bp < BURST_GATHER:                                          # Wave phase 1: gather
-                    session.engine._burst[0, 0] = -1.0
-                elif BURST_GATHER <= bp < BURST_GATHER + BURST_PUSH:                # Wave phase 2: burst out
-                    session.engine._burst[0, 0] = 1.0
-                if 0 <= dp < DRILL_GATHER:                                          # Drill phase 1: gather
-                    session.engine._burst[0, 0] = -1.0
-                elif DRILL_GATHER <= dp < DRILL_GATHER + DRILL_THRUST:              # Drill phase 2: thrust
-                    session.engine._drill[0, 0, 0] = float(last_dir[0])
-                    session.engine._drill[0, 0, 1] = float(last_dir[1])
+                    last_dir = ctrl["dir"]                  # heading the Drill/Wall point at
+                _e = session.engine
+                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_()
+                _e._surge = None
+                stance = ctrl["stance"]                     # 0 Swarm 1 Spin 2 Drill 3 Wall 4 Pulse
+                if stance == 0:                             # Swarm: gentle orbit + flow in
+                    _e._spin[0, 0] = 0.6 * spin_sign
+                elif stance == 1:                           # Spin: hard orbit, Q/E direction
+                    _e._spin[0, 0] = 1.5 * spin_sign
+                elif stance == 2:                           # Drill: spinning forward pierce (corkscrew)
+                    _e._spin[0, 0] = 0.8 * spin_sign
+                    _e._drill[0, 0, 0] = float(last_dir[0]); _e._drill[0, 0, 1] = float(last_dir[1])
+                elif stance == 3:                           # Wall: dense shield bar across the facing
+                    _e._wall[0, 0, 0] = float(last_dir[0]); _e._wall[0, 0, 1] = float(last_dir[1])
+                elif stance == 4:                           # Pulse: concentric rings + damage waves
+                    ring = math.sin(n * 0.33)
+                    _e._burst[0, 0] = 1.0 if ring > 0 else -0.6
+                    s = torch.ones(1, _e.T, device=_e.device)
+                    if ring > 0.5:
+                        s[0, 0] = 4.0                       # surge on each ring's crest
+                    _e._surge = s
                 session.step(ctrl["target"], ctrl["dir"])
             st = session.state(); st["fps"] = round(fps, 1)
-            st["pulse_active"] = bool(0 <= n - pulse_start < PULSE_DUR)
-            st["pulse_cd"] = round(min(1.0, (n - pulse_start) / PULSE_CD), 2)  # 1.0 = ready
-            bp2 = n - burst_start
-            st["burst_active"] = bool(0 <= bp2 < BURST_GATHER + BURST_PUSH)
-            st["burst_cd"] = round(min(1.0, bp2 / BURST_CD), 2)
-            dp2 = n - drill_start
-            st["drill_active"] = bool(0 <= dp2 < DRILL_GATHER + DRILL_THRUST)
-            st["drill_cd"] = round(min(1.0, dp2 / DRILL_CD), 2)
+            st["stance"] = STANCES[ctrl["stance"]]      # held tactical state
+            st["spin_dir"] = spin_sign
             if session.done and not logged:
                 w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])
                 print(f"[telemetry] GAME END map={st['map']} tick={st['tick']} winner=team{w} "

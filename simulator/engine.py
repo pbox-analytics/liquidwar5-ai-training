@@ -533,6 +533,15 @@ class LiquidWarEngine:
             drill_fwd = dd[..., 0:1] * self._dy_t + dd[..., 1:2] * self._dx_t   # (B,N,8) forward alignment
             on = (dd.abs().sum(-1, keepdim=True) > 0)                           # (B,N,1) is this team drilling?
             movable = movable | (on & (drill_fwd > 0) & (ng <= cur.unsqueeze(-1) + 44))
+        # WALL stance: a per-team facing ``_wall`` (dy,dx); the team collapses onto
+        # the line through the cursor PERPENDICULAR to the facing -> a dense shield
+        # bar pointed at the threat. (The score term needs the radial, added below.)
+        wall = getattr(self, "_wall", None)
+        wdd = None
+        if wall is not None:
+            wdd = wall.gather(1, self.fteam.unsqueeze(-1).expand(B, N, 2))      # (B,N,2) facing
+            won = (wdd.abs().sum(-1, keepdim=True) > 0)
+            movable = movable | (won & (ng <= cur.unsqueeze(-1) + 30))
         jitter = torch.randint(0, 7, ng.shape, device=self.device)
         # MOMENTUM / INERTIA: bias each candidate's score toward the fighter's
         # velocity, so a moving mass carries weight — it overshoots, banks around
@@ -576,6 +585,10 @@ class LiquidWarEngine:
             score = score - 15.0 * burst_f.unsqueeze(-1) * out_align
         if drill_fwd is not None:                                     # DRILL: pierce forward, concentrated
             score = score - 16.0 * drill_fwd
+        if wdd is not None:                                           # WALL: collapse onto the cursor's perp line
+            fwd_comp = (-ry) * wdd[..., 0] + (-rx) * wdd[..., 1]      # how far ahead/behind that line
+            c_face = wdd[..., 0:1] * self._dy_t + wdd[..., 1:2] * self._dx_t
+            score = score + 14.0 * torch.sign(fwd_comp).unsqueeze(-1) * c_face
         order = torch.where(movable, score, score.new_full((), float(BIGG))).argsort(dim=-1)
         ncell_s = ncell.gather(-1, order)                              # cells, best-first
         down_s = movable.gather(-1, order)
