@@ -70,7 +70,7 @@
   <canvas id="c" width="110" height="80"></canvas>
   <div class="muted" style="text-align:center; line-height:1.8;">
     <b>↑ ↓ ← → / WASD</b> steer (or hold mouse) &nbsp;·&nbsp;
-    <b>Stances</b> (hold one): <b>1</b> 🐝 Swarm &nbsp; <b>2</b> 🌀 Spin &nbsp; <b>3</b> ➤ Drill <span class="muted">(tap to rev: slow→fast)</span> &nbsp; <b>4</b> 🛡 Wall &nbsp; <b>5</b> 💥 Pulse &nbsp;·&nbsp;
+    <b>Stances</b> (hold one): <b>1</b> 🐝 Swarm &nbsp; <b>2</b> 🌀 Spin &nbsp; <b>3</b> ➤ Drill <span class="muted">(tap to rev: slow→fast)</span> &nbsp; <b>4</b> 🛡 Wall &nbsp; <b>5</b> 💥 Pulse &nbsp; <b>6</b> 🕳 Doom &nbsp;·&nbsp;
     <b>Q</b>/<b>E</b> spin direction &nbsp;·&nbsp;
     <b>T</b> trails &nbsp;·&nbsp;
     <b>New game</b> / <b>Map</b> picker above
@@ -179,14 +179,28 @@ function render(st) {
     ctx.strokeStyle = "#fde047"; ctx.lineWidth = 2;
     ctx.strokeRect(1, 1, W - 2, H - 2);
   }
+  if (st.stance === "Doom" && st.cursors[0] && st.alive[0]) {          // Interstellar Gargantua
+    const c = st.cursors[0], dcx = c[1] + .5, dcy = c[0] + .5, tt = performance.now() / 500;
+    ctx.globalCompositeOperation = "lighter";                          // swirling accretion disk
+    for (let i = 0; i < 4; i++) {
+      ctx.globalAlpha = 0.45 - i * 0.09;
+      ctx.strokeStyle = i < 2 ? "#ffe08a" : "#ff7a18";
+      ctx.lineWidth = 1.6 - i * 0.3;
+      ctx.beginPath(); ctx.arc(dcx, dcy, 6 + i * 3 + Math.sin(tt * 2 + i) * 0.8, 0, 7); ctx.stroke();
+    }
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = "#000"; ctx.beginPath(); ctx.arc(dcx, dcy, 5, 0, 7); ctx.fill();   // event horizon
+    ctx.strokeStyle = "#ffb347"; ctx.lineWidth = 0.7;
+    ctx.beginPath(); ctx.arc(dcx, dcy, 5.3, 0, 7); ctx.stroke();                       // photon ring
+  }
   document.getElementById("tick").textContent = st.tick;
   document.getElementById("fps").textContent = st.fps ?? "—";
   document.getElementById("flood").textContent = st.flood_pct ?? "—";
   document.getElementById("spread").textContent = st.spread ? st.spread.map(s => Math.round(s)).join("/") : "—";
   document.getElementById("mapname").textContent = st.map ?? "—";
   const sp = document.getElementById("stancePill");
-  const SC = { Swarm: "#1b2233", Spin: "#0c3a4a", Drill: "#5a3a0c", Wall: "#14401f", Pulse: "#3a1040" };
-  const SI = { Swarm: "🐝", Spin: "🌀", Drill: "➤", Wall: "🛡", Pulse: "💥" };
+  const SC = { Swarm: "#1b2233", Spin: "#0c3a4a", Drill: "#5a3a0c", Wall: "#14401f", Pulse: "#3a1040", Doom: "#000000" };
+  const SI = { Swarm: "🐝", Spin: "🌀", Drill: "➤", Wall: "🛡", Pulse: "💥", Doom: "🕳" };
   sp.textContent = (SI[st.stance] || "") + " " + (st.stance ?? "—") + (st.mode ? " ·" + st.mode : "");
   sp.style.background = SC[st.stance] || "#1b2233"; sp.style.color = "#fff";
   document.getElementById("opp").textContent = st.opponent;
@@ -235,7 +249,7 @@ function sendDir() {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ dir }));
 }
 window.addEventListener("keydown", (e) => {
-  if (e.key >= "1" && e.key <= "5") {             // number row selects a held STANCE (0..4)
+  if (e.key >= "1" && e.key <= "6") {             // number row selects a held STANCE (0..5)
     if (ws && ws.readyState === 1) ws.send(JSON.stringify({ stance: parseInt(e.key) - 1 }));
     return;
   }
