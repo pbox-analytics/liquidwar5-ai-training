@@ -204,7 +204,7 @@ async def ws(sock: WebSocket) -> None:
                 elif "spin" in msg:                # Q/E -> orbit direction (Spin/Swarm stances)
                     ctrl["spin"] = float(msg["spin"])
                 elif "stance" in msg:              # 1-5 -> select held stance; re-tap Drill(3) revs its mode
-                    s = max(0, min(5, int(msg["stance"])))
+                    s = max(0, min(6, int(msg["stance"])))
                     if s == 2 and ctrl["stance"] == 2:
                         ctrl["drill_mode"] = (ctrl["drill_mode"] + 1) % 3
                     elif s == 2:
@@ -228,7 +228,7 @@ async def ws(sock: WebSocket) -> None:
         spin_sign = 1                                    # Q/E orbit direction (Spin/Swarm stances): +1/-1/0
         last_dir = [0, 1]                                # heading the Drill/Wall point at; default right
         next_dl = loop.time()                            # absolute frame deadline (drift-corrected)
-        STANCES = ("Swarm", "Spin", "Drill", "Wall", "Pulse", "Doom")  # index = ctrl["stance"]
+        STANCES = ("Swarm", "Spin", "Drill", "Wall", "Pulse", "Doom", "Atom")  # index = ctrl["stance"]
         while ctrl["alive"]:
             t0 = loop.time()                                  # frame start, for steady pacing
             if ctrl["spin"] is not None:                      # Q/E -> orbit direction (Spin/Swarm stances)
@@ -276,11 +276,15 @@ async def ws(sock: WebSocket) -> None:
                     if ring > 0.5:
                         s[0, 0] = 4.0                       # surge on each ring's crest
                     _e._surge = s
-                elif stance == 5:                           # Doom: Interstellar black hole (Gargantua)
+                elif stance == 5:                           # Doom: violent black-hole implosion
                     sgn = spin_sign if spin_sign != 0 else 1
-                    _e._spin[0, 0] = 2.6 * sgn              # accretion disk — extreme fast spin
-                    _e._burst[0, 0] = -1.6                  # singularity — collapse the mass to a point
+                    _e._spin[0, 0] = 0.8 * sgn              # only a little accretion swirl
+                    _e._burst[0, 0] = -3.4                  # VIOLENT collapse — yank EVERY unit to the point
                     s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = 6.0; _e._surge = s  # tidal devastation
+                elif stance == 6:                           # Atom: fast wide orbiting shell (electron cloud)
+                    sgn = spin_sign if spin_sign != 0 else 1
+                    _e._spin[0, 0] = 2.0 * sgn              # electrons whirl fast around the nucleus
+                    _e._burst[0, 0] = 0.6                   # pushed out into a shell ring, not a dense core
                 session.step(ctrl["target"], ctrl["dir"])
             st = session.state(); st["fps"] = round(fps, 1)
             st["stance"] = STANCES[ctrl["stance"]]      # held tactical state

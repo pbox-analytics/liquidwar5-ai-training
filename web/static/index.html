@@ -70,7 +70,7 @@
   <canvas id="c" width="110" height="80"></canvas>
   <div class="muted" style="text-align:center; line-height:1.8;">
     <b>↑ ↓ ← → / WASD</b> steer (or hold mouse) &nbsp;·&nbsp;
-    <b>Stances</b> (hold one): <b>1</b> 🐝 Swarm &nbsp; <b>2</b> 🌀 Spin &nbsp; <b>3</b> ➤ Drill <span class="muted">(tap to rev: slow→fast)</span> &nbsp; <b>4</b> 🛡 Wall &nbsp; <b>5</b> 💥 Pulse &nbsp; <b>6</b> 🕳 Doom &nbsp;·&nbsp;
+    <b>Stances</b> (hold one): <b>1</b> 🐝 Swarm &nbsp; <b>2</b> 🌀 Spin &nbsp; <b>3</b> ➤ Drill <span class="muted">(tap to rev: slow→fast)</span> &nbsp; <b>4</b> 🛡 Wall &nbsp; <b>5</b> 💥 Pulse &nbsp; <b>6</b> 🕳 Doom &nbsp; <b>7</b> ⚛ Atom &nbsp;·&nbsp;
     <b>Q</b>/<b>E</b> spin direction &nbsp;·&nbsp;
     <b>T</b> trails &nbsp;·&nbsp;
     <b>New game</b> / <b>Map</b> picker above
@@ -123,7 +123,7 @@ function render(st) {
   // TRAILS: fade the previous frame, then composite the new units over it. The
   // fading lag turns the swirl into flow-streaks and the rim into a shimmering
   // undulating edge. (T toggles; lower alpha = longer trails.)
-  ctx.fillStyle = trails ? "rgba(5,7,12,0.30)" : EMPTY;
+  ctx.fillStyle = trails ? "rgba(5,7,12,0.16)" : EMPTY;   // slower fade = longer motion streaks
   ctx.fillRect(0, 0, W, H);
   ctx.drawImage(tmp, 0, 0);
   // COLLISION FX: a faint front marker + real SPARKS that fly out from the clash,
@@ -186,8 +186,8 @@ function render(st) {
   document.getElementById("spread").textContent = st.spread ? st.spread.map(s => Math.round(s)).join("/") : "—";
   document.getElementById("mapname").textContent = st.map ?? "—";
   const sp = document.getElementById("stancePill");
-  const SC = { Swarm: "#1b2233", Spin: "#0c3a4a", Drill: "#5a3a0c", Wall: "#14401f", Pulse: "#3a1040", Doom: "#000000" };
-  const SI = { Swarm: "🐝", Spin: "🌀", Drill: "➤", Wall: "🛡", Pulse: "💥", Doom: "🕳" };
+  const SC = { Swarm: "#1b2233", Spin: "#0c3a4a", Drill: "#5a3a0c", Wall: "#14401f", Pulse: "#3a1040", Doom: "#000000", Atom: "#0a2f3a" };
+  const SI = { Swarm: "🐝", Spin: "🌀", Drill: "➤", Wall: "🛡", Pulse: "💥", Doom: "🕳", Atom: "⚛" };
   sp.textContent = (SI[st.stance] || "") + " " + (st.stance ?? "—") + (st.mode ? " ·" + st.mode : "");
   sp.style.background = SC[st.stance] || "#1b2233"; sp.style.color = "#fff";
   document.getElementById("opp").textContent = st.opponent;
@@ -236,7 +236,7 @@ function sendDir() {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ dir }));
 }
 window.addEventListener("keydown", (e) => {
-  if (e.key >= "1" && e.key <= "6") {             // number row selects a held STANCE (0..5)
+  if (e.key >= "1" && e.key <= "7") {             // number row selects a held STANCE (0..6)
     if (ws && ws.readyState === 1) ws.send(JSON.stringify({ stance: parseInt(e.key) - 1 }));
     return;
   }
