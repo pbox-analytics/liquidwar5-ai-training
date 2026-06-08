@@ -128,11 +128,12 @@ class LiquidWarEngine:
         return self._get_state()
 
     def _generate_random_maps(self) -> torch.Tensor:
-        """Clean arena: solid border only, no interior obstacles.
-
-        Real maze maps (``map.c`` + ``lwmapgen``) land later as a separate step;
-        the gradient flood-fill already routes fighters around any walls, so
-        obstacles can be reintroduced without movement changes.
+        """One maze: solid border + a central barrier you must flank around (top
+        or bottom lane) + a pillar in each lane. Point-symmetric so both teams
+        get equal terrain. The gradient flood-fill already routes fighters around
+        walls, so the army winds through the gaps and the map plays strategically
+        — hold a chokepoint, or flank the other lane. (Wall thickness scales with
+        the grid; more archetypes can be added + chosen at random later.)
         """
         B, H, W = self.B, self.H, self.W
         walls = torch.zeros(B, H, W, dtype=torch.bool)
@@ -140,6 +141,13 @@ class LiquidWarEngine:
         walls[:, -1, :] = True
         walls[:, :, 0] = True
         walls[:, :, -1] = True
+        th = max(2, round(H / 40))
+        cx = W // 2
+        # central vertical barrier across the middle half -> flank top or bottom
+        walls[:, H // 4:3 * H // 4, cx - th:cx + th + 1] = True
+        # a pillar in each flanking lane (point-symmetric)
+        walls[:, H // 8 - th:H // 8 + th, W // 3 - th:W // 3 + th] = True
+        walls[:, H - H // 8 - th:H - H // 8 + th, W - W // 3 - th:W - W // 3 + th] = True
         return walls
 
     def _place_teams(self) -> None:
@@ -238,18 +246,21 @@ class LiquidWarEngine:
         # 288-wide grid needs ~3. actions are unit directions (±1).
         if not hasattr(self, "cursor_speed"):
             self.cursor_speed = max(1, round(self.W / 96))
-        new = self.cursor_pos + actions.long().clamp(-1, 1) * self.cursor_speed
-        new[:, :, 0].clamp_(1, self.H - 2)
-        new[:, :, 1].clamp_(1, self.W - 2)
         b = torch.arange(self.B, device=self.device)
+        adir = actions.long().clamp(-1, 1)
         moved = torch.zeros(self.B, self.T, dtype=torch.bool, device=self.device)
-        for t in range(self.T):
-            ny, nx = new[:, t, 0], new[:, t, 1]
-            oy, ox = self.cursor_pos[:, t, 0], self.cursor_pos[:, t, 1]
-            ok = self.passable[b, ny, nx] & self.team_alive[:, t] & ((ny != oy) | (nx != ox))
-            self.cursor_pos[:, t, 0] = torch.where(ok, ny, oy)
-            self.cursor_pos[:, t, 1] = torch.where(ok, nx, ox)
-            moved[:, t] = ok
+        # Step one cell at a time up to cursor_speed, stopping at walls — so the
+        # cursor can't slide through a maze barrier on a multi-cell move.
+        for _ in range(self.cursor_speed):
+            ny = (self.cursor_pos[:, :, 0] + adir[:, :, 0]).clamp(1, self.H - 2)
+            nx = (self.cursor_pos[:, :, 1] + adir[:, :, 1]).clamp(1, self.W - 2)
+            for t in range(self.T):
+                oy, ox = self.cursor_pos[:, t, 0], self.cursor_pos[:, t, 1]
+                ok = (self.passable[b, ny[:, t], nx[:, t]] & self.team_alive[:, t]
+                      & ((ny[:, t] != oy) | (nx[:, t] != ox)))
+                self.cursor_pos[:, t, 0] = torch.where(ok, ny[:, t], oy)
+                self.cursor_pos[:, t, 1] = torch.where(ok, nx[:, t], ox)
+                moved[:, t] |= ok
         # Seed decays whenever the cursor MOVES (or every 13th tick) so the
         # current cursor cell dominates the persistent field and fighters blob
         # around it rather than smearing toward stale old positions. The decay
