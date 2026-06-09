@@ -32,9 +32,11 @@ MOVE_DYDX = torch.tensor(
 NUM_MOVES = 9
 EGO_CHANNELS = 6
 #: Tactical stances the policy can hold (mirror the play server / engine knobs):
-#: 0 Swarm / 1 Spin / 2 Drill / 3 Wall / 4 Pulse. The stance head picks one per
-#: team per tick; ``apply_stances`` maps it onto the engine's per-team knobs.
-NUM_STANCES = 5
+#: 0 Swarm / 1 Spin / 2 Drill / 3 Wall / 4 Pulse / 5 Doom / 6 Maelstrom / 7 Atom.
+#: The stance head picks one per team per tick; ``apply_stances`` maps it onto the
+#: engine's per-team knobs. (Doom in training is self-collapse only — the cross-team
+#: gravity well is a play-server-only effect.)
+NUM_STANCES = 8
 
 
 def build_egocentric_obs(obs, num_teams):
@@ -184,6 +186,7 @@ def apply_stances(engine, stance, dydx, team_start=0):
     drill = torch.zeros(B, T, 2, device=dev)
     wall = torch.zeros(B, T, 2, device=dev)
     surge = torch.ones(B, T, device=dev)
+    fig8 = torch.zeros(B, T, device=dev)
     aim = dydx.float()
     sw, sp, dr, wl, pu = (stance == 0), (stance == 1), (stance == 2), (stance == 3), (stance == 4)
     spin = torch.where(sw, torch.full_like(spin, 0.5), spin)      # Swarm: loose orbit
@@ -197,13 +200,26 @@ def apply_stances(engine, stance, dydx, team_start=0):
     ring = float(torch.sin(torch.as_tensor(float(engine.tick) * 0.33)))   # Pulse: concentric rings
     burst = torch.where(pu, torch.full_like(burst, 1.0 if ring > 0 else -0.6), burst)
     surge = torch.where(pu, torch.full_like(surge, 4.0 if ring > 0.5 else 1.0), surge)
+    dm, ml, at = (stance == 5), (stance == 6), (stance == 7)
+    spin = torch.where(dm, torch.full_like(spin, 0.25), spin)     # Doom: violent implosion +
+    burst = torch.where(dm, torch.full_like(burst, -6.5), burst)  #   devastation (self-collapse only here;
+    surge = torch.where(dm, torch.full_like(surge, 6.0), surge)   #   the cross-team well is play-only)
+    spin = torch.where(ml, torch.full_like(spin, 2.0), spin)      # Maelstrom: fast wide orbiting shell
+    burst = torch.where(ml, torch.full_like(burst, 0.6), burst)
+    spin = torch.where(at, torch.full_like(spin, 1.8), spin)      # Atom: figure-8 orbitals (engine _fig8)
+    burst = torch.where(at, torch.full_like(burst, 0.4), burst)
+    fig8 = torch.where(at, torch.full_like(fig8, 1.0), fig8)
     if team_start <= 0:                                          # training: drive all teams
         engine._spin, engine._burst, engine._drill, engine._wall, engine._surge = spin, burst, drill, wall, surge
+        engine._fig8 = fig8
     else:                                                        # play: ONLY the AI opponents 1..; keep team 0 (human)
         if engine._surge is None:
             engine._surge = torch.ones(B, T, device=dev)
+        if getattr(engine, "_fig8", None) is None:
+            engine._fig8 = torch.zeros(B, T, device=dev)
         engine._spin[:, team_start:] = spin[:, team_start:]
         engine._burst[:, team_start:] = burst[:, team_start:]
         engine._drill[:, team_start:] = drill[:, team_start:]
         engine._wall[:, team_start:] = wall[:, team_start:]
         engine._surge[:, team_start:] = surge[:, team_start:]
+        engine._fig8[:, team_start:] = fig8[:, team_start:]

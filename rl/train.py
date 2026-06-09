@@ -26,6 +26,7 @@ import torch
 from simulator.engine import LiquidWarEngine
 from rl.policy import CursorPolicy
 from rl.ppo import collect_rollout, ppo_update
+from rl.eval import win_rate
 
 # Kafka metrics publishing is optional — train fine without it.
 try:
@@ -115,6 +116,7 @@ def main():
     print(f"ckpt_dir={ckpt_dir}", flush=True)
 
     best_return = float("-inf")
+    best_winrate = -1.0
     for update in range(args.updates):
         t0 = time.time()
         rollout = collect_rollout(engine, policy, args.steps, device)
@@ -151,12 +153,18 @@ def main():
             except Exception as e:
                 print(f"kafka publish failed: {e}", flush=True)
 
-        if mean_ret > best_return:
-            best_return = mean_ret
-            torch.save(policy.state_dict(), ckpt_dir / "best.pt")
+        best_return = max(best_return, mean_ret)
 
         if (update + 1) % args.ckpt_every == 0:
             torch.save(policy.state_dict(), ckpt_dir / f"upd_{update:05d}.pt")
+            # Select best.pt by REAL skill — 1v1 win-rate vs the fixed heuristic — not the
+            # self-play return (which doesn't track skill and gave us a weak best.pt last run).
+            wr = win_rate(policy, "heuristic", games=24, teams=2, height=args.height,
+                          width=args.width, fighters=args.fighters, device=device)
+            print(f"  [eval] win-rate vs heuristic 1v1 = {wr:.3f}  (best {best_winrate:.3f})", flush=True)
+            if wr > best_winrate:
+                best_winrate = wr
+                torch.save(policy.state_dict(), ckpt_dir / "best.pt")
 
     torch.save(policy.state_dict(), ckpt_dir / "final.pt")
     with open(ckpt_dir / "summary.json", "w") as f:

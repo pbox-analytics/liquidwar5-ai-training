@@ -17,6 +17,7 @@ gradient of signal every tick instead of a single sparse end reward.
 import torch
 
 from rl.policy import act, apply_stances
+from rl.eval import _heuristic_dydx
 
 
 def _team_share(engine):
@@ -34,6 +35,14 @@ def collect_rollout(engine, policy, steps, device):
     (done) are reset mid-rollout so collection stays full.
     """
     B, T = engine.B, engine.T
+    # DRIFT-PROOFING: anchor ~1/3 of games against the FIXED heuristic — teams 1.. there
+    # are heuristic-driven with neutral knobs and masked out of training, so team 0 is
+    # rewarded for beating a REAL opponent, not just its drifting clone (kills the
+    # self-play reward-hacking that made the win-rate oscillate).
+    n_anchor = B // 3
+    anchored = torch.zeros(B, T, dtype=torch.bool, device=device)
+    if n_anchor > 0:
+        anchored[:n_anchor, 1:] = True
     obs_buf = []
     act_buf = torch.zeros(steps, B, T, dtype=torch.long, device=device)
     stance_buf = torch.zeros(steps, B, T, dtype=torch.long, device=device)
@@ -51,9 +60,20 @@ def collect_rollout(engine, policy, steps, device):
         # Policy picks a cursor move AND a tactical stance per team; the joint
         # log-prob (move + stance) is stored for the PPO ratio.
         dydx, stance, logprob, value, _ = act(policy, obs, T, alive)
+        if n_anchor > 0:                               # anchored opponents follow the heuristic, no stance
+            h = _heuristic_dydx(engine)
+            dydx = torch.where(anchored.unsqueeze(-1), h, dydx)
+            stance = torch.where(anchored, torch.zeros_like(stance), stance)
         move_idx = (dydx[..., 0] + 1) * 3 + (dydx[..., 1] + 1)  # (B,T) in 0..8
 
         apply_stances(engine, stance, dydx)            # drive each team's stance knobs (self-play)
+        if n_anchor > 0:                               # heuristic opponents run NEUTRAL knobs (eval baseline)
+            engine._spin = torch.where(anchored, torch.ones_like(engine._spin), engine._spin)
+            engine._burst = torch.where(anchored, torch.zeros_like(engine._burst), engine._burst)
+            engine._surge = torch.where(anchored, torch.ones_like(engine._surge), engine._surge)
+            engine._drill = torch.where(anchored.unsqueeze(-1), torch.zeros_like(engine._drill), engine._drill)
+            engine._wall = torch.where(anchored.unsqueeze(-1), torch.zeros_like(engine._wall), engine._wall)
+            engine._fig8 = torch.where(anchored, torch.zeros_like(engine._fig8), engine._fig8)
         _, done, info = engine.step(dydx)
 
         share = _team_share(engine)
@@ -65,7 +85,7 @@ def collect_rollout(engine, policy, steps, device):
         stance_buf[s] = stance
         logp_buf[s] = logprob
         val_buf[s] = value
-        alive_buf[s] = alive
+        alive_buf[s] = alive & ~anchored               # never train on the heuristic opponents' transitions
         done_buf[s] = done.float().unsqueeze(1).expand(B, T)
 
         if done.any():
