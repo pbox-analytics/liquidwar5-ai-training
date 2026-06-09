@@ -312,6 +312,7 @@ async def ws(sock: WebSocket) -> None:
                     _e._blackhole_str = ctrl["doom_level"] * 40.0 * _frac ** 1.5  # super-linear in mass: full army -> strong well, whittled -> fizzles (x1/x2/x3 charge, tap 6)
                     _e._blackhole_range = float((_e.H ** 2 + _e.W ** 2) ** 0.5)  # FULL-MAP reach (the diagonal) — pulls the enemy from anywhere on the board
                     _e._blackhole_horizon = max(20.0, 1.5 * (_mass / 3.14159) ** 0.5)  # event horizon ~ your blob radius (mass-scaled): enemy is DEVOURED as it contacts your mass, not just at the dead centre
+                    _e._blackhole_capture_rate = 0.35                       # fraction devoured per tick (1=instant gulp, lower=a fightable drain)
                 elif stance == 6:                           # Maelstrom: fast wide orbiting shell (whirlpool)
                     sgn = spin_sign if spin_sign != 0 else 1
                     _e._spin[0, 0] = 2.0 * sgn              # whirl fast and wide around the cursor
