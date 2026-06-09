@@ -322,10 +322,13 @@ async def ws(sock: WebSocket) -> None:
                     _e._spin[0, 0] = 1.8 * sgn              # orbital speed
                     _e._burst[0, 0] = 0.4                   # a little room so the two lobes form
                     _e._fig8[0, 0] = 1.0                    # flip orbit across the cursor -> figure-8 loops
-                # Doom charge trades speed for pull: at level L the cursor only moves
-                # every L-th tick, so a 3x well is sluggish to reposition.
-                _slow = ctrl["stance"] == 5 and ctrl["doom_level"] > 1 and (n % ctrl["doom_level"]) != 0
-                session.step(None if _slow else ctrl["target"], [0, 0] if _slow else ctrl["dir"])
+                # Doom charge trades speed for pull: at level L the cursor moves at 1/L
+                # cells-per-tick — every tick, so it's a smooth slow glide, not a stutter —
+                # making a 3x well sluggish to reposition.
+                _base_cs = max(1, round(_e.W / 96))
+                _e.cursor_speed = (max(1, _base_cs // ctrl["doom_level"])
+                                   if ctrl["stance"] == 5 else _base_cs)
+                session.step(ctrl["target"], ctrl["dir"])
             st = session.state(); st["fps"] = round(fps, 1)
             st["stance"] = STANCES[ctrl["stance"]]      # held tactical state
             st["mode"] = (("slow", "med", "fast")[ctrl["drill_mode"]] if ctrl["stance"] == 2
