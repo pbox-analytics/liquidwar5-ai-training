@@ -309,7 +309,7 @@ async def ws(sock: WebSocket) -> None:
                     _e._blackhole_team = 0                                    # pull ∝ YOUR mass (real black hole):
                     _mass = float(_e.team_oh[0, 0].sum())                     # full army -> devastating well,
                     _frac = _mass / max(1.0, _e.fighters_per_team)
-                    _e._blackhole_str = ctrl["doom_level"] * 55.0 * _frac ** 1.5  # STRONGER + super-linear in mass: full army -> devastating well, whittled -> fizzles fast (x1/x2/x3 charge, tap 6)
+                    _e._blackhole_str = ctrl["doom_level"] * 40.0 * _frac ** 1.5  # super-linear in mass: full army -> strong well, whittled -> fizzles (x1/x2/x3 charge, tap 6)
                     _e._blackhole_range = float((_e.H ** 2 + _e.W ** 2) ** 0.5)  # FULL-MAP reach (the diagonal) — pulls the enemy from anywhere on the board
                     _e._blackhole_horizon = max(20.0, 1.5 * (_mass / 3.14159) ** 0.5)  # event horizon ~ your blob radius (mass-scaled): enemy is DEVOURED as it contacts your mass, not just at the dead centre
                 elif stance == 6:                           # Maelstrom: fast wide orbiting shell (whirlpool)

@@ -373,7 +373,9 @@ class LiquidWarEngine:
             bh_team = getattr(self, "_blackhole_team", 0)
             R_h = getattr(self, "_blackhole_horizon", 16.0)
             dy = bh[:, 0:1] - self.fy.float(); dx = bh[:, 1:2] - self.fx.float()
+            cap_rate = getattr(self, "_blackhole_capture_rate", 0.04)
             grab = ((dy * dy + dx * dx) <= R_h * R_h) & (self.fteam != bh_team)
+            grab = grab & (torch.rand(self.B, self.N, device=self.device) < cap_rate)  # devour GRADUALLY — a drain you can fight, not an instant gulp
             if grab.any():
                 self.fteam = torch.where(grab, torch.full_like(self.fteam, bh_team), self.fteam)
                 self.fhealth = torch.where(grab, torch.full_like(self.fhealth, NEW_HEALTH), self.fhealth)
