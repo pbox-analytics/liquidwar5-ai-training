@@ -310,7 +310,8 @@ async def ws(sock: WebSocket) -> None:
                     _mass = float(_e.team_oh[0, 0].sum())                     # full army -> devastating well,
                     _frac = _mass / max(1.0, _e.fighters_per_team)
                     _e._blackhole_str = ctrl["doom_level"] * 55.0 * _frac ** 1.5  # STRONGER + super-linear in mass: full army -> devastating well, whittled -> fizzles fast (x1/x2/x3 charge, tap 6)
-                    _e._blackhole_range = max(40.0, _e.W * 0.30)             # reach scales with the map (~30% of width) so it actually reaches + strips the enemy, not a tiny fixed radius
+                    _e._blackhole_range = float((_e.H ** 2 + _e.W ** 2) ** 0.5)  # FULL-MAP reach (the diagonal) — pulls the enemy from anywhere on the board
+                    _e._blackhole_horizon = max(14.0, _e.W * 0.04)          # event-horizon radius: enemy reaching the core is DEVOURED (captured to your team)
                 elif stance == 6:                           # Maelstrom: fast wide orbiting shell (whirlpool)
                     sgn = spin_sign if spin_sign != 0 else 1
                     _e._spin[0, 0] = 2.0 * sgn              # whirl fast and wide around the cursor

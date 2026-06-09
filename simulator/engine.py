@@ -364,6 +364,19 @@ class LiquidWarEngine:
         for _ in range(self.unit_speed):
             self._move_fighters()
             self._resolve_combat()
+        # BLACK HOLE event-horizon capture (Doom): enemy fighters that reach the well's
+        # core DEFECT to the well's team — the hole devours what its gravity pulls in, so
+        # the strip steals the enemy army instead of just relocating it onto you. Convert,
+        # not delete (count invariant). Only active while a team holds Doom.
+        bh = getattr(self, "_blackhole_pos", None)
+        if bh is not None:
+            bh_team = getattr(self, "_blackhole_team", 0)
+            R_h = getattr(self, "_blackhole_horizon", 16.0)
+            dy = bh[:, 0:1] - self.fy.float(); dx = bh[:, 1:2] - self.fx.float()
+            grab = ((dy * dy + dx * dx) <= R_h * R_h) & (self.fteam != bh_team)
+            if grab.any():
+                self.fteam = torch.where(grab, torch.full_like(self.fteam, bh_team), self.fteam)
+                self.fhealth = torch.where(grab, torch.full_like(self.fhealth, NEW_HEALTH), self.fhealth)
         self._rebuild_views()
         self.tick += 1
         teams_left = self.team_alive.sum(dim=1)
