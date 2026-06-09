@@ -308,7 +308,8 @@ async def ws(sock: WebSocket) -> None:
                     _e._blackhole_pos = _e.cursor_pos[:, 0].float().clone()  # gravity well at YOUR cursor;
                     _e._blackhole_team = 0                                    # pull ∝ YOUR mass (real black hole):
                     _mass = float(_e.team_oh[0, 0].sum())                     # full army -> devastating well,
-                    _e._blackhole_str = ctrl["doom_level"] * 34.0 * _mass / max(1.0, _e.fighters_per_team)  # x1/x2/x3 charge (tap 6); whittled down -> fizzles
+                    _frac = _mass / max(1.0, _e.fighters_per_team)
+                    _e._blackhole_str = ctrl["doom_level"] * 55.0 * _frac ** 1.5  # STRONGER + super-linear in mass: full army -> devastating well, whittled -> fizzles fast (x1/x2/x3 charge, tap 6)
                     _e._blackhole_range = max(40.0, _e.W * 0.30)             # reach scales with the map (~30% of width) so it actually reaches + strips the enemy, not a tiny fixed radius
                 elif stance == 6:                           # Maelstrom: fast wide orbiting shell (whirlpool)
                     sgn = spin_sign if spin_sign != 0 else 1
