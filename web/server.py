@@ -202,7 +202,8 @@ async def ws(sock: WebSocket) -> None:
         fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),
     )
     ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True, "reset": False,
-                            "map": None, "spin": None, "stance": 0, "drill_mode": 0, "doom_level": 1}
+                            "map": None, "spin": None, "stance": 0, "drill_mode": 0, "doom_level": 1,
+                            "wall_orient": 0}   # 0 = horizontal bar, 1 = vertical bar (tap 4 to flip)
 
     async def receiver() -> None:
         try:
@@ -226,6 +227,8 @@ async def ws(sock: WebSocket) -> None:
                         ctrl["doom_level"] = ctrl["doom_level"] % 3 + 1
                     elif s == 5:
                         ctrl["doom_level"] = 1
+                    if s == 3 and ctrl["stance"] == 3:    # re-tap Wall flips the bar horizontal <-> vertical
+                        ctrl["wall_orient"] ^= 1
                     ctrl["stance"] = s
                 elif "dir" in msg:                 # keyboard (arrows/WASD)
                     ctrl["dir"] = msg["dir"]
@@ -284,8 +287,12 @@ async def ws(sock: WebSocket) -> None:
                     _e._drill[0, 0, 1] = float(last_dir[1]) * DADV[m]
                     if DSURGE[m] > 1.0:                     # the spinning front grinds (chews) harder
                         s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = DSURGE[m]; _e._surge = s
-                elif stance == 3:                           # Wall: dense shield bar across the facing
-                    _e._wall[0, 0, 0] = float(last_dir[0]); _e._wall[0, 0, 1] = float(last_dir[1])
+                elif stance == 3:                           # Wall: a concentrated bar, horizontal or vertical (tap 4 to flip)
+                    if ctrl["wall_orient"] == 0:            # horizontal bar = vertical facing
+                        _e._wall[0, 0, 0] = 1.0; _e._wall[0, 0, 1] = 0.0
+                    else:                                   # vertical bar = horizontal facing
+                        _e._wall[0, 0, 0] = 0.0; _e._wall[0, 0, 1] = 1.0
+                    _e._burst[0, 0] = -0.5                  # pull inward -> a tighter, denser, more concentrated bar
                 elif stance == 4:                           # Pulse: concentric rings + damage waves
                     ring = math.sin(n * 0.33)
                     _e._burst[0, 0] = 1.0 if ring > 0 else -0.6
@@ -302,6 +309,7 @@ async def ws(sock: WebSocket) -> None:
                     _e._blackhole_team = 0                                    # pull ∝ YOUR mass (real black hole):
                     _mass = float(_e.team_oh[0, 0].sum())                     # full army -> devastating well,
                     _e._blackhole_str = ctrl["doom_level"] * 34.0 * _mass / max(1.0, _e.fighters_per_team)  # x1/x2/x3 charge (tap 6); whittled down -> fizzles
+                    _e._blackhole_range = max(40.0, _e.W * 0.30)             # reach scales with the map (~30% of width) so it actually reaches + strips the enemy, not a tiny fixed radius
                 elif stance == 6:                           # Maelstrom: fast wide orbiting shell (whirlpool)
                     sgn = spin_sign if spin_sign != 0 else 1
                     _e._spin[0, 0] = 2.0 * sgn              # whirl fast and wide around the cursor
@@ -318,7 +326,8 @@ async def ws(sock: WebSocket) -> None:
             st = session.state(); st["fps"] = round(fps, 1)
             st["stance"] = STANCES[ctrl["stance"]]      # held tactical state
             st["mode"] = (("slow", "med", "fast")[ctrl["drill_mode"]] if ctrl["stance"] == 2
-                          else f"{ctrl['doom_level']}x" if ctrl["stance"] == 5 else "")
+                          else f"{ctrl['doom_level']}x" if ctrl["stance"] == 5
+                          else ("horiz", "vert")[ctrl["wall_orient"]] if ctrl["stance"] == 3 else "")
             st["spin_dir"] = spin_sign
             if session.done and not logged:
                 w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])
