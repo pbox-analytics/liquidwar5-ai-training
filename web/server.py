@@ -202,7 +202,7 @@ async def ws(sock: WebSocket) -> None:
         fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),
     )
     ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True, "reset": False,
-                            "map": None, "spin": None, "stance": 0, "drill_mode": 0}
+                            "map": None, "spin": None, "stance": 0, "drill_mode": 0, "doom_level": 1}
 
     async def receiver() -> None:
         try:
@@ -222,6 +222,10 @@ async def ws(sock: WebSocket) -> None:
                         ctrl["drill_mode"] = (ctrl["drill_mode"] + 1) % 3
                     elif s == 2:
                         ctrl["drill_mode"] = 0
+                    if s == 5 and ctrl["stance"] == 5:   # re-tap Doom charges the gravity 1x -> 2x -> 3x
+                        ctrl["doom_level"] = ctrl["doom_level"] % 3 + 1
+                    elif s == 5:
+                        ctrl["doom_level"] = 1
                     ctrl["stance"] = s
                 elif "dir" in msg:                 # keyboard (arrows/WASD)
                     ctrl["dir"] = msg["dir"]
@@ -297,7 +301,7 @@ async def ws(sock: WebSocket) -> None:
                     _e._blackhole_pos = _e.cursor_pos[:, 0].float().clone()  # gravity well at YOUR cursor;
                     _e._blackhole_team = 0                                    # pull ∝ YOUR mass (real black hole):
                     _mass = float(_e.team_oh[0, 0].sum())                     # full army -> devastating well,
-                    _e._blackhole_str = 34.0 * _mass / max(1.0, _e.fighters_per_team)  # whittled down -> it fizzles
+                    _e._blackhole_str = ctrl["doom_level"] * 34.0 * _mass / max(1.0, _e.fighters_per_team)  # x1/x2/x3 charge (tap 6); whittled down -> fizzles
                 elif stance == 6:                           # Maelstrom: fast wide orbiting shell (whirlpool)
                     sgn = spin_sign if spin_sign != 0 else 1
                     _e._spin[0, 0] = 2.0 * sgn              # whirl fast and wide around the cursor
@@ -307,10 +311,14 @@ async def ws(sock: WebSocket) -> None:
                     _e._spin[0, 0] = 1.8 * sgn              # orbital speed
                     _e._burst[0, 0] = 0.4                   # a little room so the two lobes form
                     _e._fig8[0, 0] = 1.0                    # flip orbit across the cursor -> figure-8 loops
-                session.step(ctrl["target"], ctrl["dir"])
+                # Doom charge trades speed for pull: at level L the cursor only moves
+                # every L-th tick, so a 3x well is sluggish to reposition.
+                _slow = ctrl["stance"] == 5 and ctrl["doom_level"] > 1 and (n % ctrl["doom_level"]) != 0
+                session.step(None if _slow else ctrl["target"], [0, 0] if _slow else ctrl["dir"])
             st = session.state(); st["fps"] = round(fps, 1)
             st["stance"] = STANCES[ctrl["stance"]]      # held tactical state
-            st["mode"] = ("slow", "med", "fast")[ctrl["drill_mode"]] if ctrl["stance"] == 2 else ""
+            st["mode"] = (("slow", "med", "fast")[ctrl["drill_mode"]] if ctrl["stance"] == 2
+                          else f"{ctrl['doom_level']}x" if ctrl["stance"] == 5 else "")
             st["spin_dir"] = spin_sign
             if session.done and not logged:
                 w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])
