@@ -228,21 +228,26 @@ function frame() {                                     // 60fps interpolated ren
   // 1x/2x/3x charge, and collapses quickly on release. The composite shader
   // draws the lensing/accretion disk; here we just animate its strength/radius.
   const doomOn = curSt.stance === "Doom";
-  if (doomOn) doomLvl = parseInt(curSt.mode) || 1;
+  // The OPPONENT's well (always 1x): rendered with the same shader when you
+  // aren't holding your own (it draws one hole; yours wins the slot).
+  const aiDoom = !doomOn && curSt.ai_doom;
+  const holeOn = doomOn || !!aiDoom;
+  doomLvl = doomOn ? (parseInt(curSt.mode) || 1) : 1;
   const dt = Math.min(0.1, (performance.now() - lastFrameT) / 1000 || 0.016);
   lastFrameT = performance.now();
   // time-based ramp (frame-rate independent): ~1.5s to full menace, fast collapse
-  doomA += ((doomOn ? 0.55 + 0.45 * doomLvl : 0) - doomA) * Math.min(1, dt * (doomOn ? 2.2 : 9));
+  doomA += ((holeOn ? 0.55 + 0.45 * doomLvl : 0) - doomA) * Math.min(1, dt * (holeOn ? 2.2 : 9));
   doomR += ((4.4 + 2.3 * doomLvl) - doomR) * Math.min(1, dt * 3.5);   // amber band (1.5*r) tracks the fighters' _ring orbit
   if (doomA < 0.006) doomA = 0;
-  const hole = { x: curSt.cursors[0][1] + .5, y: curSt.cursors[0][0] + .5,
+  const holeC = aiDoom ? [aiDoom[2], aiDoom[1]] : [curSt.cursors[0][1], curSt.cursors[0][0]];
+  const hole = { x: holeC[0] + .5, y: holeC[1] + .5,
                  r: doomR, a: doomA, spin: curSt.spin_dir || 1 };
   // cursors: soft halo + pulsating ring + white core (drawn crisp, post-bloom)
   let ck = 0;
   const beat = 1 + 0.3 * Math.sin(performance.now() / 170);
   curSt.cursors.forEach((c, t) => {
     if (!curSt.alive[t]) return;
-    if (t === 0 && doomA > 0.25) return;            // the black hole IS the cursor
+    if (doomA > 0.25 && t === (aiDoom ? aiDoom[0] : 0)) return;  // the black hole IS that team's cursor
     const col = RGB[t % RGB.length];
     const x = c[1] + .5, y = c[0] + .5;
     const surge = (t === 0 && curSt.pulse_active) ? 1.7 : 1;

@@ -128,9 +128,48 @@ class GameSession:
                 # cursor (that read as "the cursor moves on its own").
                 dydx[0, 0, 0] = 0
                 dydx[0, 0, 1] = 0
+        # Re-cast the AI wells fresh each tick (the human's legacy knobs are
+        # set by the ws loop; these lists are the AI teams').
+        self.engine._blackhole_wells = []
+        self.engine._vortex_wells = []
+        self._ai_doom = None
         if ai_stance is not None:                  # AI opponents (teams 1..) hold their own stances
             apply_stances(self.engine, ai_stance, dydx, team_start=1)
+            self._cast_ai_wells(ai_stance)
         self.engine.step(dydx)
+
+    def _cast_ai_wells(self, ai_stance: torch.Tensor) -> None:
+        """Cross-team PARITY for the AI: an opponent holding Doom (5) or
+        Maelstrom (6) casts the same gravity well / whirlpool current at ITS
+        cursor that the human gets — identical mass-scaled dials (Doom at 1x
+        charge, Maelstrom undertow). Without this the AI's two weapon stances
+        are cosmetic self-shapes and the human duels with superpowers the
+        opponent lacks. ``_ai_doom`` feeds the client's hole shader."""
+        e = self.engine
+        for t in range(1, e.T):
+            s = int(ai_stance[0, t])
+            if s not in (5, 6) or not bool(e.team_alive[0, t]):
+                continue
+            mass = float(e.team_oh[0, t].sum())
+            frac = mass / max(1.0, e.fighters_per_team)
+            pos = e.cursor_pos[:, t].float().clone()
+            if s == 5:
+                ring = 0.5 * (6.7 + (6.7 ** 2 + mass / 3.14159) ** 0.5)
+                e._blackhole_wells.append({
+                    "pos": pos, "team": t,
+                    "str": 32.0 * frac ** 1.5,
+                    "range": max(70.0, 2.2 * ring),
+                    "horizon": max(14.0, 0.9 * (mass / 3.14159) ** 0.5),
+                    "cap": 0.12})
+                if self._ai_doom is None:
+                    self._ai_doom = [t, *e.cursor_pos[0, t].tolist()]
+            else:
+                e._vortex_wells.append({
+                    "pos": pos, "team": t,
+                    "str": 30.0 * frac ** 0.5,
+                    "range": max(70.0, 2.0 * (mass / 3.14159) ** 0.5),
+                    "sign": 1.0,
+                    "rad": 0.30})
 
     def reset(self) -> None:
         self.engine.reset()
@@ -185,6 +224,8 @@ class GameSession:
             "pn": int(pidx.numel()),
             "cursors": e.cursor_pos[0].tolist(),
             "alive": e.team_alive[0].tolist(),
+            "ai_doom": getattr(self, "_ai_doom", None),   # [team, y, x] while an AI holds Doom
+
             "done": self.done,
             "map": MAP_NAMES[e._last_arch] if 0 <= getattr(e, "_last_arch", -1) < len(MAP_NAMES) else "?",
             **self._hud,

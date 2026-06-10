@@ -364,16 +364,13 @@ class LiquidWarEngine:
         for _ in range(self.unit_speed):
             self._move_fighters()
             self._resolve_combat()
-        # BLACK HOLE event-horizon capture (Doom): enemy fighters that reach the well's
+        # BLACK HOLE event-horizon capture (Doom): enemy fighters that reach a well's
         # core DEFECT to the well's team — the hole devours what its gravity pulls in, so
         # the strip steals the enemy army instead of just relocating it onto you. Convert,
         # not delete (count invariant). Only active while a team holds Doom.
-        bh = getattr(self, "_blackhole_pos", None)
-        if bh is not None:
-            bh_team = getattr(self, "_blackhole_team", 0)
-            R_h = getattr(self, "_blackhole_horizon", 16.0)
-            dy = bh[:, 0:1] - self.fy.float(); dx = bh[:, 1:2] - self.fx.float()
-            cap_rate = getattr(self, "_blackhole_capture_rate", 0.04)
+        for w in self._doom_wells():
+            bh_team, R_h, cap_rate = w["team"], w["horizon"], w["cap"]
+            dy = w["pos"][:, 0:1] - self.fy.float(); dx = w["pos"][:, 1:2] - self.fx.float()
             grab = ((dy * dy + dx * dx) <= R_h * R_h) & (self.fteam != bh_team)
             grab = grab & (torch.rand(self.B, self.N, device=self.device) < cap_rate)  # devour GRADUALLY — a drain you can fight, not an instant gulp
             if grab.any():
@@ -384,6 +381,35 @@ class LiquidWarEngine:
         teams_left = self.team_alive.sum(dim=1)
         done = teams_left <= 1
         return self._get_state(), done, self._get_info()
+
+    def _doom_wells(self) -> list[dict]:
+        """Active Doom gravity wells: the per-team list ``_blackhole_wells``
+        (dicts with pos/team/str/range/horizon/cap — the play server casts one
+        per AI team holding Doom) plus the legacy single-well ``_blackhole_*``
+        knobs (the human's), so every wielder gets the same physics."""
+        wells = list(getattr(self, "_blackhole_wells", ()) or ())
+        pos = getattr(self, "_blackhole_pos", None)
+        if pos is not None:
+            wells.append({"pos": pos, "team": getattr(self, "_blackhole_team", 0),
+                          "str": getattr(self, "_blackhole_str", 20.0),
+                          "range": getattr(self, "_blackhole_range", 55.0),
+                          "horizon": getattr(self, "_blackhole_horizon", 16.0),
+                          "cap": getattr(self, "_blackhole_capture_rate", 0.04)})
+        return wells
+
+    def _whirl_wells(self) -> list[dict]:
+        """Active Maelstrom currents: the per-team list ``_vortex_wells`` (dicts
+        with pos/team/str/range/sign/rad) plus the legacy single ``_vortex_*``
+        knobs — same shape as :meth:`_doom_wells`."""
+        wells = list(getattr(self, "_vortex_wells", ()) or ())
+        pos = getattr(self, "_vortex_pos", None)
+        if pos is not None:
+            wells.append({"pos": pos, "team": getattr(self, "_vortex_team", 0),
+                          "str": getattr(self, "_vortex_str", 14.0),
+                          "range": getattr(self, "_vortex_range", 60.0),
+                          "sign": getattr(self, "_vortex_sign", 1.0),
+                          "rad": getattr(self, "_vortex_rad", 0.3)})
+        return wells
 
     def _move_cursors(self, actions: torch.Tensor) -> None:
         # Cursor speed scales with grid width so the on-screen feel stays constant
@@ -731,17 +757,15 @@ class LiquidWarEngine:
             # bar packs DENSE — with the server's stronger inward burst it reads
             # as a solid column, not a loose picket line.
             score = score + 20.0 * torch.sign(fwd_comp).unsqueeze(-1) * c_face
-        # BLACK HOLE (Doom): a cross-team gravity well at one team's cursor that drags
+        # BLACK HOLE (Doom): a cross-team gravity well at a team's cursor that drags
         # the OTHER teams' fighters in (overriding their own gradient) so they get pulled
-        # into the singularity and devastated. ``_blackhole_pos`` is (B,2); set by the
-        # play server while a team holds Doom.
-        bh = getattr(self, "_blackhole_pos", None)
-        if bh is not None:
-            bh_team = getattr(self, "_blackhole_team", 0)
-            bh_str = getattr(self, "_blackhole_str", 20.0)
-            bh_R = getattr(self, "_blackhole_range", 55.0)             # FINITE reach -> distant forces escape
-            bhy = bh[:, 0:1] - self.fy                                  # (B,N) toward the well
-            bhx = bh[:, 1:2] - self.fx
+        # into the singularity and devastated. One well per Doom-holding team — the
+        # human's via the legacy ``_blackhole_*`` knobs, AI opponents' via
+        # ``_blackhole_wells`` (see :meth:`_doom_wells`); set by the play server.
+        for w in self._doom_wells():
+            bh_team, bh_str, bh_R = w["team"], w["str"], w["range"]    # FINITE reach -> distant forces escape
+            bhy = w["pos"][:, 0:1] - self.fy                            # (B,N) toward the well
+            bhx = w["pos"][:, 1:2] - self.fx
             bhn = (bhy * bhy + bhx * bhx).sqrt().clamp(min=1.0)
             falloff = (bh_R * bh_R) / (bhn * bhn + bh_R * bh_R)         # 1 at the well, ->0 far (no map-wide vacuum)
             is_en = (self.fteam != bh_team)                            # (B,N) not the well's own team
@@ -758,16 +782,15 @@ class LiquidWarEngine:
         # component ``_vortex_rad`` (>0 undertow: spiral them inward / <0 ejecta:
         # fling them outward / 0 pure shear). No capture — entrained enemies
         # circle through the owner's spinning rim and are ground down by ordinary
-        # adjacency combat. Disruption and area-denial, not a devour.
-        wp = getattr(self, "_vortex_pos", None)
-        if wp is not None:
-            wp_team = getattr(self, "_vortex_team", 0)
-            wp_str = getattr(self, "_vortex_str", 14.0)
-            wp_R = getattr(self, "_vortex_range", 60.0)                # FINITE reach, like Doom's
-            wp_sgn = getattr(self, "_vortex_sign", 1.0)                # current direction (owner's Q/E)
-            wp_rad = getattr(self, "_vortex_rad", 0.3)
-            wy = wp[:, 0:1] - self.fy                                  # (B,N) toward the well
-            wx = wp[:, 1:2] - self.fx
+        # adjacency combat. Disruption and area-denial, not a devour. One current
+        # per Maelstrom-holding team (see :meth:`_whirl_wells`).
+        for w in self._whirl_wells():
+            wp_team, wp_str = w["team"], w["str"]
+            wp_R = w["range"]                                          # FINITE reach, like Doom's
+            wp_sgn = w["sign"]                                         # current direction (owner's Q/E)
+            wp_rad = w["rad"]
+            wy = w["pos"][:, 0:1] - self.fy                            # (B,N) toward the well
+            wx = w["pos"][:, 1:2] - self.fx
             wn = (wy * wy + wx * wx).sqrt().clamp(min=1.0)
             wfall = (wp_R * wp_R) / (wn * wn + wp_R * wp_R)            # 1 at the well, ->0 far
             w_en = (self.fteam != wp_team)                             # only the OTHER teams feel the current
