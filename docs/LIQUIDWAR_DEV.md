@@ -6,7 +6,7 @@ How the GPU-native Liquid War clone got from "the browser version is broken" to
 playable game served at `web/server.py`. No C-engine bridge, no fidelity gap: you
 play the exact engine the policy trains in.
 
-Deploy: `scripts/run-play.sh` → http://192.168.1.226:8099 (RTX PRO 6000, GPU-direct).
+Deploy: `scripts/run-play.sh` → http://192.168.1.133:8099 (pandora-storm, RTX 5090 Laptop, GPU-direct; moved off the RTX PRO 6000 2026-06-09).
 Controls: **arrows / WASD** move the cursor, **1–8** hold a stance (Swarm / Spin /
 Drill / Wall / Pulse / Doom / Maelstrom / Atom), **Q/E** spin direction, **T** trails.
 
@@ -94,27 +94,42 @@ Doom is the finisher, modelled on *Gargantua*:
 (Backlog of more slime-mold moves — Rally, Pheromone Tube, Split — in
 `docs/POTENTIAL_FEATURES.md`.)
 
-## 5. Rendering — the particle (mote) pipeline (client, `web/static/index.html`)
+## 5. Rendering — the WebGL2 mote pipeline (client, `web/static/gl.js`)
 
 The army is drawn as individual **motes** — **a mote is one fighter rendered as a
-single point** — not a grid of lit cells. The server streams a stride-sampled set of
-fighter positions (`int16`) + team (`pos_b64`/`pteam_b64`/`pn` in `state()`, which is
-*less* data than the old cell grid); the client animates them. Three levers turn
-"blinking cells" into "flowing fluid":
+single particle** — not a grid of lit cells. The server streams a stride-sampled set
+of fighter positions (`int16`) + team (`pos_b64`/`pteam_b64`/`pn` in `state()`); the
+client animates them. Since v0.02 the renderer is **WebGL2** (`gl.js`; the Canvas2D
+original is kept at `index-2d.html` and is the automatic fallback). GL was chosen as
+the mobile-ready layer — a phone GPU handles this pipeline easily, mobile Canvas2D
+does not.
 
-1. **Individual motes** — each fighter is its own dot, so you read the swarm, not a density.
-2. **Velocity streaks** — each mote draws a short tail along its per-tick displacement;
-   fast units smear, slow ones are round dots (round line-caps).
-3. **60fps interpolation** — the client renders on its own `requestAnimationFrame`
-   loop, independent of the ~45–63fps server, **gliding** each mote between frames
-   along a **quadratic arc** (3 buffered snapshots prevprev→prev→cur, control = prev +
-   `curve`·incoming-velocity), so swirls sweep smooth curves, not jagged chords.
+Per `requestAnimationFrame` (decoupled from the ~45–63fps server):
 
-- **Normal blending, not additive** — dense armies read as solid *team colour*, not a
-  saturated white blob (the first additive pass lost blue-vs-red).
-- Walls are a **cached layer** (`tmp` canvas); only motes animate. Glowing cursors
-  (halo + pulsate, flare on Pulse), collision **sparks** (fly/arc/fade, white-hot →
-  team colour), and fading **trails** all remain and carry the flow.
+1. **Army pass** — one instanced draw of 16k **capsule quads**. The vertex shader
+   does the **quadratic-arc glide** (3 ring-buffered snapshots prevprev→prev→cur,
+   control = prev + `curve`·incoming-velocity) and stretches each capsule along its
+   per-tick velocity (the **streak**). Per-mote individuality comes from a static
+   random table: size/brightness jitter, ~12% **sparkle** motes lifted toward white,
+   and a density-gated **twinkle** so the packed core shimmers like a living mass.
+   A CPU 8×8 binning pass uploads local density per mote: the deep core renders
+   darker/smaller (volume shading), the sparse rim more translucent — this is what
+   killed the "flat paint blob" look. Sparks + conversion flashes join this pass as
+   additive point sprites so they bloom. **Premultiplied normal blending, not
+   additive** — dense armies stay solid *team colour* (the old additive lesson).
+2. **Trail pass** — a persistent framebuffer: decay-multiply, add the army layer.
+   Motion history glows and fades with proper colour (toggle **T**, `trail` slider).
+3. **Bloom** — army layer downsampled ¼, two separable gaussian passes, composited
+   additively (`glow` slider). Real bloom, not the old downscale-upscale trick.
+4. **Composite** — one fullscreen pass: vignetted/dithered background, **rim-lit
+   beveled walls** (the wall mask ships as a 2-channel texture — crisp + box-blurred;
+   the blurred ramp gives the shader a wide gradient for the bevel and the soft
+   contact shadow that grounds the slabs), then trail + army + bloom, finished with
+   a soft filmic clip (`1-exp(-1.8x)`).
+5. **Cursors** — ring/disc point sprites drawn crisp on top (halo + pulsate).
+
+Everything renders at **native device pixels** (CSS size × devicePixelRatio, capped
+2×) — no more grid-resolution buffer with pixelated upscale.
 
 ### Live Visuals sliders
 
@@ -161,8 +176,10 @@ steps cell-by-cell so it can't slide through a barrier.
 - **Play size / rate** — `web/server.py` defaults: grid **384×576** (doubled again for
   room; ~40–50fps at this size vs a policy opponent), **8000** fighters/team, **60Hz**
   (deploy over-targets 63). Env-overridable: `LW_PLAY_H/W/FIGHTERS`, `LW_TICK_HZ`.
-- **Visual feel** — the in-game **Visuals** sliders (live), or the `pTail/pCurve/
-  pWidth/pTrail/pAlpha` defaults in `web/static/index.html`.
+- **Visual feel** — the in-game **Visuals** sliders (live: streak/curve/size/trail/
+  opacity/glow), or the `pTail/pCurve/pWidth/pTrail/pAlpha/pGlow` defaults in
+  `web/static/index.html`; deeper look constants (twinkle, density shading, wall
+  bevel, tonemap) live in the shaders in `web/static/gl.js`.
 - **Combat / Pulse** — constants in the engine / `web/server.py`.
 
 ## 9. Next
