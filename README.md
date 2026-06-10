@@ -2,7 +2,7 @@
 
 Parameter evolution and neural network training for [liquidwar5-ai](https://github.com/pandora-wolf-meow/liquidwar5-ai).
 
-Uses a genetic algorithm to evolve 11 AI scoring parameters through self-play — pitting different parameter sets against each other across thousands of headless game simulations. Distributed via Kafka across 4 machines (~92 CPU cores).
+Uses a genetic algorithm to evolve 11 AI scoring parameters through self-play — pitting different parameter sets against each other across thousands of headless game simulations. Runs on a **5-node [k3s](https://k3s.io) cluster** — 104 CPU cores, 6 GPUs — distributed via Kafka.
 
 ## Architecture
 
@@ -20,15 +20,14 @@ Uses a genetic algorithm to evolve 11 AI scoring parameters through self-play �
               │  ml.liquidwar5.game-jobs   │
               └────────────────────────────┘
                            │ consumed by worker group
-         ┌─────────────────┼─────────────────┐
-         ▼                 ▼                  ▼
-  ┌────────────┐  ┌──────────────┐  ┌──────────────┐  ┌───────────┐
-  │PandoraStorm│  │ pandoratower │  │ pandoras-box │  │spark-wolf │
-  │ Ultra 9    │  │ Ryzen 7      │  │ Ryzen 9      │  │ DGX GB10  │
-  │ 24 cores   │  │ 16 cores     │  │ 32 cores     │  │ 20 cores  │
-  └─────┬──────┘  └──────┬───────┘  └──────┬───────┘  └─────┬─────┘
-        │                │                  │                │
-        ▼                ▼                  ▼                ▼
+                           ▼
+  ┌──────────────────────────────────────────────────────────────┐
+  │  5 k3s worker nodes — 104 cores, 6 GPUs (see Cluster table)    │
+  │  pandoratower · pandora-storm · pandora-tank ·                 │
+  │  pandoras-box · spark-wolf                                     │
+  └────────────────────────────┬───────────────────────────────────┘
+                           │ results (Avro)
+                           ▼
               ┌────────────────────────────┐
               │  Kafka (192.168.1.226)     │
               │  ml.liquidwar5.game-results│
@@ -43,12 +42,21 @@ Uses a genetic algorithm to evolve 11 AI scoring parameters through self-play �
 
 ### Cluster
 
-| Machine | Hostname | CPU | Cores | Role |
-|---------|----------|-----|-------|------|
-| PandoraStorm | (local) | Intel Ultra 9 275HX | 24 | Worker + Coordinator |
-| pandoratower | ptow | AMD Ryzen 7 3800X | 16 | Worker |
-| pandoras-box | pbox | AMD Ryzen 9 9950X3D | 32 | Worker + Kafka/Schema Registry |
-| spark-wolf | swolf | NVIDIA Grace (ARM) | 20 | Worker |
+Five-node [k3s](https://k3s.io) cluster, control plane on `pandoratower` (192.168.1.8). Verified via `kubectl get nodes` on 2026-05-30.
+
+| Node | IP | Arch | Cores | RAM | GPU | k8s GPUs | k3s role |
+|------|-----|------|-------|-----|-----|----------|----------|
+| pandoratower | 192.168.1.8 | amd64 | 16 | 64 GB | RTX 5090 (32 GB) | 1 | control-plane |
+| pandora-storm | 192.168.1.133 | amd64 | 24 | 64 GB | RTX 5090 Laptop (24 GB) | 1 | worker |
+| pandora-tank | 192.168.1.222 | amd64 | 12 | 48 GB | RTX 5060 Ti ×2 (16 GB ea) | 2 | worker |
+| pandoras-box | 192.168.1.226 | amd64 | 32 | 192 GB | RTX PRO 6000 (96 GB) | 0 ¹ | worker · Kafka/Schema Registry host |
+| spark-wolf | 192.168.1.229 | arm64 | 20 | 128 GB | GB10 Grace-Blackwell (128 GB unified) | 1 | worker (this box) |
+
+**Totals:** 104 CPU cores · ~496 GB RAM · 6 physical GPUs (5 exposed to k8s).
+
+¹ pandoras-box's RTX PRO 6000 is installed but not exposed to Kubernetes (`nvidia.com/gpu` allocatable = 0) — not currently schedulable for GPU pods.
+
+GPU VRAM figures are nominal (model spec), not measured. CUDA verified only on **spark-wolf**: driver 580.142 / runtime 13.0, toolkits 12.8 + 13.0, PyTorch 2.11.0+cu130 (`torch.cuda.is_available()` → `NVIDIA GB10`). Note `nvcc` is not on `PATH` there (it lives at `/usr/local/cuda/bin`). CUDA on the amd64 nodes has not been re-verified.
 
 ### Kafka Topics
 
@@ -64,10 +72,16 @@ Topics managed via GitOps in [pandoras-box-data-acquisition](https://github.com/
 
 | Metric | Value |
 |--------|-------|
-| Total CPU cores | ~92 |
+| Nodes | 5 (k3s) |
+| Total CPU cores | 104 |
+| Total RAM | ~496 GB |
+| GPUs | 6 physical (5 exposed to k8s) |
 | Game duration (headless) | ~7 seconds |
-| Throughput | ~47,000 games/hour |
-| 8-hour run | ~360,000 games |
+| CPU throughput | ~47,000 games/hour |
+| 8-hour CPU run | ~360,000 games |
+| GPU-native engine (single GPU node) | ~47 games/sec, ~234k ticks/sec |
+
+The CUDA-native engine (`gpu_evolve.py`) runs the whole population on one GPU node, independent of the Kafka/CPU path — best suited to the RTX 5090 / RTX PRO 6000 / GB10 nodes.
 
 ## AI Parameters (11 per team)
 

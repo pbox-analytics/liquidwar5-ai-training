@@ -17,23 +17,27 @@ This guide covers setting up all machines for the liquidwar5-ai distributed para
         ▲                                    │
         │ results (Avro)        jobs (Avro)  │
         │                                    ▼
-┌───────┴──────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
-│ pandoratower │ │pandoras- │ │ dgx-spark│ │ ryzen7   │
-│ coordinator  │ │  box     │ │          │ │          │
-│ + worker     │ │ worker   │ │ worker   │ │ worker   │
-│ Ultra 9      │ │ Ryzen 9  │ │ GB10     │ │ Ryzen 7  │
-│ ~20 cores    │ │ ~20 cores│ │ ~60 cores│ │ ~12 cores│
-└──────────────┘ └──────────┘ └──────────┘ └──────────┘
+┌───────────────────────────────────────────────────────────┐
+│  5-node k3s cluster — control plane: pandoratower (.8)      │
+│  pandoratower · pandora-storm · pandora-tank ·              │
+│  pandoras-box (Kafka host) · spark-wolf                     │
+│  104 cores · 6 GPUs — per-node specs in Machine Roles below │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Machine Roles
 
-| Machine | IP | Role | Workers |
-|---------|-----|------|---------|
-| pandoratower | 192.168.1.8 | Coordinator + Worker | 20 |
-| pandoras-box | 192.168.1.226 | Worker | 20 |
-| dgx-spark | TBD | Worker | 60 |
-| ryzen7 | TBD | Worker | 12 |
+Verified via `kubectl get nodes` on 2026-05-30. Worker counts below are the CPU-worker process counts for the Kafka path.
+
+| Node | IP | Arch | Cores | RAM | GPU | k3s role | CPU workers |
+|------|-----|------|-------|-----|-----|----------|-------------|
+| pandoratower | 192.168.1.8 | amd64 | 16 | 64 GB | RTX 5090 | control-plane | 16 |
+| pandora-storm | 192.168.1.133 | amd64 | 24 | 64 GB | RTX 5090 Laptop | worker | 24 |
+| pandora-tank | 192.168.1.222 | amd64 | 12 | 48 GB | RTX 5060 Ti ×2 | worker | 12 |
+| pandoras-box | 192.168.1.226 | amd64 | 32 | 192 GB | RTX PRO 6000 (not exposed to k8s) | worker + Kafka/Schema Registry | 32 |
+| spark-wolf | 192.168.1.229 | arm64 | 20 | 128 GB | GB10 (Grace-Blackwell, unified mem) | worker | 20 |
+
+> **Note:** the old `dgx-spark` / `ryzen7` entries with `TBD` IPs are superseded — `dgx-spark` is now **spark-wolf** (192.168.1.229). spark-wolf is **arm64**: build the game binary natively there (see the ARM note below), do not copy an x86 binary to it.
 
 ## Prerequisites (all machines)
 
