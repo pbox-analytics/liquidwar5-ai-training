@@ -394,29 +394,43 @@ class LiquidWarEngine:
         b = torch.arange(self.B, device=self.device)
         adir = actions.long().clamp(-1, 1)
         moved = torch.zeros(self.B, self.T, dtype=torch.bool, device=self.device)
+        cost = torch.zeros(self.B, self.T, dtype=torch.int32, device=self.device)
         # Step one cell at a time up to cursor_speed, stopping at walls — so the
-        # cursor can't slide through a maze barrier on a multi-cell move.
+        # cursor can't slide through a maze barrier on a multi-cell move. Each
+        # sub-step tries the full (possibly diagonal) move first, then SLIDES
+        # along each single axis if a wall blocks it — so holding two directions
+        # against a barrier glides the cursor along it toward a gap instead of
+        # pinning it (no more releasing a key to line up with the opening).
         for _ in range(self.cursor_speed):
-            ny = (self.cursor_pos[:, :, 0] + adir[:, :, 0]).clamp(1, self.H - 2)
-            nx = (self.cursor_pos[:, :, 1] + adir[:, :, 1]).clamp(1, self.W - 2)
             for t in range(self.T):
-                oy, ox = self.cursor_pos[:, t, 0], self.cursor_pos[:, t, 1]
-                ok = (self.passable[b, ny[:, t], nx[:, t]] & self.team_alive[:, t]
-                      & ((ny[:, t] != oy) | (nx[:, t] != ox)))
-                self.cursor_pos[:, t, 0] = torch.where(ok, ny[:, t], oy)
-                self.cursor_pos[:, t, 1] = torch.where(ok, nx[:, t], ox)
-                moved[:, t] |= ok
+                oy = self.cursor_pos[:, t, 0].clone()
+                ox = self.cursor_pos[:, t, 1].clone()
+                done = torch.zeros(self.B, dtype=torch.bool, device=self.device)
+                zero = torch.zeros_like(adir[:, t, 0])
+                for dy, dx in ((adir[:, t, 0], adir[:, t, 1]),
+                               (adir[:, t, 0], zero), (zero, adir[:, t, 1])):
+                    ny = (oy + dy).clamp(1, self.H - 2)
+                    nx = (ox + dx).clamp(1, self.W - 2)
+                    ok = (~done & self.passable[b, ny, nx] & self.team_alive[:, t]
+                          & ((ny != oy) | (nx != ox)))
+                    self.cursor_pos[:, t, 0] = torch.where(ok, ny, self.cursor_pos[:, t, 0])
+                    self.cursor_pos[:, t, 1] = torch.where(ok, nx, self.cursor_pos[:, t, 1])
+                    # Seed-decay bookkeeping below needs the OCTILE cost of the
+                    # step actually taken (a blocked diagonal that slides moves
+                    # orthogonally -> 10, not 14).
+                    step_c = ((dy != 0) & (dx != 0)).to(torch.int32) * 4 + 10
+                    cost[:, t] += torch.where(ok, step_c, torch.zeros_like(step_c))
+                    done |= ok
+                moved[:, t] |= done
         # Seed decays whenever the cursor MOVES (or every 13th tick) so the
         # current cursor cell dominates the persistent field and fighters blob
         # around it rather than smearing toward stale old positions. The decay
         # must equal the cursor's per-tick OCTILE distance (orthogonal 10,
         # diagonal 14 — matching the gradient step costs below), else a moving
         # cursor leaves stale low values and the army smears.
-        adiag = (actions[:, :, 0].long() != 0) & (actions[:, :, 1].long() != 0)
-        step_cost = torch.where(adiag, 14, 10) * self.cursor_speed   # cursor moved cursor_speed cells
         decay = 10 if (self.tick % 13 == 0) else 0
-        dec = torch.where(moved, step_cost, torch.full_like(step_cost, decay))
-        self.cursor_val = (self.cursor_val - dec.to(torch.int32)).clamp(min=1)
+        dec = torch.where(moved, cost, torch.full_like(cost, decay))
+        self.cursor_val = (self.cursor_val - dec).clamp(min=1)
 
     def _seed_and_spread_gradient(self) -> None:
         """Overwrite each cursor cell with its seed, then relax the persistent
@@ -516,9 +530,15 @@ class LiquidWarEngine:
         # cells sort first) so a moving cursor still pulls the mass in. Per-fighter
         # direction jitter (0..6) breaks lockstep -> independent-looking units.
         # (k=0.25 -> ~25-cell wavelength; w=0.15 -> crest ~0.6 cells/tick outward.)
-        fcur_val = self.cursor_val.gather(1, self.fteam).float()       # (B,N) team seed value
-        dist = (cur.float() - fcur_val).clamp(min=0) / 10.0            # ~cells from the cursor
-        phase = dist * 0.25 - self.tick * 0.15                         # crest travels outward
+        # Phase rides EUCLIDEAN distance to the cursor, not the octile gradient:
+        # octile iso-contours are octagons, so gradient-phased crests read as
+        # angular CHEVRONS sweeping the army; Euclidean rings are round, so the
+        # undulation reads as organic ripples. (The radial vector is also what
+        # the swirl/push/burst terms below need — computed once here.)
+        cpos = self.cursor_pos[b, self.fteam]                          # (B,N,2) own-cursor pos
+        ry = (cpos[..., 0] - self.fy).float(); rx = (cpos[..., 1] - self.fx).float()
+        rn = (ry * ry + rx * rx).sqrt().clamp(min=1.0)                 # cells from the cursor
+        phase = rn * 0.25 - self.tick * 0.15                           # crest travels outward
         # Broad crest (sin>0 => ~half the phase) so the wave band is wide enough
         # to read as a rolling EDGE RIPPLE: boundary fighters (the only ones with
         # empty cells to extend into) bulge outward as the crest sweeps past, then
@@ -539,6 +559,16 @@ class LiquidWarEngine:
         movable = downhill | (restless & (ng <= cur.unsqueeze(-1) + 12))
         if burst_f is not None:
             movable = movable | ((burst_f > 0).unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 36))
+        # ACCRETION RING: a per-team ``_ring`` target ORBIT RADIUS (cells; 0 =
+        # off). Fighters are biased toward the ring from BOTH sides — inward when
+        # outside it, outward when inside — so with the swirl providing the orbit
+        # the team forms a spinning annulus with an open centre (Doom's visible
+        # black-hole disk) instead of a packed blob. The score term needs the
+        # radial direction, added with the burst term below.
+        ringk = getattr(self, "_ring", None)
+        ring_f = ringk.gather(1, self.fteam) if ringk is not None else None    # (B,N) radius or 0
+        if ring_f is not None:
+            movable = movable | ((ring_f > 0).unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 36))
         # DRILL move: a per-team thrust direction ``_drill`` (dy,dx); the team
         # pierces FORWARD along it with concentrated speed, regardless of gradient.
         drill = getattr(self, "_drill", None)
@@ -572,10 +602,7 @@ class LiquidWarEngine:
         # SWIRL: a tangential bias so units spiral INTO the cursor along curved,
         # magnetized field-lines instead of straight radial columns. The inward
         # gradient (~10-14/step) still dominates SWIRL_W, so they converge — just
-        # on a curve, not a beeline. (b/fteam index each fighter's own cursor.)
-        cpos = self.cursor_pos[b, self.fteam]                          # (B,N,2)
-        ry = (cpos[..., 0] - self.fy).float(); rx = (cpos[..., 1] - self.fx).float()
-        rn = (ry * ry + rx * rx).sqrt().clamp(min=1.0)
+        # on a curve, not a beeline. (ry/rx/rn computed with the wave phase above.)
         SWIRL_W = 8.0
         # Per-fighter, re-randomised swirl-strength jitter breaks the COHERENT
         # spiral arms — which on an 8-direction grid read as angular spokes (a
@@ -611,6 +638,20 @@ class LiquidWarEngine:
         score = ng.float() + jitter.float() - VEL_W * align - swirl - push * out_align
         if burst_f is not None:                                       # gather (-1) inward / burst (+1) outward
             score = score - 15.0 * burst_f.unsqueeze(-1) * out_align
+        if ring_f is not None:                                        # accretion ring: settle on the orbit radius
+            rbias = ((ring_f - rn) / 4.0).clamp(-1.0, 1.0) * (ring_f > 0).float()
+            # Outward (inside the ring) needs MORE weight than inward: it fights
+            # the gradient's 10-14/step pull toward the cursor, else stragglers
+            # pool in the centre and the hole never opens.
+            rw = torch.where(rbias > 0, 26.0, 15.0)
+            score = score - (rw * rbias).unsqueeze(-1) * out_align
+            # GARGANTUA BLADE: fighters well OUTSIDE the ring also flatten toward
+            # the cursor's equator row and stream in along it — so the formation
+            # reads as the edge-on accretion blade feeding an orbiting halo (the
+            # Interstellar silhouette), not a plain donut.
+            far = ((rn > ring_f * 1.6) & (ring_f > 0)).float()
+            eq_align = torch.sign(ry).unsqueeze(-1) * self._dy_t      # toward the equator line
+            score = score - 12.0 * far.unsqueeze(-1) * eq_align
         if drill_fwd is not None:                                     # DRILL: pierce forward, concentrated
             # |_drill| encodes ADVANCE SPEED (drill mode): a small magnitude weakens
             # the forward bias so the spin/squeeze dominate -> the fast (high-spin)

@@ -119,6 +119,8 @@ let flashes = [];    // conversion flashes {x,y,life,col} popped when a mote cha
 const MAXFLASH = 120;  // cap spawns per server frame (conversions can be hundreds)
 let tLast = 0, dtServer = 22;                          // ms between server frames (EMA)
 let lastTick = -1, lastMap = "";
+let doomA = 0, doomR = 5, doomLvl = 1;                 // black-hole strength/radius (animated)
+let lastFrameT = 0;
 // Live visual dials (wired to the on-screen sliders) — tune the look without redeploying.
 let pTail = 0.45, pCurve = 0.55, pWidth = 1.0, pTrail = 0.25, pAlpha = 0.85, pGlow = 0.9;
 [["vStreak", v => pTail = v], ["vCurve", v => pCurve = v], ["vWidth", v => pWidth = v],
@@ -222,11 +224,25 @@ function frame() {                                     // 60fps interpolated ren
     nf.push(fl);
   }
   flashes = nf;
+  // Doom black hole: ramps up slowly while held (menace grows), scales with the
+  // 1x/2x/3x charge, and collapses quickly on release. The composite shader
+  // draws the lensing/accretion disk; here we just animate its strength/radius.
+  const doomOn = curSt.stance === "Doom";
+  if (doomOn) doomLvl = parseInt(curSt.mode) || 1;
+  const dt = Math.min(0.1, (performance.now() - lastFrameT) / 1000 || 0.016);
+  lastFrameT = performance.now();
+  // time-based ramp (frame-rate independent): ~1.5s to full menace, fast collapse
+  doomA += ((doomOn ? 0.55 + 0.45 * doomLvl : 0) - doomA) * Math.min(1, dt * (doomOn ? 2.2 : 9));
+  doomR += ((4.4 + 2.3 * doomLvl) - doomR) * Math.min(1, dt * 3.5);   // amber band (1.5*r) tracks the fighters' _ring orbit
+  if (doomA < 0.006) doomA = 0;
+  const hole = { x: curSt.cursors[0][1] + .5, y: curSt.cursors[0][0] + .5,
+                 r: doomR, a: doomA, spin: curSt.spin_dir || 1 };
   // cursors: soft halo + pulsating ring + white core (drawn crisp, post-bloom)
   let ck = 0;
   const beat = 1 + 0.3 * Math.sin(performance.now() / 170);
   curSt.cursors.forEach((c, t) => {
     if (!curSt.alive[t]) return;
+    if (t === 0 && doomA > 0.25) return;            // the black hole IS the cursor
     const col = RGB[t % RGB.length];
     const x = c[1] + .5, y = c[0] + .5;
     const surge = (t === 0 && curSt.pulse_active) ? 1.7 : 1;
@@ -241,9 +257,10 @@ function frame() {                                     // 60fps interpolated ren
     f, time, teams: TEAMS,
     tail: pTail, curve: pCurve, size: pWidth, alpha: pAlpha, bloom: pGlow,
     trailFade: trails ? (0.04 + (1 - pTrail) * 0.26) : 0.5,
-    trailVis: trails ? 0.55 : 0.0,
+    trailVis: (trails ? 0.55 : 0.0) + 0.3 * doomA,   // infall paths burn brighter
     fx: fxArr, fxCount: k,
     cursorFx: curArr, cursorFxCount: ck,
+    hole,
   });
   cv.style.boxShadow = curSt.pulse_active ? "0 0 18px 2px rgba(253,224,71,.35)" : "";
 }

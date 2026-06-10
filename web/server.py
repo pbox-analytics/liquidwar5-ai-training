@@ -77,6 +77,7 @@ class GameSession:
         self.engine._drill = torch.zeros(1, teams, 2, device=DEVICE)  # per-team thrust dir (drill move)
         self.engine._wall = torch.zeros(1, teams, 2, device=DEVICE)  # per-team shield facing (wall stance)
         self.engine._fig8 = torch.zeros(1, teams, device=DEVICE)  # per-team figure-8 flag (Atom stance)
+        self.engine._ring = torch.zeros(1, teams, device=DEVICE)  # per-team orbit radius (Doom's accretion disk)
         self.engine.reset()
         self.policy: CursorPolicy | None = None
         self.ckpt_name = opponent
@@ -257,19 +258,19 @@ async def ws(sock: WebSocket) -> None:
                 session.engine._map_choice = ctrl["map"]   # apply the picked map (None=random)
                 session.reset(); ctrl["reset"] = False; hold = 0; logged = False
                 _e = session.engine; _e._surge = None; _e._blackhole_pos = None                   # clear all stance knobs per game
-                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_()
+                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_()
             elif session.done:
                 hold += 1
                 if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
                     session.engine._map_choice = ctrl["map"]   # keep the picked map across games
                     session.reset(); hold = 0; logged = False
                     _e = session.engine; _e._surge = None; _e._blackhole_pos = None
-                    _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_()
+                    _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_()
             else:
                 if ctrl["dir"] and (ctrl["dir"][0] or ctrl["dir"][1]):
                     last_dir = ctrl["dir"]                  # heading the Drill/Wall point at
                 _e = session.engine
-                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_()
+                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_()
                 _e._surge = None; _e._blackhole_pos = None
                 stance = ctrl["stance"]                     # 0 Swarm 1 Spin 2 Drill 3 Wall 4 Pulse
                 if stance == 0:                             # Swarm: loose, varied-radius orbits (electron cloud)
@@ -302,12 +303,24 @@ async def ws(sock: WebSocket) -> None:
                     _e._surge = s
                 elif stance == 5:                           # Doom: violent black-hole implosion
                     sgn = spin_sign if spin_sign != 0 else 1
-                    _e._spin[0, 0] = 0.25 * sgn             # almost no swirl — pure radial collapse
-                    _e._burst[0, 0] = -6.5                  # OVERWHELMING inward pull on its own mass
+                    lvl = ctrl["doom_level"]                # 1x/2x/3x charge (tap 6)
+                    # The ARMY is the visual cue: it forms a spinning ACCRETION
+                    # DISK — `_ring` holds an open orbit radius (the black hole's
+                    # dark centre), the swirl spins it, both growing with charge.
+                    # The client's lensing/amber-disk shader sits in the hole.
+                    _e._spin[0, 0] = (1.2, 1.8, 2.4)[lvl - 1] * sgn
                     s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = 6.0; _e._surge = s  # tidal devastation
                     _e._blackhole_pos = _e.cursor_pos[:, 0].float().clone()  # gravity well at YOUR cursor;
                     _e._blackhole_team = 0                                    # pull ∝ YOUR mass (real black hole):
                     _mass = float(_e.team_oh[0, 0].sum())                     # full army -> devastating well,
+                    # Disk target radius is MASS-SCALED: fighters pack one-per-cell,
+                    # so a fixed small radius just saturates back into a solid blob.
+                    # Solve pi*(r_out^2 - r_in^2) = mass for the band centred on the
+                    # target with its INNER edge at the rendered horizon (r_in,
+                    # matching the client's 4.4+2.3*lvl graphic) -> the hole stays
+                    # open and the whole army becomes the spinning accretion disk.
+                    _r_in = (6.7, 9.0, 11.3)[lvl - 1]
+                    _e._ring[0, 0] = 0.5 * (_r_in + (_r_in ** 2 + _mass / 3.14159) ** 0.5)
                     _frac = _mass / max(1.0, _e.fighters_per_team)
                     _e._blackhole_str = ctrl["doom_level"] * 32.0 * _frac ** 1.5  # super-linear in mass: gentler pull peels the loosely-bound periphery off the enemy, not the whole army (x1/x2/x3 charge, tap 6)
                     _e._blackhole_range = float((_e.H ** 2 + _e.W ** 2) ** 0.5)  # FULL-MAP reach (the diagonal) — pulls the enemy from anywhere on the board

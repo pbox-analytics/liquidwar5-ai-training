@@ -35,7 +35,7 @@ All weights are constants near the top of `_move_fighters`:
 | **momentum / inertia** | a per-fighter velocity blended with the gradient → weight, overshoot, banking; head-on masses collide | `VEL_W=8`, `MOM=0.88` |
 | **swirl** | a tangential bias → the army **spirals into** the cursor on curved, magnetised field-lines and **orbits** it as a churning swarm | `SWIRL_W=8` |
 | **edge push** | a wave-modulated *outward* bias → the rim extends pseudopods on each crest then retracts → an **undulating membrane** | `PUSH_W=14` |
-| **traveling wave** | *Dictyostelium* cAMP-style restlessness gated by `sin(dist·k − tick·ω)` → idle undulation + the edge ripple | `> 0.0` crest, `0.07` base |
+| **traveling wave** | *Dictyostelium* cAMP-style restlessness gated by `sin(dist·k − tick·ω)`, dist = **Euclidean** cells to the cursor (octile-gradient phase made the crests angular chevrons; Euclidean rings are round) → idle undulation + the edge ripple | `> 0.0` crest, `0.07` base |
 | **jitter** | small per-fighter noise → independent-looking units, no lockstep | `randint(0,7)` |
 
 Units advance at **`unit_speed`** cells/tick (grid-scaled, matches the cursor) so
@@ -77,7 +77,23 @@ across the cursor's vertical axis, so the halves trace a ∞ instead of a flat s
 
 ### Doom — the Interstellar black hole
 
-Doom is the finisher, modelled on *Gargantua*:
+Doom is the finisher, modelled on *Gargantua* — and the **army itself forms the
+black hole**. The engine's per-team `_ring` knob holds a target orbit radius:
+fighters are biased onto it from both sides (outward needs more weight than the
+gradient's 10–14/step inward pull, else stragglers pool and the hole never
+opens), so the team becomes a **spinning annulus with an open black centre**.
+The radius is **mass-scaled** by the play server (solve π(r_out²−r_in²)=mass for
+the band centred on the target with its inner edge at the rendered horizon —
+fighters pack one-per-cell, so a fixed small radius would saturate back into a
+solid blob). The swirl spins the disk (charge-scaled `_spin` 1.2/1.8/2.4, tap 6:
+1x→2x→3x), and fighters far outside the ring flatten onto the cursor's equator
+row and stream in along it — the **edge-on blade** of the Interstellar
+silhouette. The client adds only the physics of light, no painted geometry:
+**gravitational lensing** (the units' own glow bends around the hole), a soft
+shadow zone, **amber heat grading** near the horizon (mote shader + composite
+re-colour the units and their infall trails — the accretion fire is made of the
+army), and a pure-black **event horizon**, all ramping in over ~1.5s and growing
+with charge, so 3x *looks* like what it is.
 
 - **Singularity** — `_burst -6.5` (near-zero spin) violently implodes your *own* mass
   to the cursor point.

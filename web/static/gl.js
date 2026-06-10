@@ -32,6 +32,8 @@ layout(location=5) in float aDens;  // local 8x8-bin density, 0..255
 layout(location=6) in vec4 aRnd;    // static per-mote randoms, 0..1
 uniform vec2 uGrid;                 // (W, H)
 uniform float uF, uCurve, uTail, uSize, uAlpha, uTime, uTeams;
+uniform vec4 uHole;                 // Doom: x, y, horizon radius, strength — the UNITS are the accretion fire
+uniform float uHoleSpin;
 uniform vec3 uColors[6];
 out vec2 vUV;                       // capsule-local coords (grid units)
 out vec2 vHL;                       // (halfLen, halfWidth)
@@ -46,7 +48,11 @@ void main() {
   vec2 A = vec2(aPA.y, aPA.x), B = vec2(aPB.y, aPB.x), C = vec2(aPC.y, aPC.x);
   vec2 K = B + (B - A) * uCurve;                       // control = prev + curve*incoming velocity
   vec2 pos = mix(mix(B, K, uF), mix(K, C, uF), uF);    // quadratic arc glide
-  vec2 vel = C - B;
+  // Streak along the CENTRAL-DIFFERENCE velocity (A->C), not the raw last step
+  // (B->C): per-tick steps snap to the 8 grid directions, so raw streaks render
+  // everything at hard 45-degree angles; averaging two steps halves the angular
+  // quantization and turning swirls read as curves.
+  vec2 vel = (C - A) * 0.5;
   float vl = min(length(vel), 8.0);                    // teleport guard (new game / conversion warp)
   vec2 dir = vl > 1e-4 ? normalize(vel) : vec2(1.0, 0.0);
   vec2 perp = vec2(-dir.y, dir.x);
@@ -67,6 +73,14 @@ void main() {
   float bright = (0.95 + 0.4 * aRnd.y) * mix(1.0, tw, 0.25 + 0.55 * dn);
   bright *= mix(1.0, 0.78, smoothstep(0.5, 1.0, dn));
   vec3 colr = mix(base, vec3(1.0), 0.45 * sparkle) * (bright + 0.8 * sparkle * max(tw - 0.9, 0.0));
+  // Doom: motes near the horizon ARE the accretion disk — they heat toward
+  // amber-white, doppler-beamed (the approaching side burns brighter).
+  if (uHole.w > 0.001) {
+    float hdist = distance(pos, uHole.xy);
+    float heat = min(uHole.w, 1.3) * exp(-pow((hdist - uHole.z * 1.15) / (uHole.z * 0.6), 2.0));
+    float dop = 1.0 + 0.7 * clamp(-(pos.x - uHole.x) * uHoleSpin / max(uHole.z, 1.0), -1.0, 1.0);
+    colr = mix(colr, vec3(1.0, 0.82, 0.55) * (1.2 * dop), min(heat * 0.85, 0.9));
+  }
   float a = uAlpha * mix(0.6, 1.0, smoothstep(0.02, 0.3, dn));   // sparse rim more translucent
   vColor = vec4(colr * a, a);
 }`;
@@ -142,11 +156,26 @@ void main() {
 const COMP_FS = `#version 300 es
 precision highp float;
 uniform sampler2D uWalls, uArmy, uTrail, uBloom;
-uniform vec2 uRes;
+uniform vec2 uRes, uGrid;
 uniform float uBloomK, uTrailK;
+uniform vec4 uHole;                 // Doom black hole: x, y (grid), horizon radius (cells), strength (0=off)
+uniform vec2 uHoleT;                // (time, spin direction)
 out vec4 o;
 void main() {
   vec2 uv = gl_FragCoord.xy / uRes;
+  // --- Doom: Gargantua-style gravitational lensing. Light from the army/trail
+  // layers is sampled along rays BENT toward the hole, so the scene visibly
+  // warps and smears around it; matter (walls/bg) is sampled straight.
+  vec2 uvg = vec2(uv.x * uGrid.x, (1.0 - uv.y) * uGrid.y);   // this fragment in grid coords
+  vec2 hd = uvg - uHole.xy;
+  float hr = length(hd);
+  vec2 uvL = uv;
+  if (uHole.w > 0.001) {
+    float rh = uHole.z;
+    float pull = uHole.w * rh * rh * 2.6 / (hr * hr + rh * rh * 0.6);   // bend, strongest near the horizon
+    vec2 dg = (hd / max(hr, 1e-3)) * min(pull, hr * 0.85);              // never pull past the centre
+    uvL = uv - vec2(dg.x / uGrid.x, -dg.y / uGrid.y);
+  }
   // wall texture: R = crisp mask, G = blurred mask (wide ramp for bevel + shadow)
   vec2 wm = texture(uWalls, vec2(uv.x, 1.0 - uv.y)).rg;     // v-flip: row 0 = top
   // background: gentle centre lift, vignette, blue-noise dither to kill banding
@@ -163,10 +192,28 @@ void main() {
   vec3 wallCol = vec3(0.052, 0.066, 0.108) + vec3(0.02, 0.03, 0.05) * soft;
   wallCol += vec3(0.13, 0.18, 0.30) * bevel * lit;
   col = mix(col, wallCol, wall);
-  col += texture(uTrail, uv).rgb * uTrailK;                 // motion history glow
-  vec4 ar = texture(uArmy, uv);                             // crisp current frame, premult over
+  col += texture(uTrail, uvL).rgb * uTrailK;                // motion history glow (lensed)
+  vec4 ar = texture(uArmy, uvL);                            // crisp current frame, premult over (lensed)
   col = ar.rgb + col * (1.0 - ar.a);
-  col += texture(uBloom, uv).rgb * uBloomK;                 // glow
+  col += texture(uBloom, uvL).rgb * uBloomK;                // glow (lensed)
+  // --- Doom: the hole itself. A doppler-bright accretion band (one side
+  // blue-shifted brighter, like Gargantua), slow spiral arms feeding it, a
+  // hot thin photon ring, and an event horizon that swallows ALL light.
+  // Doom: NO painted portrait — the units themselves form Gargantua (engine
+  // ring + blade formation; mote shader heats them amber near the horizon).
+  // Here only the physics of light: a soft shadow zone, and the event horizon
+  // swallowing everything that crosses it. The lensing above bends the UNITS'
+  // light into the halo arcs.
+  if (uHole.w > 0.001) {
+    float rh = uHole.z;
+    col *= 1.0 - 0.45 * min(uHole.w, 1.0) * exp(-pow(hr / (rh * 1.2), 2.0));
+    // heat GRADING, not painting: whatever light exists near the horizon —
+    // orbiting units and their infall trails — is re-coloured toward amber,
+    // so the accretion fire is made of the army itself.
+    float hot = min(uHole.w, 1.0) * exp(-pow((hr - rh * 1.2) / (rh * 0.8), 2.0));
+    col *= mix(vec3(1.0), vec3(1.45, 1.02, 0.55), hot);
+    col *= smoothstep(rh * 0.85, rh * 1.02, hr);            // the horizon: pure black
+  }
   col = 1.0 - exp(-col * 1.8);                              // soft filmic clip (no harsh saturate)
   col *= 1.0 - 0.30 * smoothstep(0.55, 1.05, dC);           // final vignette
   o = vec4(col, 1.0);
@@ -379,6 +426,9 @@ function create(canvas, teamColors) {
     gl.uniform1f(U.mote.uTail, o.tail); gl.uniform1f(U.mote.uSize, o.size);
     gl.uniform1f(U.mote.uAlpha, o.alpha); gl.uniform1f(U.mote.uTime, o.time);
     gl.uniform1f(U.mote.uTeams, o.teams);
+    const mh = o.hole || { x: 0, y: 0, r: 1, a: 0, spin: 1 };
+    gl.uniform4f(U.mote.uHole, mh.x, mh.y, mh.r, mh.a);
+    gl.uniform1f(U.mote.uHoleSpin, mh.spin);
     gl.uniform3fv(U.mote.uColors, COLORS);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);  // premult over: dense army stays team colour
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, nMotes);
@@ -427,7 +477,11 @@ function create(canvas, teamColors) {
     gl.uniform1i(U.comp.uWalls, 0); gl.uniform1i(U.comp.uArmy, 1);
     gl.uniform1i(U.comp.uTrail, 2); gl.uniform1i(U.comp.uBloom, 3);
     gl.uniform2f(U.comp.uRes, vw, vh);
+    gl.uniform2f(U.comp.uGrid, gridW, gridH);
     gl.uniform1f(U.comp.uBloomK, o.bloom); gl.uniform1f(U.comp.uTrailK, o.trailVis);
+    const hole = o.hole || { x: 0, y: 0, r: 1, a: 0, spin: 1 };
+    gl.uniform4f(U.comp.uHole, hole.x, hole.y, hole.r, hole.a);
+    gl.uniform2f(U.comp.uHoleT, o.time, hole.spin);
     fullscreen();
     gl.activeTexture(gl.TEXTURE0);
 
