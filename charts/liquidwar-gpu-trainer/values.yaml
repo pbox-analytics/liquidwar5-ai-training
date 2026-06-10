@@ -14,15 +14,16 @@ image:
   # registries.yaml trusts (the in-cluster svc DNS x509-fails on kubelet pull;
   # same lesson as the cpu-worker chart).
   repository: pandoras-box.local:5000/pbox/liquidwar-gpu-trainer
-  tag: "0.8.0-amd64"
+  tag: "0.9.0-amd64"
   pullPolicy: IfNotPresent
 
 # Exactly one trainer (single shared policy; self-play). Do not scale UP.
 # 2026-06-10: re-enabled on the PRO 6000 (comfyui-pbox-* scaled to 0 in
-# project-homer to free the card). 0.8.0 trains with --wells (real cross-team
-# Doom/Maelstrom, matching play) and --resume into a FIXED run dir on the NFS,
-# so pod restarts continue the run instead of starting over — the crash
-# fragility that killed earlier runs is gone.
+# project-homer to free the card). 0.9.0 = the FLAT 25-action policy: every
+# stance+mode pair (comet/lattice/nova/tide/binary/doom-levels/...) is in the
+# action space, trained with --wells and --resume into a fixed NFS run dir so
+# pod restarts continue in place. wells-080 (8-action) was superseded ~150
+# updates in; its dir stays on the NFS for the record.
 replicaCount: 1
 
 # Pin to pbox (pandoras-box): its PRO 6000 (96 GB) is now advertised to k8s
@@ -61,7 +62,7 @@ config:
   wells: true             # cast the REAL cross-team Doom/Maelstrom in training
   # Fixed run dir (relative to /opt/training, lands on the NFS mount): first
   # boot starts fresh in place, every restart after resumes policy+optimizer.
-  resume: "results/rl/wells-080"
+  resume: "results/rl/wells-090"
   # Kafka metrics (optional). Empty = no publishing.
   bootstrapServers: ""
   schemaRegistry: ""
