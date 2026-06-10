@@ -104,11 +104,12 @@ def main():
         print(f"GPU: {torch.cuda.get_device_name()}", flush=True)
 
     # --resume <run dir>: continue that run in place (policy + optimizer +
-    # update counter survive a crash). --resume <file.pt>: warm-start the
-    # policy only, in a fresh run dir.
+    # update counter survive a crash); an empty/missing dir starts FRESH in
+    # place — so a k8s restart loop can always pass the same fixed dir.
+    # --resume <file.pt>: warm-start the policy only, in a fresh run dir.
     resume = Path(args.resume) if args.resume else None
     start_update, best_winrate0 = 0, -1.0
-    if resume is not None and resume.is_dir():
+    if resume is not None and resume.suffix != ".pt":
         ckpt_dir = resume
     else:
         ckpt_dir = Path(args.ckpt_dir) / time.strftime("%Y%m%d_%H%M%S")
@@ -124,18 +125,21 @@ def main():
     policy = CursorPolicy().to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
     if resume is not None:
-        pt = resume / "latest.pt" if resume.is_dir() else resume
-        policy.load_state_dict(torch.load(pt, map_location=device, weights_only=True))
-        opt_pt = pt.parent / "optim.pt"
-        meta_js = pt.parent / "meta.json"
-        if resume.is_dir() and opt_pt.exists():
-            optimizer.load_state_dict(torch.load(opt_pt, map_location=device, weights_only=True))
-        if resume.is_dir() and meta_js.exists():
-            meta = json.loads(meta_js.read_text())
-            start_update = int(meta.get("update", -1)) + 1
-            best_winrate0 = float(meta.get("best_winrate", -1.0))
-        print(f"resumed from {pt} at update {start_update} "
-              f"(best win-rate so far {best_winrate0:.3f})", flush=True)
+        pt = resume if resume.suffix == ".pt" else resume / "latest.pt"
+        if pt.exists():
+            policy.load_state_dict(torch.load(pt, map_location=device, weights_only=True))
+            opt_pt = pt.parent / "optim.pt"
+            meta_js = pt.parent / "meta.json"
+            if resume.suffix != ".pt" and opt_pt.exists():
+                optimizer.load_state_dict(torch.load(opt_pt, map_location=device, weights_only=True))
+            if resume.suffix != ".pt" and meta_js.exists():
+                meta = json.loads(meta_js.read_text())
+                start_update = int(meta.get("update", -1)) + 1
+                best_winrate0 = float(meta.get("best_winrate", -1.0))
+            print(f"resumed from {pt} at update {start_update} "
+                  f"(best win-rate so far {best_winrate0:.3f})", flush=True)
+        else:
+            print(f"--resume {resume}: nothing saved yet — fresh run in place", flush=True)
     kafka = setup_kafka(args.bootstrap_servers, args.schema_registry)
 
     def save_latest(update: int, best_wr: float) -> None:
