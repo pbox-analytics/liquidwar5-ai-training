@@ -80,7 +80,7 @@
   </div>
   <div class="muted" style="text-align:center; line-height:1.8;">
     <b>↑ ↓ ← → / WASD</b> steer (or hold mouse) &nbsp;·&nbsp;
-    <b>Stances</b> (hold one): <b>1</b> 🐝 Swarm &nbsp; <b>2</b> 🌀 Spin <span class="muted">(tap to cycle: vortex→sawblade→galaxy)</span> &nbsp; <b>3</b> ➤ Drill <span class="muted">(tap to rev: slow→fast)</span> &nbsp; <b>4</b> 🛡 Wall <span class="muted">(tap to flip)</span> &nbsp; <b>5</b> 💥 Pulse <span class="muted">(tap to cycle: wave→rings→star)</span> &nbsp; <b>6</b> 🕳 Doom <span class="muted">(tap to charge)</span> &nbsp; <b>7</b> 🌪 Maelstrom <span class="muted">(tap to cycle: undertow→ejecta→shear)</span> &nbsp; <b>8</b> ⚛ Atom &nbsp;·&nbsp;
+    <b>Stances</b> (hold one): <b>1</b> 🐝 Swarm &nbsp; <b>2</b> 🌀 Spin <span class="muted">(tap to cycle: vortex→sawblade→galaxy)</span> &nbsp; <b>3</b> ➤ Drill <span class="muted">(tap to rev: slow→fast)</span> &nbsp; <b>4</b> 🛡 Wall <span class="muted">(tap to flip)</span> &nbsp; <b>5</b> 💥 Pulse <span class="muted">(tap to cycle: wave→rings→star)</span> &nbsp; <b>6</b> 🕳 Doom <span class="muted">(tap to charge)</span> &nbsp; <b>7</b> 🌪 Maelstrom <span class="muted">(tap to cycle: undertow→ejecta→shear)</span> &nbsp; <b>8</b> ⚛ Atom &nbsp; <b>9</b> 🌊 Classic &nbsp;·&nbsp;
     <b>Q</b>/<b>E</b> spin direction &nbsp;·&nbsp;
     <b>T</b> trails &nbsp;·&nbsp;
     <b>New game</b> / <b>Map</b> picker above &nbsp;·&nbsp;
@@ -277,8 +277,8 @@ function updateHUD(st) {
   document.getElementById("spread").textContent = st.spread ? st.spread.map(s => Math.round(s)).join("/") : "—";
   document.getElementById("mapname").textContent = st.map ?? "—";
   const sp = document.getElementById("stancePill");
-  const SC = { Swarm: "#1b2233", Spin: "#0c3a4a", Drill: "#5a3a0c", Wall: "#14401f", Pulse: "#3a1040", Doom: "#000000", Maelstrom: "#0a2f3a", Atom: "#2a1540" };
-  const SI = { Swarm: "🐝", Spin: "🌀", Drill: "➤", Wall: "🛡", Pulse: "💥", Doom: "🕳", Maelstrom: "🌪", Atom: "⚛" };
+  const SC = { Swarm: "#1b2233", Spin: "#0c3a4a", Drill: "#5a3a0c", Wall: "#14401f", Pulse: "#3a1040", Doom: "#000000", Maelstrom: "#0a2f3a", Atom: "#2a1540", Classic: "#26303f" };
+  const SI = { Swarm: "🐝", Spin: "🌀", Drill: "➤", Wall: "🛡", Pulse: "💥", Doom: "🕳", Maelstrom: "🌪", Atom: "⚛", Classic: "🌊" };
   sp.textContent = (SI[st.stance] || "") + " " + (st.stance ?? "—") + (st.mode ? " ·" + st.mode : "");
   sp.style.background = SC[st.stance] || "#1b2233"; sp.style.color = "#fff";
   document.getElementById("opp").textContent = st.opponent;
@@ -328,7 +328,7 @@ function sendDir() {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ dir }));
 }
 window.addEventListener("keydown", (e) => {
-  if (e.key >= "1" && e.key <= "8") {             // number row selects a held STANCE (0..7)
+  if (e.key >= "1" && e.key <= "9") {             // number row selects a held STANCE (0..8)
     if (ws && ws.readyState === 1) ws.send(JSON.stringify({ stance: parseInt(e.key) - 1 }));
     return;
   }

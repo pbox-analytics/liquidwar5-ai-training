@@ -285,7 +285,7 @@ async def ws(sock: WebSocket) -> None:
                 elif "spin" in msg:                # Q/E -> orbit direction (Spin/Swarm stances)
                     ctrl["spin"] = float(msg["spin"])
                 elif "stance" in msg:              # 1-5 -> select held stance; re-tap Drill(3) revs its mode
-                    s = max(0, min(7, int(msg["stance"])))
+                    s = max(0, min(8, int(msg["stance"])))
                     if s == 2 and ctrl["stance"] == 2:
                         ctrl["drill_mode"] = (ctrl["drill_mode"] + 1) % 3
                     elif s == 2:
@@ -327,7 +327,7 @@ async def ws(sock: WebSocket) -> None:
         spin_sign = 1                                    # Q/E orbit direction (Spin/Swarm stances): +1/-1/0
         last_dir = [0, 1]                                # heading the Drill/Wall point at; default right
         next_dl = loop.time()                            # absolute frame deadline (drift-corrected)
-        STANCES = ("Swarm", "Spin", "Drill", "Wall", "Pulse", "Doom", "Maelstrom", "Atom")  # index = ctrl["stance"]
+        STANCES = ("Swarm", "Spin", "Drill", "Wall", "Pulse", "Doom", "Maelstrom", "Atom", "Classic")  # index = ctrl["stance"]
         while ctrl["alive"]:
             t0 = loop.time()                                  # frame start, for steady pacing
             if ctrl["spin"] is not None:                      # Q/E -> orbit direction (Spin/Swarm stances)
@@ -481,6 +481,11 @@ async def ws(sock: WebSocket) -> None:
                     _e._spin[0, 0] = 1.8 * sgn              # orbital speed
                     _e._burst[0, 0] = 0.4                   # a little room so the two lobes form
                     _e._fig8[0, 0] = 1.0                    # flip orbit across the cursor -> figure-8 loops
+                # stance == 8 (Classic) sets NOTHING: every knob stays at the
+                # per-tick zero above, so the army just flows down the gradient
+                # and packs around the cursor — the original Liquid War blob.
+                # (Human-only: the policy's action space stays at 8 stances so
+                # existing checkpoints keep loading.)
                 # Doom charge trades speed for pull: at level L the cursor moves at 1/L
                 # cells-per-tick — every tick, so it's a smooth slow glide, not a stutter —
                 # making a 3x well sluggish to reposition.
