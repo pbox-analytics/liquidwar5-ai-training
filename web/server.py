@@ -381,19 +381,18 @@ async def ws(sock: WebSocket) -> None:
                 elif stance == 6:                           # Maelstrom: a whirlpool CURRENT (cross-team vorticity)
                     sgn = spin_sign if spin_sign != 0 else 1
                     mm = ctrl["mael_mode"]                  # 0 undertow / 1 ejecta / 2 shear (tap 7)
-                    # Your army IS the whirlpool wall: a fast CIRCULAR spinning
-                    # annulus with an open eye (_ring_ecc stays 0 -> round, so
-                    # it doesn't share Doom's oblate-blade silhouette). Radius
-                    # mass-scaled like Doom's disk so the band stays solid.
+                    # Your army IS the whirlpool body: the ORIGINAL big loose
+                    # form — a fast wide orbiting shell, burst pushing the mass
+                    # out into a broad swirling storm-cloud (no ring, no packed
+                    # disk; nothing like Doom's silhouette).
                     _e._spin[0, 0] = 2.0 * sgn
-                    _mass = float(_e.team_oh[0, 0].sum())
-                    _r_eye = 9.0
-                    _e._ring[0, 0] = 0.5 * (_r_eye + (_r_eye ** 2 + _mass / 3.14159) ** 0.5)
+                    _e._burst[0, 0] = 0.6
                     # The CURRENT — Doom's radial devour rotated 90°: enemies
                     # near the well are swept TANGENTIALLY off their gradient
-                    # and entrained into orbit through your grinding rim; no
+                    # and entrained into orbit through your storm-cloud; no
                     # capture, attrition by ordinary contact combat. Strength
                     # scales with YOUR mass — a whittled army stirs a weak eddy.
+                    _mass = float(_e.team_oh[0, 0].sum())
                     _frac = _mass / max(1.0, _e.fighters_per_team)
                     _e._vortex_pos = _e.cursor_pos[:, 0].float().clone()
                     _e._vortex_team = 0
@@ -404,7 +403,9 @@ async def ws(sock: WebSocket) -> None:
                     # sqrt(frac), not Doom's frac^1.5: a half-strength army
                     # still stirs a usable eddy (~21), a quarter one doesn't.
                     _e._vortex_str = 30.0 * _frac ** 0.5
-                    _e._vortex_range = max(60.0, 2.0 * float(_e._ring[0, 0]))
+                    # reach ~2x the packed-blob radius (the burst shell spreads
+                    # well past it), so the current spans the whole storm
+                    _e._vortex_range = max(70.0, 2.0 * (_mass / 3.14159) ** 0.5)
                     # radial component per mode: undertow spirals them inward to
                     # the rim, ejecta flings entrained enemies outward (scatters
                     # a formation off its cursor), shear is pure deflection
