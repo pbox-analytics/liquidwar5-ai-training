@@ -78,6 +78,8 @@ class GameSession:
         self.engine._wall = torch.zeros(1, teams, 2, device=DEVICE)  # per-team shield facing (wall stance)
         self.engine._fig8 = torch.zeros(1, teams, device=DEVICE)  # per-team figure-8 flag (Atom stance)
         self.engine._ring = torch.zeros(1, teams, device=DEVICE)  # per-team orbit radius (Doom's accretion disk)
+        self.engine._node_l = torch.zeros(1, teams, device=DEVICE)  # Chladni radial wavelength (Pulse rings mode)
+        self.engine._node_m = torch.zeros(1, teams, device=DEVICE)  # Chladni angular petals (Pulse star mode)
         self.engine.reset()
         self.policy: CursorPolicy | None = None
         self.ckpt_name = opponent
@@ -204,7 +206,8 @@ async def ws(sock: WebSocket) -> None:
     )
     ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True, "reset": False,
                             "map": None, "spin": None, "stance": 0, "drill_mode": 0, "doom_level": 1,
-                            "wall_orient": 0}   # 0 = horizontal bar, 1 = vertical bar (tap 4 to flip)
+                            "wall_orient": 0,   # 0 = horizontal bar, 1 = vertical bar (tap 4 to flip)
+                            "pulse_mode": 0}    # 0 wave / 1 cymatic rings / 2 cymatic star (tap 5 to cycle)
 
     async def receiver() -> None:
         try:
@@ -230,6 +233,10 @@ async def ws(sock: WebSocket) -> None:
                         ctrl["doom_level"] = 1
                     if s == 3 and ctrl["stance"] == 3:    # re-tap Wall flips the bar horizontal <-> vertical
                         ctrl["wall_orient"] ^= 1
+                    if s == 4 and ctrl["stance"] == 4:    # re-tap Pulse cycles wave -> rings -> star
+                        ctrl["pulse_mode"] = (ctrl["pulse_mode"] + 1) % 3
+                    elif s == 4:
+                        ctrl["pulse_mode"] = 0
                     ctrl["stance"] = s
                 elif "dir" in msg:                 # keyboard (arrows/WASD)
                     ctrl["dir"] = msg["dir"]
@@ -258,19 +265,19 @@ async def ws(sock: WebSocket) -> None:
                 session.engine._map_choice = ctrl["map"]   # apply the picked map (None=random)
                 session.reset(); ctrl["reset"] = False; hold = 0; logged = False
                 _e = session.engine; _e._surge = None; _e._blackhole_pos = None                   # clear all stance knobs per game
-                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_()
+                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._node_l.zero_(); _e._node_m.zero_()
             elif session.done:
                 hold += 1
                 if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
                     session.engine._map_choice = ctrl["map"]   # keep the picked map across games
                     session.reset(); hold = 0; logged = False
                     _e = session.engine; _e._surge = None; _e._blackhole_pos = None
-                    _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_()
+                    _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._node_l.zero_(); _e._node_m.zero_()
             else:
                 if ctrl["dir"] and (ctrl["dir"][0] or ctrl["dir"][1]):
                     last_dir = ctrl["dir"]                  # heading the Drill/Wall point at
                 _e = session.engine
-                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_()
+                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._node_l.zero_(); _e._node_m.zero_()
                 _e._surge = None; _e._blackhole_pos = None
                 stance = ctrl["stance"]                     # 0 Swarm 1 Spin 2 Drill 3 Wall 4 Pulse
                 if stance == 0:                             # Swarm: loose, varied-radius orbits (electron cloud)
@@ -293,14 +300,23 @@ async def ws(sock: WebSocket) -> None:
                         _e._wall[0, 0, 0] = 1.0; _e._wall[0, 0, 1] = 0.0
                     else:                                   # vertical bar = horizontal facing
                         _e._wall[0, 0, 0] = 0.0; _e._wall[0, 0, 1] = 1.0
-                    _e._burst[0, 0] = -0.5                  # pull inward -> a tighter, denser, more concentrated bar
-                elif stance == 4:                           # Pulse: concentric rings + damage waves
-                    ring = math.sin(n * 0.33)
-                    _e._burst[0, 0] = 1.0 if ring > 0 else -0.6
-                    s = torch.ones(1, _e.T, device=_e.device)
-                    if ring > 0.5:
-                        s[0, 0] = 4.0                       # surge on each ring's crest
-                    _e._surge = s
+                    _e._burst[0, 0] = -0.9                  # strong inward pull -> a dense solid COLUMN, not a picket line
+                elif stance == 4:                           # Pulse: 3 modes (tap 5 to cycle)
+                    pm = ctrl["pulse_mode"]
+                    if pm == 0:                             # wave: traveling rings + damage crests (the original)
+                        ring = math.sin(n * 0.33)
+                        _e._burst[0, 0] = 1.0 if ring > 0 else -0.6
+                        s = torch.ones(1, _e.T, device=_e.device)
+                        if ring > 0.5:
+                            s[0, 0] = 4.0                   # surge on each ring's crest
+                        _e._surge = s
+                    elif pm == 1:                           # rings: cymatic STANDING rings (Chladni circular mode)
+                        _e._node_l[0, 0] = 14.0             # nodal wavelength — concentric resonance bands
+                        s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = 2.0; _e._surge = s
+                    else:                                   # star: cymatic nodal-diameter mode — a 6-petal figure
+                        _e._node_l[0, 0] = 18.0
+                        _e._node_m[0, 0] = 6.0
+                        s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = 2.0; _e._surge = s
                 elif stance == 5:                           # Doom: violent black-hole implosion
                     sgn = spin_sign if spin_sign != 0 else 1
                     lvl = ctrl["doom_level"]                # 1x/2x/3x charge (tap 6)
@@ -346,7 +362,8 @@ async def ws(sock: WebSocket) -> None:
             st["stance"] = STANCES[ctrl["stance"]]      # held tactical state
             st["mode"] = (("slow", "med", "fast")[ctrl["drill_mode"]] if ctrl["stance"] == 2
                           else f"{ctrl['doom_level']}x" if ctrl["stance"] == 5
-                          else ("horiz", "vert")[ctrl["wall_orient"]] if ctrl["stance"] == 3 else "")
+                          else ("horiz", "vert")[ctrl["wall_orient"]] if ctrl["stance"] == 3
+                          else ("wave", "rings", "star")[ctrl["pulse_mode"]] if ctrl["stance"] == 4 else "")
             st["spin_dir"] = spin_sign
             if session.done and not logged:
                 w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])

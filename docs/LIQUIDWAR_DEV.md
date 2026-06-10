@@ -62,9 +62,9 @@ The AI policy drives the **same** knobs via `rl/policy.apply_stances`.
 |---|---|---|---|
 | **1** | 🐝 Swarm | loose orbiting electron-cloud | `_spin 0.5`, `_burst 0.15` |
 | **2** | 🌀 Spin | tight fast vortex (Q/E = direction) | `_spin 1.7`, `_burst -0.4` |
-| **3** | ➤ Drill | Ender's-Game piercing column; tap to rev **slow→med→fast** (faster spin grinds harder but advances slower) | `_drill` (aim×advance), `_spin`, `_surge` |
-| **4** | 🛡 Wall | dense shield bar across the cursor, perpendicular to the threat | `_wall` (facing) |
-| **5** | 💥 Pulse | concentric rings + `6×` damage waves on the crest | `_burst` rhythm, `_surge` |
+| **3** | ➤ Drill | Ender's-Game piercing column that **corkscrews** — the lateral squeeze targets a traveling-sine centreline (the 2D projection of a rotating bit; twist follows Q/E); tap to rev **slow→med→fast** | `_drill` (aim×advance), `_spin`, `_surge` |
+| **4** | 🛡 Wall | DENSE shield column across the cursor (collapse 20 + burst −0.9 — solid, not a picket line); tap to flip horizontal/vertical | `_wall` (facing), `_burst` |
+| **5** | 💥 Pulse | 3 modes, tap to cycle: **wave** (traveling rings + `4×` crest damage), **rings** (cymatic standing rings — Chladni circular mode, `_node_l`), **star** (6-petal nodal-diameter figure, `_node_m`) | `_burst`/`_surge`; `_node_l`, `_node_m` |
 | **6** | 🕳 Doom | black-hole implosion (see below) | `_burst -6.5`, `_blackhole_*`, `_surge 6` |
 | **7** | 🌪 Maelstrom | fast wide orbiting shell / whirlpool | `_spin 2.0`, `_burst 0.6` |
 | **8** | ⚛ Atom | figure-8 electron orbitals | `_spin 1.8`, `_fig8 1` |
@@ -81,7 +81,9 @@ Doom is the finisher, modelled on *Gargantua* — and the **army itself forms th
 black hole**. The engine's per-team `_ring` knob holds a target orbit radius:
 fighters are biased onto it from both sides (outward needs more weight than the
 gradient's 10–14/step inward pull, else stragglers pool and the hole never
-opens), so the team becomes a **spinning annulus with an open black centre**.
+opens), so the team becomes a **spinning OBLATE disk with an open black centre**
+— the target radius is angle-dependent (pinched vertically, stretched ~1.3× along
+the equator), and the rim ripple is damped for ring teams so the disk stays solid.
 The radius is **mass-scaled** by the play server (solve π(r_out²−r_in²)=mass for
 the band centred on the target with its inner edge at the rendered horizon —
 fighters pack one-per-cell, so a fixed small radius would saturate back into a

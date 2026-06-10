@@ -401,27 +401,27 @@ class LiquidWarEngine:
         # along each single axis if a wall blocks it — so holding two directions
         # against a barrier glides the cursor along it toward a gap instead of
         # pinning it (no more releasing a key to line up with the opening).
+        bt = b.unsqueeze(1).expand(self.B, self.T)                    # (B,T) batch index
+        zero = torch.zeros_like(adir[:, :, 0])
         for _ in range(self.cursor_speed):
-            for t in range(self.T):
-                oy = self.cursor_pos[:, t, 0].clone()
-                ox = self.cursor_pos[:, t, 1].clone()
-                done = torch.zeros(self.B, dtype=torch.bool, device=self.device)
-                zero = torch.zeros_like(adir[:, t, 0])
-                for dy, dx in ((adir[:, t, 0], adir[:, t, 1]),
-                               (adir[:, t, 0], zero), (zero, adir[:, t, 1])):
-                    ny = (oy + dy).clamp(1, self.H - 2)
-                    nx = (ox + dx).clamp(1, self.W - 2)
-                    ok = (~done & self.passable[b, ny, nx] & self.team_alive[:, t]
-                          & ((ny != oy) | (nx != ox)))
-                    self.cursor_pos[:, t, 0] = torch.where(ok, ny, self.cursor_pos[:, t, 0])
-                    self.cursor_pos[:, t, 1] = torch.where(ok, nx, self.cursor_pos[:, t, 1])
-                    # Seed-decay bookkeeping below needs the OCTILE cost of the
-                    # step actually taken (a blocked diagonal that slides moves
-                    # orthogonally -> 10, not 14).
-                    step_c = ((dy != 0) & (dx != 0)).to(torch.int32) * 4 + 10
-                    cost[:, t] += torch.where(ok, step_c, torch.zeros_like(step_c))
-                    done |= ok
-                moved[:, t] |= done
+            oy = self.cursor_pos[:, :, 0].clone()                     # (B,T) substep snapshot
+            ox = self.cursor_pos[:, :, 1].clone()
+            done = torch.zeros(self.B, self.T, dtype=torch.bool, device=self.device)
+            for dy, dx in ((adir[:, :, 0], adir[:, :, 1]),
+                           (adir[:, :, 0], zero), (zero, adir[:, :, 1])):
+                ny = (oy + dy).clamp(1, self.H - 2)
+                nx = (ox + dx).clamp(1, self.W - 2)
+                ok = (~done & self.passable[bt, ny, nx] & self.team_alive
+                      & ((ny != oy) | (nx != ox)))
+                self.cursor_pos[:, :, 0] = torch.where(ok, ny, self.cursor_pos[:, :, 0])
+                self.cursor_pos[:, :, 1] = torch.where(ok, nx, self.cursor_pos[:, :, 1])
+                # Seed-decay bookkeeping below needs the OCTILE cost of the
+                # step actually taken (a blocked diagonal that slides moves
+                # orthogonally -> 10, not 14).
+                step_c = ((dy != 0) & (dx != 0)).to(torch.int32) * 4 + 10
+                cost += torch.where(ok, step_c, torch.zeros_like(step_c))
+                done |= ok
+            moved |= done
         # Seed decays whenever the cursor MOVES (or every 13th tick) so the
         # current cursor cell dominates the persistent field and fighters blob
         # around it rather than smearing toward stale old positions. The decay
@@ -634,24 +634,61 @@ class LiquidWarEngine:
         # ripples; the body stays dense.
         PUSH_W = 14.0
         push = (PUSH_W * torch.sin(phase)).unsqueeze(-1)               # (B,N,1), oscillates ±
+        if ring_f is not None:
+            # the rim ripple (±14) is comparable to the ring bias (15/26) and
+            # segments the accretion disk into ripple bands — damp it hard for
+            # teams holding a ring formation so the disk stays a solid annulus
+            push = push * (1.0 - 0.8 * (ring_f > 0).float()).unsqueeze(-1)
         out_align = (-ry / rn).unsqueeze(-1) * self._dy_t + (-rx / rn).unsqueeze(-1) * self._dx_t
         score = ng.float() + jitter.float() - VEL_W * align - swirl - push * out_align
         if burst_f is not None:                                       # gather (-1) inward / burst (+1) outward
             score = score - 15.0 * burst_f.unsqueeze(-1) * out_align
         if ring_f is not None:                                        # accretion ring: settle on the orbit radius
-            rbias = ((ring_f - rn) / 4.0).clamp(-1.0, 1.0) * (ring_f > 0).float()
+            # OBLATE (Gargantua) disk: the target radius is angle-dependent —
+            # pinched vertically (0.78x) and stretched along the equator (1.28x)
+            # — so the spinning disk reads as the edge-on silhouette, pinching
+            # outward along its long axis, not a circular donut.
+            ell = ring_f * (0.78 + 0.5 * (rx / rn) ** 2)
+            rbias = ((ell - rn) / 4.0).clamp(-1.0, 1.0) * (ring_f > 0).float()
             # Outward (inside the ring) needs MORE weight than inward: it fights
             # the gradient's 10-14/step pull toward the cursor, else stragglers
             # pool in the centre and the hole never opens.
             rw = torch.where(rbias > 0, 26.0, 15.0)
             score = score - (rw * rbias).unsqueeze(-1) * out_align
-            # GARGANTUA BLADE: fighters well OUTSIDE the ring also flatten toward
+            # GARGANTUA BLADE: fighters well OUTSIDE the disk also flatten toward
             # the cursor's equator row and stream in along it — so the formation
             # reads as the edge-on accretion blade feeding an orbiting halo (the
             # Interstellar silhouette), not a plain donut.
-            far = ((rn > ring_f * 1.6) & (ring_f > 0)).float()
+            far = ((rn > ell * 1.25) & (ring_f > 0)).float()
             eq_align = torch.sign(ry).unsqueeze(-1) * self._dy_t      # toward the equator line
-            score = score - 12.0 * far.unsqueeze(-1) * eq_align
+            score = score - 15.0 * far.unsqueeze(-1) * eq_align
+        # CHLADNI RESONANCE (Pulse's cymatic modes): standing-wave nodal patterns,
+        # like sand on a vibrating plate. ``_node_l`` sets a radial wavelength —
+        # fighters drift to the nodal RADII (concentric standing rings, slowly
+        # breathing). ``_node_m`` adds an angular mode — m nodal diameters, so the
+        # mass gathers into an m-petal star. Both are per-team (B,T), 0 = off.
+        # (no .any() guards here: at B=1 a guard's GPU->CPU sync costs more than
+        # the handful of 16k-element kernels it would skip — run unconditionally,
+        # the *_on masks zero the bias when the knob is off)
+        nodel = getattr(self, "_node_l", None)
+        if nodel is not None:
+            l_f = nodel.gather(1, self.fteam)                          # (B,N) wavelength or 0
+            l_on = l_f > 0
+            movable = movable | (l_on.unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 24))
+            rad = torch.sin(rn * 6.2832 / l_f.clamp(min=1.0) - self.tick * 0.02)
+            # outward (rad>0) must out-weigh the gradient's 10-14/step inward
+            # pull or the standing rings never separate (same as _ring above)
+            rw_n = torch.where(rad > 0, 26.0, 15.0) * l_on.float()
+            score = score - (rw_n * rad).unsqueeze(-1) * out_align
+        nodem = getattr(self, "_node_m", None)
+        if nodem is not None:
+            m_f = nodem.gather(1, self.fteam)                          # (B,N) petal count or 0
+            m_on = m_f > 0
+            movable = movable | (m_on.unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 24))
+            theta = torch.atan2(-ry, -rx)                              # fighter angle about the cursor
+            tang_n = (-rx / rn).unsqueeze(-1) * self._dy_t + (ry / rn).unsqueeze(-1) * self._dx_t
+            ang = torch.sin(m_f * theta + self.tick * 0.01)
+            score = score - 11.0 * (m_on.float() * ang).unsqueeze(-1) * tang_n
         if drill_fwd is not None:                                     # DRILL: pierce forward, concentrated
             # |_drill| encodes ADVANCE SPEED (drill mode): a small magnitude weakens
             # the forward bias so the spin/squeeze dominate -> the fast (high-spin)
@@ -662,11 +699,25 @@ class LiquidWarEngine:
             ndd = dd / dd.norm(dim=-1, keepdim=True).clamp(min=1e-6)
             perp_dot = self._dy_t * ndd[..., 1:2] - self._dx_t * ndd[..., 0:1]    # (B,N,8) candidate · perp
             lateral = (-ry * ndd[..., 1] + rx * ndd[..., 0])                      # (B,N) offset · perp
-            score = score + 13.0 * torch.sign(lateral).unsqueeze(-1) * perp_dot
+            # ENDER'S-GAME HELIX: the squeeze targets a traveling-SINE centreline
+            # (phase advances along the thrust axis and with time) instead of a
+            # straight line — the 2D projection of a rotating drill bit. The
+            # column visibly corkscrews as it advances; twist direction follows
+            # the team's spin sign (Q/E).
+            along = (-ry) * ndd[..., 0] + (-rx) * ndd[..., 1]                     # (B,N) offset · thrust
+            tw = torch.sign(spin_f.squeeze(-1)) if spin is not None else 1.0
+            # omega 0.12/tick (~1s per twist at 60Hz): fighters can only step ~1
+            # cell/tick laterally, so a faster wave sweeps by before the column
+            # can track it and the helix never materializes.
+            helix = 4.5 * torch.sin(along * 0.35 - tw * self.tick * 0.12)
+            score = score + 16.0 * torch.sign(lateral - helix).unsqueeze(-1) * perp_dot
         if wdd is not None:                                           # WALL: collapse onto the cursor's perp line
             fwd_comp = (-ry) * wdd[..., 0] + (-rx) * wdd[..., 1]      # how far ahead/behind that line
             c_face = wdd[..., 0:1] * self._dy_t + wdd[..., 1:2] * self._dx_t
-            score = score + 14.0 * torch.sign(fwd_comp).unsqueeze(-1) * c_face
+            # 20 (was 14): the collapse must dominate the wave/swirl noise so the
+            # bar packs DENSE — with the server's stronger inward burst it reads
+            # as a solid column, not a loose picket line.
+            score = score + 20.0 * torch.sign(fwd_comp).unsqueeze(-1) * c_face
         # BLACK HOLE (Doom): a cross-team gravity well at one team's cursor that drags
         # the OTHER teams' fighters in (overriding their own gradient) so they get pulled
         # into the singularity and devastated. ``_blackhole_pos`` is (B,2); set by the
