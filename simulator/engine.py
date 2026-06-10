@@ -373,9 +373,8 @@ class LiquidWarEngine:
             dy = w["pos"][:, 0:1] - self.fy.float(); dx = w["pos"][:, 1:2] - self.fx.float()
             grab = ((dy * dy + dx * dx) <= R_h * R_h) & (self.fteam != bh_team)
             grab = grab & (torch.rand(self.B, self.N, device=self.device) < cap_rate)  # devour GRADUALLY — a drain you can fight, not an instant gulp
-            if grab.any():
-                self.fteam = torch.where(grab, torch.full_like(self.fteam, bh_team), self.fteam)
-                self.fhealth = torch.where(grab, torch.full_like(self.fhealth, NEW_HEALTH), self.fhealth)
+            self.fteam = torch.where(grab, torch.full_like(self.fteam, bh_team), self.fteam)
+            self.fhealth = torch.where(grab, torch.full_like(self.fhealth, NEW_HEALTH), self.fhealth)
         self._rebuild_views()
         self.tick += 1
         teams_left = self.team_alive.sum(dim=1)
@@ -417,6 +416,44 @@ class LiquidWarEngine:
         # 288-wide grid needs ~3. actions are unit directions (±1).
         if not hasattr(self, "cursor_speed"):
             self.cursor_speed = max(1, round(self.W / 96))
+        if self.B == 1:
+            # PLAY fast path: stepping <=MAX_TEAMS cursors through the slide
+            # logic below costs ~180 kernel launches (~2ms/tick) for a few
+            # integers of real work. Walls are static per game, so mirror
+            # ``passable`` to CPU once (identity-keyed: reset() reassigns it)
+            # and do the whole thing in python ints — two tiny syncs replace
+            # the launch storm. Same semantics as the tensor path.
+            if getattr(self, "_pass_cpu_src", None) is not self.passable:
+                self._pass_cpu = self.passable[0].tolist()      # (H,W) nested bools
+                self._pass_cpu_src = self.passable
+            pas = self._pass_cpu
+            adir = actions[0].long().clamp(-1, 1).tolist()
+            cur = self.cursor_pos[0].tolist()
+            alive = self.team_alive[0].tolist()
+            moved_l = [False] * self.T
+            cost_l = [0] * self.T
+            for t in range(self.T):
+                dy0, dx0 = int(adir[t][0]), int(adir[t][1])
+                if not alive[t] or (dy0 == 0 and dx0 == 0):
+                    continue
+                cy, cx = int(cur[t][0]), int(cur[t][1])
+                for _ in range(self.cursor_speed):
+                    for dy, dx in ((dy0, dx0), (dy0, 0), (0, dx0)):
+                        ny = min(max(cy + dy, 1), self.H - 2)
+                        nx = min(max(cx + dx, 1), self.W - 2)
+                        if (ny != cy or nx != cx) and pas[ny][nx]:
+                            cost_l[t] += 14 if (dy != 0 and dx != 0) else 10
+                            cy, cx = ny, nx
+                            moved_l[t] = True
+                            break
+                cur[t] = [cy, cx]
+            self.cursor_pos[0] = torch.as_tensor(cur, dtype=self.cursor_pos.dtype,
+                                                 device=self.device)
+            decay = 10 if (self.tick % 13 == 0) else 0
+            dec = torch.as_tensor([[c if m else decay for m, c in zip(moved_l, cost_l)]],
+                                  dtype=torch.int32, device=self.device)
+            self.cursor_val = (self.cursor_val - dec).clamp(min=1)
+            return
         b = torch.arange(self.B, device=self.device)
         adir = actions.long().clamp(-1, 1)
         moved = torch.zeros(self.B, self.T, dtype=torch.bool, device=self.device)
@@ -810,10 +847,17 @@ class LiquidWarEngine:
         moved = torch.zeros(B, N, dtype=torch.bool, device=self.device)
         attacking = torch.zeros(B, N, dtype=torch.bool, device=self.device)
         front = torch.zeros(B, N, dtype=torch.long, device=self.device)
-        for k in range(8):                                             # priority rounds
+        # (no early-break/.any() guards in this loop: each is a GPU->CPU sync,
+        # and there are rounds x unit_speed sub-steps of them per tick — at
+        # B=1 the syncs cost far more than letting an empty round's no-op
+        # kernels run. Same lesson as the stance-bias guards above.)
+        # 4 rounds, not all 8 candidate ranks: moves overwhelmingly resolve in
+        # rounds 0-2, and a fighter whose top-4 are all blocked simply waits —
+        # it retries next sub-step (unit_speed of them per tick), so the rare
+        # deep reroute costs 1/unit_speed of a tick, while every round costs
+        # ~10 kernels x unit_speed per tick for everyone.
+        for k in range(4):                                             # priority rounds
             active = down_s[:, :, k] & ~moved & ~attacking
-            if not bool(active.any()):
-                break
             kcell = ncell_s[:, :, k]
             occ_slot = self.occ.view(B, -1).gather(1, kcell)
             occ_team = torch.where(occ_slot >= 0,
@@ -838,8 +882,7 @@ class LiquidWarEngine:
             atk = active & is_enemy & ~kmoves
             front = torch.where(atk & ~attacking, order[:, :, k], front)
             attacking = attacking | atk
-            if bool(kmoves.any()):
-                self._rebuild_occ()                                    # followers see freed cells
+            self._rebuild_occ()                                        # followers see freed cells
         # COORDINATED ROTATION: the priority loop above only resolves chains that
         # terminate in an EMPTY cell — a rim fighter steps into open space, freeing
         # its cell for the follower behind it, one ring inward per tick. A dense,
@@ -946,8 +989,8 @@ class LiquidWarEngine:
                                self.fteam.gather(1, occ_slot.clamp(min=0)), self.fteam)
         is_enemy = (occ_slot >= 0) & (occ_team != self.fteam)
         propose = active & passable & ~is_enemy
-        if not bool(propose.any()):
-            return torch.zeros(B, N, dtype=torch.bool, device=device)
+        # (no propose.any() early-out: the GPU->CPU sync costs more per
+        # sub-step than running the no-op kernels below on an empty mask)
         slots = torch.arange(N, device=device).expand(B, N)
         BIGN = N + 1
         # Contention: at most one proposer (lowest slot) per target cell.
@@ -984,24 +1027,19 @@ class LiquidWarEngine:
         # atypically long chain), we fall back to the unconditionally-safe subset
         # (pure empty-target moves); the rest resolves over the next ticks. This
         # makes the one-per-cell invariant impossible to violate.
-        converged = False
+        # (Fixed-count shrink + a BRANCHLESS per-batch fixpoint select — the old
+        # per-pass converged check was a GPU->CPU sync per iteration per
+        # sub-step, which cost more than the extra no-op passes it skipped.)
         for _ in range(6):                                                # monotone shrink
-            new_cleared = _vacated(cleared)
-            if bool((new_cleared == cleared).all()):
-                converged = True
-                break
-            cleared = new_cleared
-        if not converged:
-            cleared = winner & tgt_empty                                   # safe fallback
-        if not bool(cleared.any()):
-            return torch.zeros(B, N, dtype=torch.bool, device=device)
+            cleared = _vacated(cleared)
+        at_fixpoint = (_vacated(cleared) == cleared).all(dim=1, keepdim=True)  # (B,1), stays on GPU
+        cleared = torch.where(at_fixpoint, cleared, winner & tgt_empty)   # safe fallback per batch row
         # Apply the simultaneous permutation. Each cleared mover relocates to ``tgt``;
         # its source cell is freed by whichever cleared mover follows it (or stays
         # empty). One-per-cell holds: distinct winners hold distinct targets.
         self.fy = torch.where(cleared, tgt // W, self.fy)
         self.fx = torch.where(cleared, tgt % W, self.fx)
-        if bool(cleared.any()):
-            self._rebuild_occ()
+        self._rebuild_occ()
         return cleared
 
     # ------------------------------------------------------------------
@@ -1013,8 +1051,8 @@ class LiquidWarEngine:
         accumulated damage is applied to targets; targets at <0 health rebase and
         defect to an attacker's team. Total fighter count is invariant."""
         B, N, H, W = self.B, self.N, self.H, self.W
-        if not bool(self._blocked.any()):
-            return
+        # (no .any() guards anywhere in here: each is a GPU->CPU sync per
+        # sub-step; at B=1 they cost more than the no-op kernels they skip)
         fy, fx = self.fy, self.fx
         ty = (fy + self._front_dy).clamp(0, H - 1)
         tx = (fx + self._front_dx).clamp(0, W - 1)
@@ -1026,8 +1064,6 @@ class LiquidWarEngine:
                                self.fteam)
         is_enemy = (tgt_slot >= 0) & (tgt_team != self.fteam)
         attack = self._blocked & is_enemy                             # (B,N) attackers
-        if not bool(attack.any()):
-            return
         # Accumulate DIRECTIONAL damage onto target slots. A defender hit while
         # facing AWAY (its back to the attacker — the attacker pushes the same
         # way the defender is moving) barely resists -> full ATTACK -> converts
@@ -1056,27 +1092,24 @@ class LiquidWarEngine:
         self.fhealth = self.fhealth - dmg
         # Conversion: any slot now <0 defects to a (lowest-slot-index) attacker's team.
         neg = self.fhealth < 0
-        if bool(neg.any()):
-            # which team converts this target: pick the lowest-index attacker on it.
-            BIG = N + 1
-            owner = torch.full((B, N), BIG, dtype=torch.long, device=self.device)
-            atk_slots = torch.arange(N, device=self.device).expand(B, N)
-            owner.scatter_reduce_(1, a_tgt,
-                                  torch.where(attack, atk_slots, torch.full_like(atk_slots, BIG)),
-                                  reduce='amin', include_self=True)
-            has_owner = owner < BIG
-            conv = neg & has_owner
-            if bool(conv.any()):
-                new_team = self.fteam.gather(1, owner.clamp(max=N - 1))
-                # rebase health up by NEW_HEALTH until >= 0
-                h = self.fhealth
-                steps = ((-h + NEW_HEALTH - 1) // NEW_HEALTH).clamp(min=0)
-                h = h + steps * NEW_HEALTH
-                self.fhealth = torch.where(conv, h, self.fhealth)
-                self.fteam = torch.where(conv, new_team, self.fteam)
-            # any still-negative-with-no-owner: clamp to 0 (stays own team, alive)
-            self.fhealth = self.fhealth.clamp(min=0)
-        self.fhealth = self.fhealth.clamp(max=MAX_HEALTH)
+        # which team converts this target: pick the lowest-index attacker on it.
+        BIG = N + 1
+        owner = torch.full((B, N), BIG, dtype=torch.long, device=self.device)
+        atk_slots = torch.arange(N, device=self.device).expand(B, N)
+        owner.scatter_reduce_(1, a_tgt,
+                              torch.where(attack, atk_slots, torch.full_like(atk_slots, BIG)),
+                              reduce='amin', include_self=True)
+        has_owner = owner < BIG
+        conv = neg & has_owner
+        new_team = self.fteam.gather(1, owner.clamp(max=N - 1))
+        # rebase health up by NEW_HEALTH until >= 0
+        h = self.fhealth
+        steps = ((-h + NEW_HEALTH - 1) // NEW_HEALTH).clamp(min=0)
+        h = h + steps * NEW_HEALTH
+        self.fhealth = torch.where(conv, h, self.fhealth)
+        self.fteam = torch.where(conv, new_team, self.fteam)
+        # any still-negative-with-no-owner: clamp to 0 (stays own team, alive)
+        self.fhealth = self.fhealth.clamp(min=0, max=MAX_HEALTH)
 
     # ------------------------------------------------------------------
     # State / Info / Observation (unchanged public surface)
