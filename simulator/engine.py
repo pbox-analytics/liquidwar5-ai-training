@@ -687,8 +687,15 @@ class LiquidWarEngine:
             movable = movable | (m_on.unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 24))
             theta = torch.atan2(-ry, -rx)                              # fighter angle about the cursor
             tang_n = (-rx / rn).unsqueeze(-1) * self._dy_t + (ry / rn).unsqueeze(-1) * self._dx_t
-            ang = torch.sin(m_f * theta + self.tick * 0.01)
-            score = score - 11.0 * (m_on.float() * ang).unsqueeze(-1) * tang_n
+            # Generalized angular mode — m nodal diameters, optionally SPIRALED
+            # by a radial pitch (``_node_k``: galaxy arms wind with radius) and
+            # ROTATED over time (``_node_w``: the pattern sweeps — sawblade
+            # teeth). Static Chladni star = k=0, w≈0. Weight 16 so the pattern
+            # survives the swirl churn of a fast-spinning team.
+            k_f = self._node_k.gather(1, self.fteam) if hasattr(self, "_node_k") else 0.0
+            w_f = self._node_w.gather(1, self.fteam) if hasattr(self, "_node_w") else 0.0
+            ang = torch.sin(m_f * theta + k_f * rn + w_f * self.tick)
+            score = score - 16.0 * (m_on.float() * ang).unsqueeze(-1) * tang_n
         if drill_fwd is not None:                                     # DRILL: pierce forward, concentrated
             # |_drill| encodes ADVANCE SPEED (drill mode): a small magnitude weakens
             # the forward bias so the spin/squeeze dominate -> the fast (high-spin)

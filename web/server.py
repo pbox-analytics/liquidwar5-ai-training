@@ -79,7 +79,9 @@ class GameSession:
         self.engine._fig8 = torch.zeros(1, teams, device=DEVICE)  # per-team figure-8 flag (Atom stance)
         self.engine._ring = torch.zeros(1, teams, device=DEVICE)  # per-team orbit radius (Doom's accretion disk)
         self.engine._node_l = torch.zeros(1, teams, device=DEVICE)  # Chladni radial wavelength (Pulse rings mode)
-        self.engine._node_m = torch.zeros(1, teams, device=DEVICE)  # Chladni angular petals (Pulse star mode)
+        self.engine._node_m = torch.zeros(1, teams, device=DEVICE)  # Chladni angular petals (Pulse star / Spin modes)
+        self.engine._node_k = torch.zeros(1, teams, device=DEVICE)  # angular-mode radial pitch (galaxy spiral arms)
+        self.engine._node_w = torch.zeros(1, teams, device=DEVICE)  # angular-mode rotation speed (sawblade sweep)
         self.engine.reset()
         self.policy: CursorPolicy | None = None
         self.ckpt_name = opponent
@@ -207,7 +209,8 @@ async def ws(sock: WebSocket) -> None:
     ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True, "reset": False,
                             "map": None, "spin": None, "stance": 0, "drill_mode": 0, "doom_level": 1,
                             "wall_orient": 0,   # 0 = horizontal bar, 1 = vertical bar (tap 4 to flip)
-                            "pulse_mode": 0}    # 0 wave / 1 cymatic rings / 2 cymatic star (tap 5 to cycle)
+                            "pulse_mode": 0,    # 0 wave / 1 cymatic rings / 2 cymatic star (tap 5 to cycle)
+                            "spin_mode": 0}     # 0 calm / 1 vortex / 2 frenzy (tap 2 to shift gear)
 
     async def receiver() -> None:
         try:
@@ -237,6 +240,10 @@ async def ws(sock: WebSocket) -> None:
                         ctrl["pulse_mode"] = (ctrl["pulse_mode"] + 1) % 3
                     elif s == 4:
                         ctrl["pulse_mode"] = 0
+                    if s == 1 and ctrl["stance"] == 1:    # re-tap Spin cycles vortex -> sawblade -> galaxy
+                        ctrl["spin_mode"] = (ctrl["spin_mode"] + 1) % 3
+                    elif s == 1:
+                        ctrl["spin_mode"] = 0
                     ctrl["stance"] = s
                 elif "dir" in msg:                 # keyboard (arrows/WASD)
                     ctrl["dir"] = msg["dir"]
@@ -265,27 +272,41 @@ async def ws(sock: WebSocket) -> None:
                 session.engine._map_choice = ctrl["map"]   # apply the picked map (None=random)
                 session.reset(); ctrl["reset"] = False; hold = 0; logged = False
                 _e = session.engine; _e._surge = None; _e._blackhole_pos = None                   # clear all stance knobs per game
-                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._node_l.zero_(); _e._node_m.zero_()
+                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_()
             elif session.done:
                 hold += 1
                 if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
                     session.engine._map_choice = ctrl["map"]   # keep the picked map across games
                     session.reset(); hold = 0; logged = False
                     _e = session.engine; _e._surge = None; _e._blackhole_pos = None
-                    _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._node_l.zero_(); _e._node_m.zero_()
+                    _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_()
             else:
                 if ctrl["dir"] and (ctrl["dir"][0] or ctrl["dir"][1]):
                     last_dir = ctrl["dir"]                  # heading the Drill/Wall point at
                 _e = session.engine
-                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._node_l.zero_(); _e._node_m.zero_()
+                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_()
                 _e._surge = None; _e._blackhole_pos = None
                 stance = ctrl["stance"]                     # 0 Swarm 1 Spin 2 Drill 3 Wall 4 Pulse
                 if stance == 0:                             # Swarm: loose, varied-radius orbits (electron cloud)
                     _e._spin[0, 0] = 0.5 * spin_sign
                     _e._burst[0, 0] = 0.15                  # slight loosen -> a diffuse orbiting cloud
-                elif stance == 1:                           # Spin: tighten in + whirl FAST -> a compact vortex
-                    _e._spin[0, 0] = 1.7 * spin_sign
-                    _e._burst[0, 0] = -0.4                  # pull tight so it spins fast (Q/E sets direction)
+                elif stance == 1:                           # Spin: 3 forms (tap 2): vortex -> sawblade -> galaxy
+                    sm = ctrl["spin_mode"]
+                    sgn = spin_sign if spin_sign != 0 else 1
+                    if sm == 0:                             # vortex: the classic compact fast spin
+                        _e._spin[0, 0] = 1.7 * spin_sign
+                        _e._burst[0, 0] = -0.4
+                    elif sm == 1:                           # sawblade: dense disc + 8 rotating teeth
+                        _e._spin[0, 0] = 1.6 * sgn
+                        _e._burst[0, 0] = -0.45             # packed disc body
+                        _e._node_m[0, 0] = 8.0              # 8 angular clusters = the teeth
+                        _e._node_w[0, 0] = 0.4 * sgn        # the tooth pattern SWEEPS with the spin
+                    else:                                   # galaxy: wide slow swirl with winding spiral arms
+                        _e._spin[0, 0] = 1.1 * sgn
+                        _e._burst[0, 0] = 0.35              # spread out -> a broad disc
+                        _e._node_m[0, 0] = 3.0              # 3 arms
+                        _e._node_k[0, 0] = 0.25 * sgn       # arms WIND with radius (logarithmic-spiral look)
+                        _e._node_w[0, 0] = -0.05 * sgn      # slow majestic pattern rotation
                 elif stance == 2:                           # Drill: 3 modes (slow/med/fast) — grind vs advance
                     m = ctrl["drill_mode"]                  # 0 slow / 1 med / 2 fast (tap 3 to rev)
                     DSPIN = (0.3, 0.7, 1.5); DSURGE = (1.0, 2.0, 4.0); DADV = (1.0, 0.62, 0.34)
@@ -316,6 +337,7 @@ async def ws(sock: WebSocket) -> None:
                     else:                                   # star: cymatic nodal-diameter mode — a 6-petal figure
                         _e._node_l[0, 0] = 18.0
                         _e._node_m[0, 0] = 6.0
+                        _e._node_w[0, 0] = 0.01             # barely-breathing pattern drift
                         s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = 2.0; _e._surge = s
                 elif stance == 5:                           # Doom: violent black-hole implosion
                     sgn = spin_sign if spin_sign != 0 else 1
@@ -325,7 +347,8 @@ async def ws(sock: WebSocket) -> None:
                     # dark centre), the swirl spins it, both growing with charge.
                     # The client's lensing/amber-disk shader sits in the hole.
                     _e._spin[0, 0] = (1.2, 1.8, 2.4)[lvl - 1] * sgn
-                    s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = 6.0; _e._surge = s  # tidal devastation
+                    # tidal surge scales with charge (was a flat 6x at every level)
+                    s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = (4.0, 5.0, 6.0)[lvl - 1]; _e._surge = s
                     _e._blackhole_pos = _e.cursor_pos[:, 0].float().clone()  # gravity well at YOUR cursor;
                     _e._blackhole_team = 0                                    # pull ∝ YOUR mass (real black hole):
                     _mass = float(_e.team_oh[0, 0].sum())                     # full army -> devastating well,
@@ -339,9 +362,15 @@ async def ws(sock: WebSocket) -> None:
                     _e._ring[0, 0] = 0.5 * (_r_in + (_r_in ** 2 + _mass / 3.14159) ** 0.5)
                     _frac = _mass / max(1.0, _e.fighters_per_team)
                     _e._blackhole_str = ctrl["doom_level"] * 32.0 * _frac ** 1.5  # super-linear in mass: gentler pull peels the loosely-bound periphery off the enemy, not the whole army (x1/x2/x3 charge, tap 6)
-                    _e._blackhole_range = float((_e.H ** 2 + _e.W ** 2) ** 0.5)  # FULL-MAP reach (the diagonal) — pulls the enemy from anywhere on the board
-                    _e._blackhole_horizon = max(20.0, 1.5 * (_mass / 3.14159) ** 0.5)  # event horizon ~ your blob radius (mass-scaled): enemy is DEVOURED as it contacts your mass, not just at the dead centre
-                    _e._blackhole_capture_rate = 0.18                       # fraction devoured per tick — peels SOME units off, leaves the rest a fight
+                    # FINITE reach (was the full map diagonal, which made Doom
+                    # inescapable -> an auto-win): ~2.2x the disk radius, so a
+                    # dispersed or kiting enemy escapes the pull and Doom is a
+                    # committed finisher, not a vacuum.
+                    _e._blackhole_range = max(70.0, 2.2 * float(_e._ring[0, 0]))
+                    # horizon ~ the disk's inner mass edge, not the whole blob
+                    # radius (1.5x blob swallowed anything within ~75 cells)
+                    _e._blackhole_horizon = max(14.0, 0.9 * (_mass / 3.14159) ** 0.5)
+                    _e._blackhole_capture_rate = 0.12                       # fraction devoured per tick (was 0.18)
                 elif stance == 6:                           # Maelstrom: fast wide orbiting shell (whirlpool)
                     sgn = spin_sign if spin_sign != 0 else 1
                     _e._spin[0, 0] = 2.0 * sgn              # whirl fast and wide around the cursor
@@ -363,7 +392,8 @@ async def ws(sock: WebSocket) -> None:
             st["mode"] = (("slow", "med", "fast")[ctrl["drill_mode"]] if ctrl["stance"] == 2
                           else f"{ctrl['doom_level']}x" if ctrl["stance"] == 5
                           else ("horiz", "vert")[ctrl["wall_orient"]] if ctrl["stance"] == 3
-                          else ("wave", "rings", "star")[ctrl["pulse_mode"]] if ctrl["stance"] == 4 else "")
+                          else ("wave", "rings", "star")[ctrl["pulse_mode"]] if ctrl["stance"] == 4
+                          else ("vortex", "sawblade", "galaxy")[ctrl["spin_mode"]] if ctrl["stance"] == 1 else "")
             st["spin_dir"] = spin_sign
             if session.done and not logged:
                 w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])

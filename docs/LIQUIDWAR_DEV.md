@@ -61,7 +61,7 @@ The AI policy drives the **same** knobs via `rl/policy.apply_stances`.
 | key | stance | feel | knobs |
 |---|---|---|---|
 | **1** | 🐝 Swarm | loose orbiting electron-cloud | `_spin 0.5`, `_burst 0.15` |
-| **2** | 🌀 Spin | tight fast vortex (Q/E = direction) | `_spin 1.7`, `_burst -0.4` |
+| **2** | 🌀 Spin | 3 forms, tap to cycle (Q/E = direction): **vortex** (tight fast spin), **sawblade** (dense disc + 8 rotating teeth — `_node_m 8`, `_node_w` sweeps the pattern), **galaxy** (wide slow swirl, 3 spiral arms — `_node_k` winds them with radius) | `_spin`, `_burst`; `_node_m/k/w` |
 | **3** | ➤ Drill | Ender's-Game piercing column that **corkscrews** — the lateral squeeze targets a traveling-sine centreline (the 2D projection of a rotating bit; twist follows Q/E); tap to rev **slow→med→fast** | `_drill` (aim×advance), `_spin`, `_surge` |
 | **4** | 🛡 Wall | DENSE shield column across the cursor (collapse 20 + burst −0.9 — solid, not a picket line); tap to flip horizontal/vertical | `_wall` (facing), `_burst` |
 | **5** | 💥 Pulse | 3 modes, tap to cycle: **wave** (traveling rings + `4×` crest damage), **rings** (cymatic standing rings — Chladni circular mode, `_node_l`), **star** (6-petal nodal-diameter figure, `_node_m`) | `_burst`/`_surge`; `_node_l`, `_node_m` |
@@ -107,7 +107,10 @@ with charge, so 3x *looks* like what it is.
 - **Counter:** strip its mass — Drill the dense core, or stay dispersed and convert
   its small perimeter. Since pull ∝ mass, every fighter you take off it *weakens* the
   well, so it unravels as you fight it; or kite beyond the reach. Net: a finisher for
-  a winning army, useless as a comeback button.
+  a winning army, useless as a comeback button. (Rebalanced 2026-06-10 — full-map
+  range made it inescapable, i.e. an auto-win: range is now ~2.2× the disk radius,
+  the devour horizon ~0.9× the mass radius (was 1.5×), capture 0.12/tick (was 0.18),
+  and the tidal surge scales 4/5/6× with charge instead of a flat 6×.)
 
 (Backlog of more slime-mold moves — Rally, Pheromone Tube, Split — in
 `docs/POTENTIAL_FEATURES.md`.)
