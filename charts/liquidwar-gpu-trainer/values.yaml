@@ -48,7 +48,9 @@ resources:
 config:
   # PPO / env hyperparameters (passed as rl.train CLI args).
   device: cuda
-  batchSize: 256          # the PRO 6000's 96 GB takes 4x the 5090-era batch
+  batchSize: 128          # 256 OOMed the 96 GB card: ppo_update materializes the
+                          # whole minibatch's egocentric views at once (a single
+                          # 28.7 GiB alloc in backward at 256). 128 peaks ~45 GB.
   teams: 2                # duels, like play
   height: 80
   width: 110
