@@ -14,15 +14,16 @@ image:
   # registries.yaml trusts (the in-cluster svc DNS x509-fails on kubelet pull;
   # same lesson as the cpu-worker chart).
   repository: pandoras-box.local:5000/pbox/liquidwar-gpu-trainer
-  tag: "0.7.1-amd64"
+  tag: "0.8.0-amd64"
   pullPolicy: IfNotPresent
 
 # Exactly one trainer (single shared policy; self-play). Do not scale UP.
-# 2026-06-06: re-enabled for liquidwar development. ComfyUI was switched off
-# cluster-wide (gpus.yaml comfyui.replicas 0 on every card), so the 5090
-# contention that forced the 2026-06-04 unload is gone — the scheduler now has
-# free amd64 GPUs to place the trainer on.
-replicaCount: 0
+# 2026-06-10: re-enabled on the PRO 6000 (comfyui-pbox-* scaled to 0 in
+# project-homer to free the card). 0.8.0 trains with --wells (real cross-team
+# Doom/Maelstrom, matching play) and --resume into a FIXED run dir on the NFS,
+# so pod restarts continue the run instead of starting over — the crash
+# fragility that killed earlier runs is gone.
+replicaCount: 1
 
 # Pin to pbox (pandoras-box): its PRO 6000 (96 GB) is now advertised to k8s
 # (nvidia-device-plugin affinity allowlist gained rtx_pro_6000) and the card is
@@ -47,14 +48,18 @@ resources:
 config:
   # PPO / env hyperparameters (passed as rl.train CLI args).
   device: cuda
-  batchSize: 64
-  teams: 4
+  batchSize: 256          # the PRO 6000's 96 GB takes 4x the 5090-era batch
+  teams: 2                # duels, like play
   height: 80
   width: 110
   fighters: 500
   steps: 128
   updates: 5000
   lr: "0.0003"
+  wells: true             # cast the REAL cross-team Doom/Maelstrom in training
+  # Fixed run dir (relative to /opt/training, lands on the NFS mount): first
+  # boot starts fresh in place, every restart after resumes policy+optimizer.
+  resume: "results/rl/wells-080"
   # Kafka metrics (optional). Empty = no publishing.
   bootstrapServers: ""
   schemaRegistry: ""

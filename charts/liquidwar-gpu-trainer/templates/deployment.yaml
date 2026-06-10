@@ -60,6 +60,13 @@ spec:
             - {{ .Values.config.updates | quote }}
             - "--lr"
             - {{ .Values.config.lr | quote }}
+            {{- if .Values.config.wells }}
+            - "--wells"
+            {{- end }}
+            {{- with .Values.config.resume }}
+            - "--resume"
+            - {{ . | quote }}
+            {{- end }}
             {{- with .Values.config.bootstrapServers }}
             - "--bootstrap-servers"
             - {{ . | quote }}
