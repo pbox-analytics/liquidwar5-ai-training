@@ -16,7 +16,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: liquidwar-gpu-trainer-build-0002
+  name: liquidwar-gpu-trainer-build-0003
   namespace: liquidwar
   labels:
     app.kubernetes.io/name: liquidwar-gpu-trainer
@@ -38,13 +38,13 @@ spec:
           image: alpine/git:latest
           env:
             - name: TRAINING_REF
-              value: "4ca9710"   # has rl/ + docker/Dockerfile.gpu-trainer
+              value: "8b4c528"   # CUDA-graph engine + --wells/--resume trainer + stance balance
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -eux
               cd /workspace
-              git clone https://github.com/pandora-wolf-meow/liquidwar5-ai-training.git .
+              git clone https://github.com/pbox-analytics/liquidwar5-ai-training.git .
               git checkout "$TRAINING_REF"
               ls -la rl/ docker/Dockerfile.gpu-trainer
           volumeMounts:
@@ -55,7 +55,7 @@ spec:
           args:
             - "--context=dir:///workspace"
             - "--dockerfile=docker/Dockerfile.gpu-trainer"
-            - "--destination=registry.homer-ai.svc.cluster.local:5000/pbox/liquidwar-gpu-trainer:0.1.0-amd64"
+            - "--destination=registry.homer-ai.svc.cluster.local:5000/pbox/liquidwar-gpu-trainer:0.8.0-amd64"
             - "--skip-tls-verify"
             - "--single-snapshot"
             - "--use-new-run"
