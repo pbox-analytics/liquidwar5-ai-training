@@ -83,6 +83,11 @@ class GameSession:
         self.engine._node_m = torch.zeros(1, teams, device=DEVICE)  # Chladni angular petals (Pulse star / Spin modes)
         self.engine._node_k = torch.zeros(1, teams, device=DEVICE)  # angular-mode radial pitch (galaxy spiral arms)
         self.engine._node_w = torch.zeros(1, teams, device=DEVICE)  # angular-mode rotation speed (sawblade sweep)
+        self.engine._surge = torch.ones(1, teams, device=DEVICE)  # per-team damage mult; IN-PLACE writes only (graph input)
+        self.engine._wells_enabled = True            # play casts real cross-team wells (slots in engine.reset)
+        # CUDA-graph capture/replay of the engine tick (the play loop is
+        # launch-overhead-bound at B=1). Kill switch: LW_CUDA_GRAPH=0.
+        self.engine._cuda_graph = os.environ.get("LW_CUDA_GRAPH", "1") != "0"
         self.engine.reset()
         self.policy: CursorPolicy | None = None
         self.ckpt_name = opponent
@@ -128,10 +133,12 @@ class GameSession:
                 # cursor (that read as "the cursor moves on its own").
                 dydx[0, 0, 0] = 0
                 dydx[0, 0, 1] = 0
-        # Re-cast the AI wells fresh each tick (the human's legacy knobs are
-        # set by the ws loop; these lists are the AI teams').
-        self.engine._blackhole_wells = []
-        self.engine._vortex_wells = []
+        # Re-cast the AI wells fresh each tick: zero the AI slots (1..) — the
+        # human's slot 0 was just written by the ws loop. All writes in-place
+        # (the slots are graph input buffers).
+        e = self.engine
+        e._doom_str[:, 1:] = 0; e._doom_horizon[:, 1:] = 0; e._doom_cap[:, 1:] = 0
+        e._vortex_str[:, 1:] = 0
         self._ai_doom = None
         if ai_stance is not None:                  # AI opponents (teams 1..) hold their own stances
             apply_stances(self.engine, ai_stance, dydx, team_start=1)
@@ -146,30 +153,30 @@ class GameSession:
         are cosmetic self-shapes and the human duels with superpowers the
         opponent lacks. ``_ai_doom`` feeds the client's hole shader."""
         e = self.engine
+        stances = ai_stance[0].tolist()
+        alive = e.team_alive[0].tolist()
         for t in range(1, e.T):
-            s = int(ai_stance[0, t])
-            if s not in (5, 6) or not bool(e.team_alive[0, t]):
+            s = stances[t]
+            if s not in (5, 6) or not alive[t]:
                 continue
             mass = float(e.team_oh[0, t].sum())
             frac = mass / max(1.0, e.fighters_per_team)
-            pos = e.cursor_pos[:, t].float().clone()
+            blob_r = (mass / 3.14159) ** 0.5
             if s == 5:
                 ring = 0.5 * (6.7 + (6.7 ** 2 + mass / 3.14159) ** 0.5)
-                e._blackhole_wells.append({
-                    "pos": pos, "team": t,
-                    "str": 32.0 * frac ** 1.5,
-                    "range": max(70.0, 2.2 * ring),
-                    "horizon": max(14.0, 0.9 * (mass / 3.14159) ** 0.5),
-                    "cap": 0.12})
+                e._doom_pos[0, t] = e.cursor_pos[0, t].float()
+                e._doom_str[0, t] = 32.0 * frac ** 1.5
+                e._doom_range[0, t] = max(70.0, 2.2 * ring)
+                e._doom_horizon[0, t] = max(14.0, 0.9 * blob_r)
+                e._doom_cap[0, t] = 0.12
                 if self._ai_doom is None:
                     self._ai_doom = [t, *e.cursor_pos[0, t].tolist()]
             else:
-                e._vortex_wells.append({
-                    "pos": pos, "team": t,
-                    "str": 30.0 * frac ** 0.5,
-                    "range": max(70.0, 2.0 * (mass / 3.14159) ** 0.5),
-                    "sign": 1.0,
-                    "rad": 0.30})
+                e._vortex_pos[0, t] = e.cursor_pos[0, t].float()
+                e._vortex_str[0, t] = 22.0 * frac ** 0.5
+                e._vortex_range[0, t] = max(60.0, 1.5 * blob_r)
+                e._vortex_sign[0, t] = 1.0
+                e._vortex_rad[0, t] = 0.30
 
     def reset(self) -> None:
         self.engine.reset()
@@ -318,21 +325,26 @@ async def ws(sock: WebSocket) -> None:
             if ctrl["reset"]:
                 session.engine._map_choice = ctrl["map"]   # apply the picked map (None=random)
                 session.reset(); ctrl["reset"] = False; hold = 0; logged = False
-                _e = session.engine; _e._surge = None; _e._blackhole_pos = None; _e._vortex_pos = None   # clear all stance knobs per game
+                _e = session.engine                                # clear all stance knobs per game
+                _e._surge.fill_(1.0)   # neutral damage mult (in-place: graph input)
+                _e._doom_str.zero_(); _e._doom_horizon.zero_(); _e._doom_cap.zero_(); _e._vortex_str.zero_()
                 _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_()
             elif session.done:
                 hold += 1
                 if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
                     session.engine._map_choice = ctrl["map"]   # keep the picked map across games
                     session.reset(); hold = 0; logged = False
-                    _e = session.engine; _e._surge = None; _e._blackhole_pos = None; _e._vortex_pos = None
+                    _e = session.engine
+                    _e._surge.fill_(1.0)   # neutral damage mult (in-place: graph input)
+                    _e._doom_str.zero_(); _e._doom_horizon.zero_(); _e._doom_cap.zero_(); _e._vortex_str.zero_()
                     _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_()
             else:
                 if ctrl["dir"] and (ctrl["dir"][0] or ctrl["dir"][1]):
                     last_dir = ctrl["dir"]                  # heading the Drill/Wall point at
                 _e = session.engine
                 _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_()
-                _e._surge = None; _e._blackhole_pos = None; _e._vortex_pos = None
+                _e._surge.fill_(1.0)   # neutral damage mult (in-place: graph input)
+                _e._doom_str.zero_(); _e._doom_horizon.zero_(); _e._doom_cap.zero_(); _e._vortex_str.zero_()
                 stance = ctrl["stance"]                     # 0 Swarm 1 Spin 2 Drill 3 Wall 4 Pulse
                 if stance == 0:                             # Swarm: loose, varied-radius orbits (electron cloud)
                     _e._spin[0, 0] = 0.5 * spin_sign
@@ -362,7 +374,7 @@ async def ws(sock: WebSocket) -> None:
                     _e._drill[0, 0, 0] = float(last_dir[0]) * DADV[m]  # |drill| = advance speed
                     _e._drill[0, 0, 1] = float(last_dir[1]) * DADV[m]
                     if DSURGE[m] > 1.0:                     # the spinning front grinds (chews) harder
-                        s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = DSURGE[m]; _e._surge = s
+                        _e._surge[0, 0] = DSURGE[m]
                 elif stance == 3:                           # Wall: a concentrated bar, horizontal or vertical (tap 4 to flip)
                     if ctrl["wall_orient"] == 0:            # horizontal bar = vertical facing
                         _e._wall[0, 0, 0] = 1.0; _e._wall[0, 0, 1] = 0.0
@@ -374,18 +386,16 @@ async def ws(sock: WebSocket) -> None:
                     if pm == 0:                             # wave: traveling rings + damage crests (the original)
                         ring = math.sin(n * 0.33)
                         _e._burst[0, 0] = 1.0 if ring > 0 else -0.6
-                        s = torch.ones(1, _e.T, device=_e.device)
                         if ring > 0.5:
-                            s[0, 0] = 4.0                   # surge on each ring's crest
-                        _e._surge = s
+                            _e._surge[0, 0] = 4.0           # surge on each ring's crest
                     elif pm == 1:                           # rings: cymatic STANDING rings (Chladni circular mode)
                         _e._node_l[0, 0] = 14.0             # nodal wavelength — concentric resonance bands
-                        s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = 2.0; _e._surge = s
+                        _e._surge[0, 0] = 2.0
                     else:                                   # star: cymatic nodal-diameter mode — a 6-petal figure
                         _e._node_l[0, 0] = 18.0
                         _e._node_m[0, 0] = 6.0
                         _e._node_w[0, 0] = 0.01             # barely-breathing pattern drift
-                        s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = 2.0; _e._surge = s
+                        _e._surge[0, 0] = 2.0
                 elif stance == 5:                           # Doom: violent black-hole implosion
                     sgn = spin_sign if spin_sign != 0 else 1
                     lvl = ctrl["doom_level"]                # 1x/2x/3x charge (tap 6)
@@ -395,10 +405,9 @@ async def ws(sock: WebSocket) -> None:
                     # The client's lensing/amber-disk shader sits in the hole.
                     _e._spin[0, 0] = (1.2, 1.8, 2.4)[lvl - 1] * sgn
                     # tidal surge scales with charge (was a flat 6x at every level)
-                    s = torch.ones(1, _e.T, device=_e.device); s[0, 0] = (4.0, 5.0, 6.0)[lvl - 1]; _e._surge = s
-                    _e._blackhole_pos = _e.cursor_pos[:, 0].float().clone()  # gravity well at YOUR cursor;
-                    _e._blackhole_team = 0                                    # pull ∝ YOUR mass (real black hole):
-                    _mass = float(_e.team_oh[0, 0].sum())                     # full army -> devastating well,
+                    _e._surge[0, 0] = (4.0, 5.0, 6.0)[lvl - 1]
+                    _e._doom_pos[0, 0] = _e.cursor_pos[0, 0].float()         # gravity well at YOUR cursor;
+                    _mass = float(_e.team_oh[0, 0].sum())                     # pull ∝ YOUR mass (real black hole)
                     # Disk target radius is MASS-SCALED: fighters pack one-per-cell,
                     # so a fixed small radius just saturates back into a solid blob.
                     # Solve pi*(r_out^2 - r_in^2) = mass for the band centred on the
@@ -406,19 +415,20 @@ async def ws(sock: WebSocket) -> None:
                     # matching the client's 4.4+2.3*lvl graphic) -> the hole stays
                     # open and the whole army becomes the spinning accretion disk.
                     _r_in = (6.7, 9.0, 11.3)[lvl - 1]
-                    _e._ring[0, 0] = 0.5 * (_r_in + (_r_in ** 2 + _mass / 3.14159) ** 0.5)
+                    _ring_val = 0.5 * (_r_in + (_r_in ** 2 + _mass / 3.14159) ** 0.5)
+                    _e._ring[0, 0] = _ring_val
                     _e._ring_ecc[0, 0] = 1.0                # full oblate -> the edge-on Gargantua blade
                     _frac = _mass / max(1.0, _e.fighters_per_team)
-                    _e._blackhole_str = ctrl["doom_level"] * 32.0 * _frac ** 1.5  # super-linear in mass: gentler pull peels the loosely-bound periphery off the enemy, not the whole army (x1/x2/x3 charge, tap 6)
+                    _e._doom_str[0, 0] = lvl * 32.0 * _frac ** 1.5  # super-linear in mass: gentler pull peels the loosely-bound periphery off the enemy, not the whole army (x1/x2/x3 charge, tap 6)
                     # FINITE reach (was the full map diagonal, which made Doom
                     # inescapable -> an auto-win): ~2.2x the disk radius, so a
                     # dispersed or kiting enemy escapes the pull and Doom is a
                     # committed finisher, not a vacuum.
-                    _e._blackhole_range = max(70.0, 2.2 * float(_e._ring[0, 0]))
+                    _e._doom_range[0, 0] = max(70.0, 2.2 * _ring_val)
                     # horizon ~ the disk's inner mass edge, not the whole blob
                     # radius (1.5x blob swallowed anything within ~75 cells)
-                    _e._blackhole_horizon = max(14.0, 0.9 * (_mass / 3.14159) ** 0.5)
-                    _e._blackhole_capture_rate = 0.12                       # fraction devoured per tick (was 0.18)
+                    _e._doom_horizon[0, 0] = max(14.0, 0.9 * (_mass / 3.14159) ** 0.5)
+                    _e._doom_cap[0, 0] = 0.12                               # fraction devoured per tick (was 0.18)
                 elif stance == 6:                           # Maelstrom: a whirlpool CURRENT (cross-team vorticity)
                     sgn = spin_sign if spin_sign != 0 else 1
                     mm = ctrl["mael_mode"]                  # 0 undertow / 1 ejecta / 2 shear (tap 7)
@@ -435,22 +445,19 @@ async def ws(sock: WebSocket) -> None:
                     # scales with YOUR mass — a whittled army stirs a weak eddy.
                     _mass = float(_e.team_oh[0, 0].sum())
                     _frac = _mass / max(1.0, _e.fighters_per_team)
-                    _e._vortex_pos = _e.cursor_pos[:, 0].float().clone()
-                    _e._vortex_team = 0
-                    _e._vortex_sign = float(sgn)            # current direction follows Q/E
-                    # Server-tunable dial (cf. _blackhole_str). 30 at full mass
-                    # entrains: ~80 deg swept / 2 s, outward escape roughly
-                    # halved (measured vs the enemy gradient); <~16 is inert.
-                    # sqrt(frac), not Doom's frac^1.5: a half-strength army
-                    # still stirs a usable eddy (~21), a quarter one doesn't.
-                    _e._vortex_str = 30.0 * _frac ** 0.5
-                    # reach ~2x the packed-blob radius (the burst shell spreads
-                    # well past it), so the current spans the whole storm
-                    _e._vortex_range = max(70.0, 2.0 * (_mass / 3.14159) ** 0.5)
+                    _e._vortex_pos[0, 0] = _e.cursor_pos[0, 0].float()
+                    _e._vortex_sign[0, 0] = float(sgn)      # current direction follows Q/E
+                    # Server-tunable dial (cf. _doom_str). Nerfed from 30/2.0x
+                    # after play: with the flat falloff it yanked units off the
+                    # enemy blob from across the arena. Now 22 + 1.5x-blob reach
+                    # + a SQUARED falloff in the engine = a local current you
+                    # can see coming and skirt, still lethal to wade through.
+                    _e._vortex_str[0, 0] = 22.0 * _frac ** 0.5
+                    _e._vortex_range[0, 0] = max(60.0, 1.5 * (_mass / 3.14159) ** 0.5)
                     # radial component per mode: undertow spirals them inward to
                     # the rim, ejecta flings entrained enemies outward (scatters
                     # a formation off its cursor), shear is pure deflection
-                    _e._vortex_rad = (0.30, -0.45, 0.0)[mm]
+                    _e._vortex_rad[0, 0] = (0.30, -0.45, 0.0)[mm]
                 elif stance == 7:                           # Atom: figure-8 electron orbitals
                     sgn = spin_sign if spin_sign != 0 else 1
                     _e._spin[0, 0] = 1.8 * sgn              # orbital speed

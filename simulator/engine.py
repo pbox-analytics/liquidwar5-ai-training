@@ -124,9 +124,35 @@ class LiquidWarEngine:
         self.cursor_pos = torch.zeros(B, T, 2, dtype=torch.long, device=dev)
         self.cursor_val = torch.full((B, T), CURSOR_SEED, dtype=torch.int32, device=dev)
         self.team_alive = torch.ones(B, T, dtype=torch.bool, device=dev)
-        self.gradient = torch.full((B, T, H, W), GRAD_INIT, dtype=torch.int32, device=dev)
+        # float32, not int32: the relax sweeps now run as pooling ops (float
+        # only). Every value is an exact integer <= GRAD_INIT + 14 < 2^24, so
+        # float32 represents the field exactly — bit-identical distances.
+        self.gradient = torch.full((B, T, H, W), GRAD_INIT, dtype=torch.float32, device=dev)
         self._wall_grad = self.walls.unsqueeze(1).expand(B, T, H, W)
 
+        # Cross-team well SLOTS, one per team (Doom gravity / Maelstrom current),
+        # written IN-PLACE by the play server each tick. str==0 / horizon==0 means
+        # "off" — the loops always run T fixed iterations so the kernel sequence
+        # is static (CUDA-graph-safe); a zeroed slot is a no-op force. Gated by
+        # ``_wells_enabled`` (play only) so training skips the loops entirely.
+        self._doom_pos = torch.zeros(B, T, 2, device=dev)
+        self._doom_str = torch.zeros(B, T, device=dev)
+        self._doom_range = torch.ones(B, T, device=dev)
+        self._doom_horizon = torch.zeros(B, T, device=dev)
+        self._doom_cap = torch.zeros(B, T, device=dev)
+        self._vortex_pos = torch.zeros(B, T, 2, device=dev)
+        self._vortex_str = torch.zeros(B, T, device=dev)
+        self._vortex_range = torch.ones(B, T, device=dev)
+        self._vortex_sign = torch.ones(B, T, device=dev)
+        self._vortex_rad = torch.zeros(B, T, device=dev)
+        # In-graph animation clock: python ``self.tick`` is invisible to a replayed
+        # graph (it would bake in as a constant), so every tensor expression that
+        # animates over time reads this GPU scalar instead, incremented inside the
+        # captured step.
+        self._tick_f = torch.zeros((), device=dev)
+        self._graph = None              # captured CUDA graph (per game; reset() invalidates)
+        self._fixed_sweeps = None       # gradient sweeps/tick under graph capture (else converge+early-out)
+        self._persist = {}              # cross-tick state buffers (graph replay round-trip)
         self._place_teams()
         self._rebuild_occ()
         self._rebuild_views()
@@ -335,7 +361,11 @@ class LiquidWarEngine:
         # presence: scatter 1 into [b, fteam, cell]
         oh = torch.zeros(B, T, H * W, device=self.device)
         b_ar = self._barangeN.expand(B, N)
-        oh[b_ar.reshape(-1), self.fteam.reshape(-1), flat.reshape(-1)] = 1.0
+        # GPU scalar, not python 1.0: a python-scalar RHS in an index-put makes
+        # an unpinned CPU->CUDA copy, which CUDA graph capture forbids
+        if not hasattr(self, "_one_f"):
+            self._one_f = torch.ones((), device=self.device)
+        oh[b_ar.reshape(-1), self.fteam.reshape(-1), flat.reshape(-1)] = self._one_f
         self.team_oh = oh.view(B, T, H, W)
         health = torch.zeros(B, H * W, device=self.device)
         health[b_ar.reshape(-1), flat.reshape(-1)] = self.fhealth.float().reshape(-1).clamp(min=0)
@@ -353,7 +383,18 @@ class LiquidWarEngine:
     def step(self, cursor_actions: torch.Tensor | None = None):
         """Advance one tick. Returns ``(state, done, info)``."""
         if cursor_actions is not None:
-            self._move_cursors(cursor_actions)
+            self._move_cursors(cursor_actions)        # eager (python fast path at B=1)
+        if not self._graph_step():
+            self._step_body()
+        self.tick += 1
+        teams_left = self.team_alive.sum(dim=1)
+        done = teams_left <= 1
+        return self._get_state(), done, self._get_info()
+
+    def _step_body(self) -> None:
+        """Everything between cursor input and state readout — the capturable
+        region: NO GPU->CPU syncs, NO data-dependent python control flow, and
+        every cross-tick tensor folded back into a stable buffer at the end."""
         self._seed_and_spread_gradient()
         # Units advance multiple cells/tick (scaled to grid width, matching the
         # cursor) so the army keeps pace instead of crawling behind a fast cursor.
@@ -367,48 +408,79 @@ class LiquidWarEngine:
         # BLACK HOLE event-horizon capture (Doom): enemy fighters that reach a well's
         # core DEFECT to the well's team — the hole devours what its gravity pulls in, so
         # the strip steals the enemy army instead of just relocating it onto you. Convert,
-        # not delete (count invariant). Only active while a team holds Doom.
-        for w in self._doom_wells():
-            bh_team, R_h, cap_rate = w["team"], w["horizon"], w["cap"]
-            dy = w["pos"][:, 0:1] - self.fy.float(); dx = w["pos"][:, 1:2] - self.fx.float()
-            grab = ((dy * dy + dx * dx) <= R_h * R_h) & (self.fteam != bh_team)
-            grab = grab & (torch.rand(self.B, self.N, device=self.device) < cap_rate)  # devour GRADUALLY — a drain you can fight, not an instant gulp
-            self.fteam = torch.where(grab, torch.full_like(self.fteam, bh_team), self.fteam)
-            self.fhealth = torch.where(grab, torch.full_like(self.fhealth, NEW_HEALTH), self.fhealth)
+        # not delete (count invariant). horizon==0 (slot off) grabs nothing.
+        if getattr(self, "_wells_enabled", False):
+            for t in range(self.T):
+                R_h = self._doom_horizon[:, t:t + 1]
+                dy = self._doom_pos[:, t, 0:1] - self.fy.float()
+                dx = self._doom_pos[:, t, 1:2] - self.fx.float()
+                grab = ((dy * dy + dx * dx) <= R_h * R_h) & (self.fteam != t)
+                grab = grab & (torch.rand(self.B, self.N, device=self.device)
+                               < self._doom_cap[:, t:t + 1])  # devour GRADUALLY — a drain you can fight
+                self.fteam = torch.where(grab, torch.full_like(self.fteam, t), self.fteam)
+                self.fhealth = torch.where(grab, torch.full_like(self.fhealth, NEW_HEALTH), self.fhealth)
         self._rebuild_views()
-        self.tick += 1
-        teams_left = self.team_alive.sum(dim=1)
-        done = teams_left <= 1
-        return self._get_state(), done, self._get_info()
+        # Fold every cross-tick tensor back into its persistent buffer: a replayed
+        # graph reads its INPUTS from fixed addresses, so state produced at pool
+        # addresses must round-trip into those input buffers each tick (eager mode
+        # pays 6 tiny copies for the same code path).
+        for name in ("fy", "fx", "fteam", "fhealth", "fvy", "fvx"):
+            cur = getattr(self, name)
+            buf = self._persist.get(name) if hasattr(self, "_persist") else None
+            if buf is None or buf.data_ptr() == cur.data_ptr():
+                if not hasattr(self, "_persist"):
+                    self._persist = {}
+                self._persist[name] = cur
+            else:
+                buf.copy_(cur)
+                setattr(self, name, buf)
+        self._tick_f += 1
 
-    def _doom_wells(self) -> list[dict]:
-        """Active Doom gravity wells: the per-team list ``_blackhole_wells``
-        (dicts with pos/team/str/range/horizon/cap — the play server casts one
-        per AI team holding Doom) plus the legacy single-well ``_blackhole_*``
-        knobs (the human's), so every wielder gets the same physics."""
-        wells = list(getattr(self, "_blackhole_wells", ()) or ())
-        pos = getattr(self, "_blackhole_pos", None)
-        if pos is not None:
-            wells.append({"pos": pos, "team": getattr(self, "_blackhole_team", 0),
-                          "str": getattr(self, "_blackhole_str", 20.0),
-                          "range": getattr(self, "_blackhole_range", 55.0),
-                          "horizon": getattr(self, "_blackhole_horizon", 16.0),
-                          "cap": getattr(self, "_blackhole_capture_rate", 0.04)})
-        return wells
-
-    def _whirl_wells(self) -> list[dict]:
-        """Active Maelstrom currents: the per-team list ``_vortex_wells`` (dicts
-        with pos/team/str/range/sign/rad) plus the legacy single ``_vortex_*``
-        knobs — same shape as :meth:`_doom_wells`."""
-        wells = list(getattr(self, "_vortex_wells", ()) or ())
-        pos = getattr(self, "_vortex_pos", None)
-        if pos is not None:
-            wells.append({"pos": pos, "team": getattr(self, "_vortex_team", 0),
-                          "str": getattr(self, "_vortex_str", 14.0),
-                          "range": getattr(self, "_vortex_range", 60.0),
-                          "sign": getattr(self, "_vortex_sign", 1.0),
-                          "rad": getattr(self, "_vortex_rad", 0.3)})
-        return wells
+    def _graph_step(self) -> bool:
+        """CUDA-graph fast path: capture ``_step_body`` once per game, then replay
+        it as a single unit — at B=1 the tick is launch-overhead-bound (~4k tiny
+        kernels), so replay roughly halves the tick. Captures only after the cold
+        flood has converged (fixed in-graph sweep count tracks a warm field).
+        Returns True when it ran the tick."""
+        if not (getattr(self, "_cuda_graph", False) and self.B == 1
+                and self.tick >= 70 and self.gradient.is_cuda):
+            return False
+        if self._graph is None:
+            # A failed capture corrupts python state: the body's attribute
+            # rebindings run while the recorded kernels never execute, leaving
+            # self.fy etc. pointing at garbage pool tensors. Snapshot the
+            # bindings so the except path can restore a consistent engine.
+            saved = {k: getattr(self, k, None)
+                     for k in ("fy", "fx", "fteam", "fhealth", "fvy", "fvx",
+                               "team_oh", "health", "team_alive", "active_fighters")}
+            saved_persist = dict(self._persist)
+            try:
+                # in-graph gradient mode: fixed sweeps (a warm field needs
+                # cursor_speed + margin), no convergence sync
+                self._fixed_sweeps = getattr(self, "cursor_speed", max(1, round(self.W / 96))) + 4
+                s = torch.cuda.Stream()
+                s.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(s):
+                    for _ in range(2):                       # warmup (allocator/cublas state)
+                        self._step_body()
+                torch.cuda.current_stream().wait_stream(s)
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g):
+                    self._step_body()
+                self._graph = g
+            except Exception as exc:                          # any capture failure -> eager forever
+                print(f"[engine] CUDA graph capture failed ({exc!r}); staying eager", flush=True)
+                torch.cuda.synchronize()
+                for k, v in saved.items():
+                    if v is not None:
+                        setattr(self, k, v)
+                self._persist = saved_persist
+                self._cuda_graph = False
+                self._fixed_sweeps = None
+                self._step_body()
+                return True
+        self._graph.replay()
+        return True
 
     def _move_cursors(self, actions: torch.Tensor) -> None:
         # Cursor speed scales with grid width so the on-screen feel stays constant
@@ -452,7 +524,7 @@ class LiquidWarEngine:
             decay = 10 if (self.tick % 13 == 0) else 0
             dec = torch.as_tensor([[c if m else decay for m, c in zip(moved_l, cost_l)]],
                                   dtype=torch.int32, device=self.device)
-            self.cursor_val = (self.cursor_val - dec).clamp(min=1)
+            self.cursor_val.sub_(dec).clamp_(min=1)   # in-place: graph input buffer
             return
         b = torch.arange(self.B, device=self.device)
         adir = actions.long().clamp(-1, 1)
@@ -493,7 +565,7 @@ class LiquidWarEngine:
         # cursor leaves stale low values and the army smears.
         decay = 10 if (self.tick % 13 == 0) else 0
         dec = torch.where(moved, cost, torch.full_like(cost, decay))
-        self.cursor_val = (self.cursor_val - dec).clamp(min=1)
+        self.cursor_val.sub_(dec).clamp_(min=1)   # in-place: graph input buffer
 
     def _seed_and_spread_gradient(self) -> None:
         """Overwrite each cursor cell with its seed, then relax the persistent
@@ -503,7 +575,7 @@ class LiquidWarEngine:
         for t in range(T):
             cy = self.cursor_pos[:, t, 0]
             cx = self.cursor_pos[:, t, 1]
-            self.gradient[b, t, cy, cx] = self.cursor_val[:, t]
+            self.gradient[b, t, cy, cx] = self.cursor_val[:, t].float()
         g = self.gradient
         wall = self._wall_grad
         # Complete flood-fill: relax to CONVERGENCE (a full geodesic distance
@@ -523,19 +595,41 @@ class LiquidWarEngine:
         # game start; the field persists, so the convergence accumulates tick to
         # tick. Default None -> full convergence each tick (training MDP unchanged).
         cap = getattr(self, "_grad_cap", None)
-        for _ in range(min(2 * (H + W), cap) if cap else 2 * (H + W)):
-            prev = g.clone()
-            p = torch.nn.functional.pad(g, (1, 1, 1, 1), value=GRAD_INIT)
-            for dy in (-1, 0, 1):
-                for dx in (-1, 0, 1):
-                    if dy == 0 and dx == 0:
-                        continue
-                    cost = 14 if (dy != 0 and dx != 0) else 10   # octile: diagonal ~ sqrt(2)x orthogonal -> ROUND iso-distance rings (a round blob), not Chebyshev squares
-                    shifted = p[:, :, 1 + dy:1 + dy + H, 1 + dx:1 + dx + W]
-                    torch.minimum(g, (shifted + cost).clamp(max=GRAD_INIT), out=g)
-            g[wall] = GRAD_INIT
-            if torch.equal(g, prev):
+        # Each sweep used to be 8 shifted-slice minimums (~26 kernels) + a
+        # clone + a torch.equal GPU->CPU sync. Now 3 pooling ops: a separable
+        # cross-min (1x3 then 3x1 of THAT would over-reach; two independent
+        # pools whose min is the 4-orthogonal+center min) for the +10 step and
+        # one full 3x3 min for the +14 diagonal step. Including the center /
+        # orthogonal cells in a candidate set is harmless: min(g, g+10) = g,
+        # and the orthogonal cells' +14 candidates can never beat their own
+        # +10 ones — the relaxed field is identical to the 8-slice version.
+        # The convergence check (one sync + clone) runs every 4th sweep only.
+        mp = torch.nn.functional.max_pool2d
+        gv = g.view(B * T, 1, H, W)
+        # Under CUDA-graph capture/replay (``_fixed_sweeps`` set) the sweep
+        # count is FIXED — no clone, no torch.equal sync, no data-dependent
+        # break (none are capturable). A warm field only needs to track the
+        # cursor's <= cursor_speed cells/tick; capture begins after the cold
+        # flood has converged eagerly.
+        fixed = getattr(self, "_fixed_sweeps", None)
+        n_sweeps = fixed or (min(2 * (H + W), cap) if cap else 2 * (H + W))
+        wallv = wall.reshape(B * T, 1, H, W)
+        prev = None
+        for i in range(n_sweeps):
+            if fixed is None and i % 4 == 0:
+                prev = gv.clone()
+            ng = -gv
+            orth = torch.maximum(mp(ng, (1, 3), stride=1, padding=(0, 1)),
+                                 mp(ng, (3, 1), stride=1, padding=(1, 0)))
+            diag = mp(ng, 3, stride=1, padding=1)
+            gv = torch.minimum(gv, torch.minimum((10 - orth), (14 - diag)).clamp(max=GRAD_INIT))
+            gv = torch.where(wallv, torch.full_like(gv, GRAD_INIT), gv)
+            if fixed is None and i % 4 == 3 and torch.equal(gv, prev):
                 break
+        # copy_ back, never rebind: ``self.gradient`` is a graph INPUT read at a
+        # fixed address by the replayed kernels — the relaxed field must land in
+        # that same storage or replays would relax a frozen snapshot forever.
+        self.gradient.copy_(gv.view(B, T, H, W))
 
     # ------------------------------------------------------------------
     # Fighter movement — gradient descent + priority-claim collision
@@ -601,7 +695,7 @@ class LiquidWarEngine:
         cpos = self.cursor_pos[b, self.fteam]                          # (B,N,2) own-cursor pos
         ry = (cpos[..., 0] - self.fy).float(); rx = (cpos[..., 1] - self.fx).float()
         rn = (ry * ry + rx * rx).sqrt().clamp(min=1.0)                 # cells from the cursor
-        phase = rn * 0.25 - self.tick * 0.15                           # crest travels outward
+        phase = rn * 0.25 - self._tick_f * 0.15                           # crest travels outward
         # Broad crest (sin>0 => ~half the phase) so the wave band is wide enough
         # to read as a rolling EDGE RIPPLE: boundary fighters (the only ones with
         # empty cells to extend into) bulge outward as the crest sweeps past, then
@@ -744,7 +838,7 @@ class LiquidWarEngine:
             l_f = nodel.gather(1, self.fteam)                          # (B,N) wavelength or 0
             l_on = l_f > 0
             movable = movable | (l_on.unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 24))
-            rad = torch.sin(rn * 6.2832 / l_f.clamp(min=1.0) - self.tick * 0.02)
+            rad = torch.sin(rn * 6.2832 / l_f.clamp(min=1.0) - self._tick_f * 0.02)
             # outward (rad>0) must out-weigh the gradient's 10-14/step inward
             # pull or the standing rings never separate (same as _ring above)
             rw_n = torch.where(rad > 0, 26.0, 15.0) * l_on.float()
@@ -763,7 +857,7 @@ class LiquidWarEngine:
             # survives the swirl churn of a fast-spinning team.
             k_f = self._node_k.gather(1, self.fteam) if hasattr(self, "_node_k") else 0.0
             w_f = self._node_w.gather(1, self.fteam) if hasattr(self, "_node_w") else 0.0
-            ang = torch.sin(m_f * theta + k_f * rn + w_f * self.tick)
+            ang = torch.sin(m_f * theta + k_f * rn + w_f * self._tick_f)
             score = score - 16.0 * (m_on.float() * ang).unsqueeze(-1) * tang_n
         if drill_fwd is not None:                                     # DRILL: pierce forward, concentrated
             # |_drill| encodes ADVANCE SPEED (drill mode): a small magnitude weakens
@@ -785,7 +879,7 @@ class LiquidWarEngine:
             # omega 0.12/tick (~1s per twist at 60Hz): fighters can only step ~1
             # cell/tick laterally, so a faster wave sweeps by before the column
             # can track it and the helix never materializes.
-            helix = 4.5 * torch.sin(along * 0.35 - tw * self.tick * 0.12)
+            helix = 4.5 * torch.sin(along * 0.35 - tw * self._tick_f * 0.12)
             score = score + 16.0 * torch.sign(lateral - helix).unsqueeze(-1) * perp_dot
         if wdd is not None:                                           # WALL: collapse onto the cursor's perp line
             fwd_comp = (-ry) * wdd[..., 0] + (-rx) * wdd[..., 1]      # how far ahead/behind that line
@@ -796,21 +890,22 @@ class LiquidWarEngine:
             score = score + 20.0 * torch.sign(fwd_comp).unsqueeze(-1) * c_face
         # BLACK HOLE (Doom): a cross-team gravity well at a team's cursor that drags
         # the OTHER teams' fighters in (overriding their own gradient) so they get pulled
-        # into the singularity and devastated. One well per Doom-holding team — the
-        # human's via the legacy ``_blackhole_*`` knobs, AI opponents' via
-        # ``_blackhole_wells`` (see :meth:`_doom_wells`); set by the play server.
-        for w in self._doom_wells():
-            bh_team, bh_str, bh_R = w["team"], w["str"], w["range"]    # FINITE reach -> distant forces escape
-            bhy = w["pos"][:, 0:1] - self.fy                            # (B,N) toward the well
-            bhx = w["pos"][:, 1:2] - self.fx
-            bhn = (bhy * bhy + bhx * bhx).sqrt().clamp(min=1.0)
-            falloff = (bh_R * bh_R) / (bhn * bhn + bh_R * bh_R)         # 1 at the well, ->0 far (no map-wide vacuum)
-            is_en = (self.fteam != bh_team)                            # (B,N) not the well's own team
-            in_range = bhn < bh_R * 2.5                                # only nearby enemies get caught/dragged
-            pull = (bh_str * falloff * is_en.float()).unsqueeze(-1)    # (B,N,1) distance-weighted
-            bh_align = (bhy / bhn).unsqueeze(-1) * self._dy_t + (bhx / bhn).unsqueeze(-1) * self._dx_t
-            score = score - pull * bh_align                            # near enemies sucked in; distant ones free
-            movable = movable | ((is_en & in_range).unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 40))
+        # into the singularity and devastated. One SLOT per team (play server writes
+        # them in-place; str==0 = off = no-op force, fixed kernel sequence).
+        if getattr(self, "_wells_enabled", False):
+            for t in range(self.T):
+                bh_str = self._doom_str[:, t:t + 1]                    # (B,1) broadcasts over N
+                bh_R = self._doom_range[:, t:t + 1]                    # FINITE reach -> distant forces escape
+                bhy = self._doom_pos[:, t, 0:1] - self.fy              # (B,N) toward the well
+                bhx = self._doom_pos[:, t, 1:2] - self.fx
+                bhn = (bhy * bhy + bhx * bhx).sqrt().clamp(min=1.0)
+                falloff = (bh_R * bh_R) / (bhn * bhn + bh_R * bh_R)    # 1 at the well, ->0 far (no map-wide vacuum)
+                is_en = (self.fteam != t)                              # (B,N) not the well's own team
+                in_range = (bhn < bh_R * 2.5) & (bh_str > 0)           # only nearby enemies get caught/dragged
+                pull = (bh_str * falloff * is_en.float()).unsqueeze(-1)  # (B,N,1) distance-weighted
+                bh_align = (bhy / bhn).unsqueeze(-1) * self._dy_t + (bhx / bhn).unsqueeze(-1) * self._dx_t
+                score = score - pull * bh_align                        # near enemies sucked in; distant ones free
+                movable = movable | ((is_en & in_range).unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 40))
         # WHIRLPOOL (Maelstrom): a cross-team CURRENT at one team's cursor — the
         # rotational counterpart of Doom's gravity well. Where Doom drags enemies
         # RADIALLY into a singularity and captures them, the maelstrom is
@@ -819,26 +914,32 @@ class LiquidWarEngine:
         # component ``_vortex_rad`` (>0 undertow: spiral them inward / <0 ejecta:
         # fling them outward / 0 pure shear). No capture — entrained enemies
         # circle through the owner's spinning rim and are ground down by ordinary
-        # adjacency combat. Disruption and area-denial, not a devour. One current
-        # per Maelstrom-holding team (see :meth:`_whirl_wells`).
-        for w in self._whirl_wells():
-            wp_team, wp_str = w["team"], w["str"]
-            wp_R = w["range"]                                          # FINITE reach, like Doom's
-            wp_sgn = w["sign"]                                         # current direction (owner's Q/E)
-            wp_rad = w["rad"]
-            wy = w["pos"][:, 0:1] - self.fy                            # (B,N) toward the well
-            wx = w["pos"][:, 1:2] - self.fx
-            wn = (wy * wy + wx * wx).sqrt().clamp(min=1.0)
-            wfall = (wp_R * wp_R) / (wn * wn + wp_R * wp_R)            # 1 at the well, ->0 far
-            w_en = (self.fteam != wp_team)                             # only the OTHER teams feel the current
-            w_in = wn < wp_R * 2.5
-            drag = (wp_str * wfall * w_en.float()).unsqueeze(-1)       # (B,N,1) distance-weighted
-            # tangential alignment matches the own-team swirl convention (615),
-            # so +1 entrains enemies in the same sense as the owner's spin
-            w_tan = wp_sgn * ((-wx / wn).unsqueeze(-1) * self._dy_t + (wy / wn).unsqueeze(-1) * self._dx_t)
-            w_radial = (wy / wn).unsqueeze(-1) * self._dy_t + (wx / wn).unsqueeze(-1) * self._dx_t
-            score = score - drag * (w_tan + wp_rad * w_radial)         # bend their flow; their gradient still fights
-            movable = movable | ((w_en & w_in).unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 40))
+        # adjacency combat. Disruption and area-denial, not a devour. One SLOT per
+        # team, same scheme as the Doom slots above.
+        if getattr(self, "_wells_enabled", False):
+            for t in range(self.T):
+                wp_str = self._vortex_str[:, t:t + 1]                  # (B,1) broadcasts over N
+                wp_R = self._vortex_range[:, t:t + 1]                  # FINITE reach, like Doom's
+                wp_sgn = self._vortex_sign[:, t:t + 1]                 # current direction (owner's Q/E)
+                wp_rad = self._vortex_rad[:, t:t + 1]
+                wy = self._vortex_pos[:, t, 0:1] - self.fy             # (B,N) toward the well
+                wx = self._vortex_pos[:, t, 1:2] - self.fx
+                wn = (wy * wy + wx * wx).sqrt().clamp(min=1.0)
+                wfall = (wp_R * wp_R) / (wn * wn + wp_R * wp_R)        # 1 at the well, ->0 far
+                # SQUARED falloff (Doom keeps the flat one): the current is a
+                # LOCAL hazard — at d=R it's 25% strength, not 50% — so it bends
+                # nearby flow instead of vacuuming units off the enemy blob from
+                # across the arena (which read as an unfightable tractor beam)
+                wfall = wfall * wfall
+                w_en = (self.fteam != t)                               # only the OTHER teams feel the current
+                w_in = (wn < wp_R * 2.5) & (wp_str > 0)
+                drag = (wp_str * wfall * w_en.float()).unsqueeze(-1)   # (B,N,1) distance-weighted
+                # tangential alignment matches the own-team swirl convention, so
+                # +1 entrains enemies in the same sense as the owner's spin
+                w_tan = wp_sgn.unsqueeze(-1) * ((-wx / wn).unsqueeze(-1) * self._dy_t + (wy / wn).unsqueeze(-1) * self._dx_t)
+                w_radial = (wy / wn).unsqueeze(-1) * self._dy_t + (wx / wn).unsqueeze(-1) * self._dx_t
+                score = score - drag * (w_tan + wp_rad.unsqueeze(-1) * w_radial)  # bend their flow; their gradient still fights
+                movable = movable | ((w_en & w_in).unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 40))
         order = torch.where(movable, score, score.new_full((), float(BIGG))).argsort(dim=-1)
         ncell_s = ncell.gather(-1, order)                              # cells, best-first
         down_s = movable.gather(-1, order)
