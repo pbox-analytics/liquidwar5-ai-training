@@ -31,13 +31,77 @@ MOVE_DYDX = torch.tensor(
 )
 NUM_MOVES = 9
 EGO_CHANNELS = 6
-#: Tactical stances the policy can hold (mirror the play server / engine knobs):
-#: 0 Swarm / 1 Spin / 2 Drill / 3 Wall / 4 Pulse / 5 Doom / 6 Maelstrom / 7 Atom.
-#: The stance head picks one per team per tick; ``apply_stances`` maps it onto the
-#: engine's per-team knobs. (With ``rl.train --wells`` the cross-team Doom well /
-#: Maelstrom current fire in training too — same dials as play; without it they
-#: are self-shapes only.)
-NUM_STANCES = 8
+#: FLAT ACTION SPACE: every (stance, re-tap mode) pair the play server offers a
+#: human is its own action, so the policy can both USE and FACE all of them —
+#: comet, lattice/nova/tide, binary, Doom charge levels, wall orientation,
+#: drill gears, maelstrom modes. ``apply_stances`` maps a flat action onto the
+#: engine's per-team knobs with the SAME dials as the play server's key
+#: handling, and (when ``engine._wells_enabled``) casts the real cross-team
+#: Doom well / Maelstrom current.
+ACTIONS = (
+    ("Swarm", "cloud"), ("Swarm", "comet"),
+    ("Spin", "vortex"), ("Spin", "sawblade"), ("Spin", "galaxy"),
+    ("Drill", "slow"), ("Drill", "med"), ("Drill", "fast"),
+    ("Wall", "horiz"), ("Wall", "vert"),
+    ("Pulse", "wave"), ("Pulse", "rings"), ("Pulse", "star"),
+    ("Pulse", "lattice"), ("Pulse", "nova"), ("Pulse", "tide"),
+    ("Doom", "1x"), ("Doom", "2x"), ("Doom", "3x"),
+    ("Maelstrom", "undertow"), ("Maelstrom", "ejecta"), ("Maelstrom", "shear"),
+    ("Atom", "orbital"), ("Atom", "binary"),
+    ("Classic", ""),
+)
+NUM_STANCES = len(ACTIONS)        # 25 — the name survives because it sizes the head
+#: Legacy 8-stance checkpoints: base stance id -> the flat action it meant
+#: (Swarm cloud, Spin vortex, Drill med, Wall horiz, Pulse wave, Doom 1x,
+#: Maelstrom undertow, Atom orbital). The play server maps old policies through
+#: this so they keep working until a flat-action best.pt beats them.
+LEGACY_ACTION = (0, 2, 6, 8, 10, 16, 19, 22)
+
+# Per-action knob tables (rows = ACTIONS). Columns follow the play server's
+# stance blocks exactly; 0 = knob off. Tick-phased modes (Pulse wave / nova)
+# are patched at apply time.
+#          spin burst surge fig8 nl  nm   nk    nw    nv   adv  wy  wx tide rin  ecc dLvl mRad mOn
+_KNOBS = [
+    (0.5,  0.15, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Swarm cloud
+    (0.35, -0.25, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.85, 0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Swarm comet
+    (1.7,  -0.4, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Spin vortex
+    (1.6,  -0.45, 1.0, 0, 0,  8,  0.0,  0.4,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Spin sawblade
+    (1.1,  0.35, 1.0, 0, 0,  3,  0.25, -0.05, 0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Spin galaxy
+    (0.3,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  1.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Drill slow
+    (0.7,  0.0,  2.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.62, 0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Drill med
+    (1.5,  0.0,  4.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.34, 0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Drill fast
+    (0.0,  -0.9, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  1, 0, 0, 0.0,  0, 0, 0.0,  0),  # Wall horiz
+    (0.0,  -0.9, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 1, 0, 0.0,  0, 0, 0.0,  0),  # Wall vert
+    (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Pulse wave (tick-phased)
+    (0.0,  0.0,  3.0, 0, 12, 0,  0.0,  0.0,  0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Pulse rings
+    (0.0,  0.0,  3.0, 0, 16, 6,  0.0,  0.05, 0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Pulse star
+    (0.0,  0.0,  2.5, 0, 16, 8,  0.15, 0.03, 0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Pulse lattice
+    (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Pulse nova (tick-phased)
+    (0.0,  0.0,  2.5, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 1, 0.0,  0, 0, 0.0,  0),  # Pulse tide
+    (1.2,  0.0,  4.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 6.7,  1, 1, 0.0,  0),  # Doom 1x
+    (1.8,  0.0,  5.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 9.0,  1, 2, 0.0,  0),  # Doom 2x
+    (2.4,  0.0,  6.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 11.3, 1, 3, 0.0,  0),  # Doom 3x
+    (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.30, 1),  # Maelstrom undertow
+    (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, -0.45, 1), # Maelstrom ejecta
+    (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  1),  # Maelstrom shear
+    (1.8,  0.4,  1.0, 1, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Atom orbital
+    (1.6,  0.45, 1.0, 2, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Atom binary
+    (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Classic
+]
+_KNOB_NAMES = ("spin", "burst", "surge", "fig8", "nl", "nm", "nk", "nw", "nv",
+               "adv", "wy", "wx", "tide", "rin", "ecc", "dlvl", "mrad", "mon")
+_TABS_CACHE = {}
+
+
+def _tables(dev):
+    """Per-device cache of the (25,) knob lookup tensors."""
+    tabs = _TABS_CACHE.get(dev)
+    if tabs is None:
+        cols = list(zip(*_KNOBS))
+        tabs = {name: torch.tensor(col, dtype=torch.float32, device=dev)
+                for name, col in zip(_KNOB_NAMES, cols)}
+        _TABS_CACHE[dev] = tabs
+    return tabs
 
 
 def build_egocentric_obs(obs, num_teams):
@@ -168,80 +232,88 @@ def act(policy, obs, num_teams, team_alive=None, deterministic=False):
     return dydx, stance, logprob, value, entropy
 
 
-def apply_stances(engine, stance, dydx, team_start=0):
-    """Set the engine's per-team knobs from each team's chosen stance — the exact
-    Swarm/Spin/Drill/Wall/Pulse mapping the play server applies from player keys,
-    but vectorized over all (B, T) teams. Call right before ``engine.step``.
+def apply_stances(engine, action, dydx, team_start=0):
+    """Set the engine's per-team knobs from each team's chosen FLAT action —
+    the exact stance+mode mapping the play server applies from player keys,
+    vectorized over all (B, T) teams via the per-action knob tables. Also
+    casts the cross-team Doom/Maelstrom wells (``engine._wells_enabled``).
+    Call right before ``engine.step``.
 
     :param engine: the :class:`LiquidWarEngine` being driven.
-    :param stance: ``(B, T)`` long in 0..4 (the chosen stance per team).
-    :param dydx: ``(B, T, 2)`` the cursor move, reused as the Drill/Wall aim.
-    :param team_start: only write knobs for teams ``>= team_start`` (so the play
-        server can stance the AI opponents 1.. while leaving the human's team 0
-        knobs, already set from keys, intact). Default 0 = all teams (training).
+    :param action: ``(B, T)`` long in 0..NUM_STANCES-1 (flat stance-mode id).
+    :param dydx: ``(B, T, 2)`` the cursor move, reused as the Drill / Wall /
+        comet / tide aim.
+    :param team_start: only write knobs for teams ``>= team_start`` (so the
+        play server can stance the AI opponents 1.. while leaving the human's
+        team-0 knobs, already set from keys, intact). 0 = all teams (training).
     """
-    B, T = stance.shape
-    dev = stance.device
-    spin = torch.zeros(B, T, device=dev)
-    burst = torch.zeros(B, T, device=dev)
-    drill = torch.zeros(B, T, 2, device=dev)
-    wall = torch.zeros(B, T, 2, device=dev)
-    surge = torch.ones(B, T, device=dev)
-    fig8 = torch.zeros(B, T, device=dev)
+    B, T = action.shape
+    dev = action.device
+    tabs = _tables(dev)
+    a = action.clamp(0, NUM_STANCES - 1)
+    g = lambda name: tabs[name][a]                                # (B,T) lookups
+    spin, burst, surge, fig8 = g("spin"), g("burst"), g("surge"), g("fig8")
+    node_l, node_m, node_k, node_w, node_v = g("nl"), g("nm"), g("nk"), g("nw"), g("nv")
+    ring_rin, ring_ecc = g("rin"), g("ecc")
+    doom_lvl, mael_rad, mael_on = g("dlvl"), g("mrad"), g("mon")
     aim = dydx.float()
-    sw, sp, dr, wl, pu = (stance == 0), (stance == 1), (stance == 2), (stance == 3), (stance == 4)
-    spin = torch.where(sw, torch.full_like(spin, 0.5), spin)      # Swarm: loose orbit
-    burst = torch.where(sw, torch.full_like(burst, 0.15), burst)
-    spin = torch.where(sp, torch.full_like(spin, 1.7), spin)      # Spin: tight fast vortex
-    burst = torch.where(sp, torch.full_like(burst, -0.4), burst)
-    spin = torch.where(dr, torch.full_like(spin, 0.5), spin)      # Drill: pierce (medium mode)
-    drill = torch.where(dr.unsqueeze(-1), aim * 0.62, drill)
-    surge = torch.where(dr, torch.full_like(surge, 2.0), surge)
-    wall = torch.where(wl.unsqueeze(-1), aim, wall)              # Wall: shield across the aim
-    ring = float(torch.sin(torch.as_tensor(float(engine.tick) * 0.33)))   # Pulse: concentric rings
-    burst = torch.where(pu, torch.full_like(burst, 1.0 if ring > 0 else -0.6), burst)
-    surge = torch.where(pu, torch.full_like(surge, 4.0 if ring > 0.5 else 1.0), surge)
-    dm, ml, at = (stance == 5), (stance == 6), (stance == 7)
-    spin = torch.where(dm, torch.full_like(spin, 0.25), spin)     # Doom: violent implosion +
-    burst = torch.where(dm, torch.full_like(burst, -6.5), burst)  #   devastation (self-shape; the cross-team
-    surge = torch.where(dm, torch.full_like(surge, 6.0), surge)   #   well also fires when _wells_enabled)
-    spin = torch.where(ml, torch.full_like(spin, 2.0), spin)      # Maelstrom: fast wide orbiting shell
-    burst = torch.where(ml, torch.full_like(burst, 0.6), burst)   #   (current also fires when _wells_enabled)
-    spin = torch.where(at, torch.full_like(spin, 1.8), spin)      # Atom: figure-8 orbitals (engine _fig8)
-    burst = torch.where(at, torch.full_like(burst, 0.4), burst)
-    fig8 = torch.where(at, torch.full_like(fig8, 1.0), fig8)
+    drill = aim * g("adv").unsqueeze(-1)                          # comet + drill gears
+    wall = torch.stack([g("wy"), g("wx")], dim=-1)
+    tide = aim * g("tide").unsqueeze(-1)
+    # tick-phased modes (same clocks as the play server's stance blocks)
+    tick = int(engine.tick)
+    wv = (a == 10)                                                # Pulse wave: traveling rings
+    ringph = float(torch.sin(torch.as_tensor(tick * 0.33)))
+    burst = torch.where(wv, torch.full_like(burst, 1.0 if ringph > 0 else -0.6), burst)
+    surge = torch.where(wv, torch.full_like(surge, 4.0 if ringph > 0.5 else 1.0), surge)
+    nv_m = (a == 14)                                              # Pulse nova: charge -> detonate
+    if tick % 144 < 108:
+        burst = torch.where(nv_m, torch.full_like(burst, -0.9), burst)
+        spin = torch.where(nv_m, torch.full_like(spin, 0.6), spin)
+    else:
+        burst = torch.where(nv_m, torch.full_like(burst, 1.0), burst)
+        surge = torch.where(nv_m, torch.full_like(surge, 5.0), surge)
+    # mass-scaled pieces: Doom's accretion-disk radius + both wells' dials
+    af = engine.active_fighters.float()                           # (B,T) live mass
+    frac = (af / max(1.0, engine.fighters_per_team)).clamp(0.0, 1.0)
+    blob_r = (af / 3.14159).sqrt()
+    ring = torch.where(ring_rin > 0,
+                       0.5 * (ring_rin + (ring_rin ** 2 + af / 3.14159).sqrt()),
+                       torch.zeros_like(ring_rin))
     if team_start <= 0:                                          # training: drive all teams
         engine._spin, engine._burst, engine._drill, engine._wall, engine._surge = spin, burst, drill, wall, surge
         engine._fig8 = fig8
-        if getattr(engine, "_wells_enabled", False):
-            # TRAINING WELLS (rl.train --wells): a team holding Doom (5) or
-            # Maelstrom (6) casts the REAL cross-team gravity well / whirlpool
-            # current at its cursor — the same mass-scaled dials as play (Doom
-            # 1x charge, Maelstrom undertow). Without this the stance head
-            # learns Doom/Maelstrom as mere body-shapes and is miscalibrated
-            # for play, where they are weapons. Fully vectorized over (B, T);
-            # all writes in-place into the engine's well slots.
-            af = engine.active_fighters.float()                  # (B,T) live mass
-            frac = (af / max(1.0, engine.fighters_per_team)).clamp(0.0, 1.0)
-            blob_r = (af / 3.14159).sqrt()
-            dm_f, ml_f = dm.float(), ml.float()
-            engine._doom_pos.copy_(engine.cursor_pos.float())
-            engine._doom_str.copy_(32.0 * frac ** 1.5 * dm_f)
-            engine._doom_range.copy_((2.2 * 0.5 * (6.7 + (6.7 ** 2 + af / 3.14159).sqrt())).clamp(min=70.0))
-            engine._doom_horizon.copy_((0.9 * blob_r).clamp(min=6.7) * dm_f)
-            engine._doom_cap.copy_(0.12 * frac.sqrt() * dm_f)
-            engine._vortex_pos.copy_(engine.cursor_pos.float())
-            engine._vortex_str.copy_(22.0 * frac.sqrt() * ml_f)
-            engine._vortex_range.copy_((1.5 * blob_r).clamp(min=60.0))
-            engine._vortex_rad.copy_(torch.full_like(frac, 0.30))
+        engine._node_l, engine._node_m, engine._node_k = node_l, node_m, node_k
+        engine._node_w, engine._node_v = node_w, node_v
+        engine._tide = tide
+        engine._ring, engine._ring_ecc = ring, ring_ecc
     else:                                                        # play: ONLY the AI opponents 1..; keep team 0 (human)
         if engine._surge is None:
             engine._surge = torch.ones(B, T, device=dev)
-        if getattr(engine, "_fig8", None) is None:
-            engine._fig8 = torch.zeros(B, T, device=dev)
-        engine._spin[:, team_start:] = spin[:, team_start:]
-        engine._burst[:, team_start:] = burst[:, team_start:]
-        engine._drill[:, team_start:] = drill[:, team_start:]
-        engine._wall[:, team_start:] = wall[:, team_start:]
-        engine._surge[:, team_start:] = surge[:, team_start:]
-        engine._fig8[:, team_start:] = fig8[:, team_start:]
+        ts = team_start
+        for name, val in (("_spin", spin), ("_burst", burst), ("_surge", surge),
+                          ("_fig8", fig8), ("_node_l", node_l), ("_node_m", node_m),
+                          ("_node_k", node_k), ("_node_w", node_w), ("_node_v", node_v),
+                          ("_ring", ring), ("_ring_ecc", ring_ecc)):
+            getattr(engine, name)[:, ts:] = val[:, ts:]
+        engine._drill[:, ts:] = drill[:, ts:]
+        engine._wall[:, ts:] = wall[:, ts:]
+        engine._tide[:, ts:] = tide[:, ts:]
+    if getattr(engine, "_wells_enabled", False):
+        # REAL cross-team wells, mass-scaled like the play server's key
+        # handling (Doom charge level from the action; Maelstrom mode sets the
+        # radial component). In-place slot writes; slices respect team_start so
+        # the play server's human slot 0 is never touched.
+        sl = slice(max(0, team_start), None)
+        cpos = engine.cursor_pos.float()
+        d_on = (doom_lvl > 0).float()
+        engine._doom_pos[:, sl] = cpos[:, sl]
+        engine._doom_str[:, sl] = (doom_lvl * 32.0 * frac ** 1.5)[:, sl]
+        engine._doom_range[:, sl] = (2.2 * ring).clamp(min=70.0)[:, sl]
+        engine._doom_horizon[:, sl] = ((0.9 * blob_r).clamp(min=6.7) * d_on)[:, sl]
+        engine._doom_cap[:, sl] = (0.12 * frac.sqrt() * d_on)[:, sl]
+        engine._vortex_pos[:, sl] = cpos[:, sl]
+        engine._vortex_str[:, sl] = (22.0 * frac.sqrt() * mael_on)[:, sl]
+        engine._vortex_range[:, sl] = (1.5 * blob_r).clamp(min=60.0)[:, sl]
+        engine._vortex_sign[:, sl] = 1.0
+        engine._vortex_rad[:, sl] = mael_rad[:, sl]

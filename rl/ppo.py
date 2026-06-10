@@ -74,6 +74,12 @@ def collect_rollout(engine, policy, steps, device):
             engine._drill = torch.where(anchored.unsqueeze(-1), torch.zeros_like(engine._drill), engine._drill)
             engine._wall = torch.where(anchored.unsqueeze(-1), torch.zeros_like(engine._wall), engine._wall)
             engine._fig8 = torch.where(anchored, torch.zeros_like(engine._fig8), engine._fig8)
+            for k in ("_node_l", "_node_m", "_node_k", "_node_w", "_node_v", "_ring", "_ring_ecc"):
+                setattr(engine, k, torch.where(anchored, torch.zeros_like(getattr(engine, k)), getattr(engine, k)))
+            engine._tide = torch.where(anchored.unsqueeze(-1), torch.zeros_like(engine._tide), engine._tide)
+            if getattr(engine, "_wells_enabled", False):       # anchored teams cast no wells
+                for k in ("_doom_str", "_doom_horizon", "_doom_cap", "_vortex_str"):
+                    getattr(engine, k).mul_((~anchored).float())
         _, done, info = engine.step(dydx)
 
         share = _team_share(engine)

@@ -295,7 +295,7 @@ function frame() {                                     // 60fps interpolated ren
   // aren't holding your own (it draws one hole; yours wins the slot).
   const aiDoom = !doomOn && curSt.ai_doom;
   const holeOn = doomOn || !!aiDoom;
-  doomLvl = doomOn ? (parseInt(curSt.mode) || 1) : 1;
+  doomLvl = doomOn ? (parseInt(curSt.mode) || 1) : (aiDoom ? (aiDoom[3] || 1) : 1);
   const dt = Math.min(0.1, (performance.now() - lastFrameT) / 1000 || 0.016);
   lastFrameT = performance.now();
   // time-based ramp (frame-rate independent): ~1.5s to full menace, fast collapse

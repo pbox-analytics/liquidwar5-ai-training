@@ -36,7 +36,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from rl.eval import _heuristic_dydx
-from rl.policy import CursorPolicy, act, apply_stances
+from rl.policy import LEGACY_ACTION, CursorPolicy, act, apply_stances
 from simulator.engine import LiquidWarEngine, GRADIENT_INF, MAP_NAMES
 
 CKPT_DIR = os.environ.get("LW_CKPT_DIR", "/opt/training/results")  # NFS mount
@@ -53,11 +53,16 @@ def _latest_checkpoint() -> str | None:
     return max(cands, key=os.path.getmtime) if cands else None
 
 
-def _load_policy(path: str) -> CursorPolicy:
-    policy = CursorPolicy().to(DEVICE)
-    policy.load_state_dict(torch.load(path, map_location=DEVICE, weights_only=True))
+def _load_policy(path: str) -> tuple[CursorPolicy, int]:
+    """Load a checkpoint, sizing the stance head from the weights — legacy
+    8-stance policies keep working (their actions are mapped through
+    ``LEGACY_ACTION`` to the flat stance-mode space)."""
+    sd = torch.load(path, map_location=DEVICE, weights_only=True)
+    n_act = sd["stance_head.2.weight"].shape[0]
+    policy = CursorPolicy(num_stances=n_act).to(DEVICE)
+    policy.load_state_dict(sd)
     policy.eval()
-    return policy
+    return policy, n_act
 
 
 class GameSession:
@@ -96,8 +101,11 @@ class GameSession:
         if opponent not in ("heuristic", "random"):
             path = _latest_checkpoint() if opponent == "latest" else opponent
             if path:
-                self.policy = _load_policy(path)
+                self.policy, n_act = _load_policy(path)
                 self.ckpt_name = Path(path).name
+                # legacy 8-stance checkpoint -> flat-action translation table
+                self._legacy = (torch.tensor(LEGACY_ACTION, device=DEVICE)
+                                if n_act == len(LEGACY_ACTION) else None)
 
     @property
     def done(self) -> bool:
@@ -113,6 +121,8 @@ class GameSession:
         obs = self.engine.get_observation()
         dydx, stance, _, _, _ = act(self.policy, obs, self.engine.T,
                                     self.engine.team_alive, deterministic=True)
+        if getattr(self, "_legacy", None) is not None:    # old 8-stance policy.pt
+            stance = self._legacy[stance]
         return dydx, stance
 
     @torch.no_grad()
@@ -144,53 +154,32 @@ class GameSession:
                 # cursor (that read as "the cursor moves on its own").
                 dydx[0, 0, 0] = 0
                 dydx[0, 0, 1] = 0
-        # Re-cast the AI wells fresh each tick: zero the AI slots (1..) — the
-        # human's slot 0 was just written by the ws loop. All writes in-place
-        # (the slots are graph input buffers).
-        e = self.engine
-        e._doom_str[:, 1:] = 0; e._doom_horizon[:, 1:] = 0; e._doom_cap[:, 1:] = 0
-        e._vortex_str[:, 1:] = 0
+        # apply_stances (flat actions) writes BOTH the AI knobs and the AI
+        # well slots [:, 1:] each tick — the human's slot 0, written by the ws
+        # loop, is never touched. Here we only extract the HUD markers.
         self._ai_doom = None
         self._ai_mael = None
         if ai_stance is not None:                  # AI opponents (teams 1..) hold their own stances
             apply_stances(self.engine, ai_stance, dydx, team_start=1)
-            self._cast_ai_wells(ai_stance)
+            self._ai_fx_markers(ai_stance)
         self.engine.step(dydx)
 
-    def _cast_ai_wells(self, ai_stance: torch.Tensor) -> None:
-        """Cross-team PARITY for the AI: an opponent holding Doom (5) or
-        Maelstrom (6) casts the same gravity well / whirlpool current at ITS
-        cursor that the human gets — identical mass-scaled dials (Doom at 1x
-        charge, Maelstrom undertow). Without this the AI's two weapon stances
-        are cosmetic self-shapes and the human duels with superpowers the
-        opponent lacks. ``_ai_doom`` feeds the client's hole shader."""
+    def _ai_fx_markers(self, ai_stance: torch.Tensor) -> None:
+        """HUD markers for the client's shaders: the first AI team holding a
+        Doom action (16-18, charge level encoded) feeds the black-hole shader,
+        the first holding Maelstrom (19-21) feeds the whirlpool. The wells
+        themselves are cast by ``apply_stances``."""
         e = self.engine
-        stances = ai_stance[0].tolist()
+        acts = ai_stance[0].tolist()
         alive = e.team_alive[0].tolist()
         for t in range(1, e.T):
-            s = stances[t]
-            if s not in (5, 6) or not alive[t]:
+            a = acts[t]
+            if not alive[t]:
                 continue
-            mass = float(e.team_oh[0, t].sum())
-            frac = mass / max(1.0, e.fighters_per_team)
-            blob_r = (mass / 3.14159) ** 0.5
-            if s == 5:
-                ring = 0.5 * (6.7 + (6.7 ** 2 + mass / 3.14159) ** 0.5)
-                e._doom_pos[0, t] = e.cursor_pos[0, t].float()
-                e._doom_str[0, t] = 32.0 * frac ** 1.5
-                e._doom_range[0, t] = max(70.0, 2.2 * ring)
-                e._doom_horizon[0, t] = max(6.7, 0.9 * blob_r)   # shrinks with the army (no 14-cell floor)
-                e._doom_cap[0, t] = 0.12 * frac ** 0.5           # devour dies with the disk
-                if self._ai_doom is None:
-                    self._ai_doom = [t, *e.cursor_pos[0, t].tolist()]
-            else:
-                e._vortex_pos[0, t] = e.cursor_pos[0, t].float()
-                e._vortex_str[0, t] = 22.0 * frac ** 0.5
-                e._vortex_range[0, t] = max(60.0, 1.5 * blob_r)
-                e._vortex_sign[0, t] = 1.0
-                e._vortex_rad[0, t] = 0.30
-                if self._ai_mael is None:
-                    self._ai_mael = [t, *e.cursor_pos[0, t].tolist()]
+            if 16 <= a <= 18 and self._ai_doom is None:
+                self._ai_doom = [t, *e.cursor_pos[0, t].tolist(), a - 15]
+            elif 19 <= a <= 21 and self._ai_mael is None:
+                self._ai_mael = [t, *e.cursor_pos[0, t].tolist()]
 
     def reset(self) -> None:
         self.engine.reset()
@@ -256,7 +245,7 @@ class GameSession:
             "pn": int(pidx.numel()),
             "cursors": e.cursor_pos[0].tolist(),
             "alive": e.team_alive[0].tolist(),
-            "ai_doom": getattr(self, "_ai_doom", None),   # [team, y, x] while an AI holds Doom
+            "ai_doom": getattr(self, "_ai_doom", None),   # [team, y, x, lvl] while an AI holds Doom
             "ai_mael": getattr(self, "_ai_mael", None),   # [team, y, x] while an AI holds Maelstrom (whirl shader)
 
             "done": self.done,
