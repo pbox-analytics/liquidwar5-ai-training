@@ -34,8 +34,9 @@ EGO_CHANNELS = 6
 #: Tactical stances the policy can hold (mirror the play server / engine knobs):
 #: 0 Swarm / 1 Spin / 2 Drill / 3 Wall / 4 Pulse / 5 Doom / 6 Maelstrom / 7 Atom.
 #: The stance head picks one per team per tick; ``apply_stances`` maps it onto the
-#: engine's per-team knobs. (Doom in training is self-collapse only — the cross-team
-#: gravity well is a play-server-only effect.)
+#: engine's per-team knobs. (With ``rl.train --wells`` the cross-team Doom well /
+#: Maelstrom current fire in training too — same dials as play; without it they
+#: are self-shapes only.)
 NUM_STANCES = 8
 
 
@@ -202,16 +203,37 @@ def apply_stances(engine, stance, dydx, team_start=0):
     surge = torch.where(pu, torch.full_like(surge, 4.0 if ring > 0.5 else 1.0), surge)
     dm, ml, at = (stance == 5), (stance == 6), (stance == 7)
     spin = torch.where(dm, torch.full_like(spin, 0.25), spin)     # Doom: violent implosion +
-    burst = torch.where(dm, torch.full_like(burst, -6.5), burst)  #   devastation (self-collapse only here;
-    surge = torch.where(dm, torch.full_like(surge, 6.0), surge)   #   the cross-team well is play-only)
+    burst = torch.where(dm, torch.full_like(burst, -6.5), burst)  #   devastation (self-shape; the cross-team
+    surge = torch.where(dm, torch.full_like(surge, 6.0), surge)   #   well also fires when _wells_enabled)
     spin = torch.where(ml, torch.full_like(spin, 2.0), spin)      # Maelstrom: fast wide orbiting shell
-    burst = torch.where(ml, torch.full_like(burst, 0.6), burst)   #   (the cross-team whirlpool current is play-only)
+    burst = torch.where(ml, torch.full_like(burst, 0.6), burst)   #   (current also fires when _wells_enabled)
     spin = torch.where(at, torch.full_like(spin, 1.8), spin)      # Atom: figure-8 orbitals (engine _fig8)
     burst = torch.where(at, torch.full_like(burst, 0.4), burst)
     fig8 = torch.where(at, torch.full_like(fig8, 1.0), fig8)
     if team_start <= 0:                                          # training: drive all teams
         engine._spin, engine._burst, engine._drill, engine._wall, engine._surge = spin, burst, drill, wall, surge
         engine._fig8 = fig8
+        if getattr(engine, "_wells_enabled", False):
+            # TRAINING WELLS (rl.train --wells): a team holding Doom (5) or
+            # Maelstrom (6) casts the REAL cross-team gravity well / whirlpool
+            # current at its cursor — the same mass-scaled dials as play (Doom
+            # 1x charge, Maelstrom undertow). Without this the stance head
+            # learns Doom/Maelstrom as mere body-shapes and is miscalibrated
+            # for play, where they are weapons. Fully vectorized over (B, T);
+            # all writes in-place into the engine's well slots.
+            af = engine.active_fighters.float()                  # (B,T) live mass
+            frac = (af / max(1.0, engine.fighters_per_team)).clamp(0.0, 1.0)
+            blob_r = (af / 3.14159).sqrt()
+            dm_f, ml_f = dm.float(), ml.float()
+            engine._doom_pos.copy_(engine.cursor_pos.float())
+            engine._doom_str.copy_(32.0 * frac ** 1.5 * dm_f)
+            engine._doom_range.copy_((2.2 * 0.5 * (6.7 + (6.7 ** 2 + af / 3.14159).sqrt())).clamp(min=70.0))
+            engine._doom_horizon.copy_((0.9 * blob_r).clamp(min=6.7) * dm_f)
+            engine._doom_cap.copy_(0.12 * frac.sqrt() * dm_f)
+            engine._vortex_pos.copy_(engine.cursor_pos.float())
+            engine._vortex_str.copy_(22.0 * frac.sqrt() * ml_f)
+            engine._vortex_range.copy_((1.5 * blob_r).clamp(min=60.0))
+            engine._vortex_rad.copy_(torch.full_like(frac, 0.30))
     else:                                                        # play: ONLY the AI opponents 1..; keep team 0 (human)
         if engine._surge is None:
             engine._surge = torch.ones(B, T, device=dev)

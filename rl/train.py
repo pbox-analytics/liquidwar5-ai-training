@@ -64,7 +64,15 @@ def parse_args():
     p.add_argument("--device", default="cuda")
     p.add_argument("--ckpt-dir", default="results/rl")
     p.add_argument("--ckpt-every", type=int, default=50,
-                   help="Save a checkpoint every N updates")
+                   help="Save a numbered checkpoint + eval best.pt every N updates")
+    p.add_argument("--save-every", type=int, default=10,
+                   help="Refresh latest.pt/optim.pt/meta.json every N updates (cheap crash insurance)")
+    p.add_argument("--resume", default="",
+                   help="Run dir (continue in place from latest.pt+optim.pt+meta.json) "
+                        "or a bare .pt file (warm-start the policy in a fresh run dir)")
+    p.add_argument("--wells", action="store_true",
+                   help="Cast the REAL cross-team Doom/Maelstrom wells in training "
+                        "(matches play, where they are weapons, not body-shapes)")
     p.add_argument("--seed", type=int, default=0)
     # Kafka (optional)
     p.add_argument("--bootstrap-servers", default="")
@@ -95,18 +103,50 @@ def main():
     if device == "cuda":
         print(f"GPU: {torch.cuda.get_device_name()}", flush=True)
 
-    ckpt_dir = Path(args.ckpt_dir) / time.strftime("%Y%m%d_%H%M%S")
+    # --resume <run dir>: continue that run in place (policy + optimizer +
+    # update counter survive a crash). --resume <file.pt>: warm-start the
+    # policy only, in a fresh run dir.
+    resume = Path(args.resume) if args.resume else None
+    start_update, best_winrate0 = 0, -1.0
+    if resume is not None and resume.is_dir():
+        ckpt_dir = resume
+    else:
+        ckpt_dir = Path(args.ckpt_dir) / time.strftime("%Y%m%d_%H%M%S")
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     engine = LiquidWarEngine(
         batch_size=args.batch_size, height=args.height, width=args.width,
         num_teams=args.teams, fighters_per_team=args.fighters,
         device=device, grad_iters=args.grad_iters)
+    engine._wells_enabled = args.wells
     engine.reset()
 
     policy = CursorPolicy().to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
+    if resume is not None:
+        pt = resume / "latest.pt" if resume.is_dir() else resume
+        policy.load_state_dict(torch.load(pt, map_location=device, weights_only=True))
+        opt_pt = pt.parent / "optim.pt"
+        meta_js = pt.parent / "meta.json"
+        if resume.is_dir() and opt_pt.exists():
+            optimizer.load_state_dict(torch.load(opt_pt, map_location=device, weights_only=True))
+        if resume.is_dir() and meta_js.exists():
+            meta = json.loads(meta_js.read_text())
+            start_update = int(meta.get("update", -1)) + 1
+            best_winrate0 = float(meta.get("best_winrate", -1.0))
+        print(f"resumed from {pt} at update {start_update} "
+              f"(best win-rate so far {best_winrate0:.3f})", flush=True)
     kafka = setup_kafka(args.bootstrap_servers, args.schema_registry)
+
+    def save_latest(update: int, best_wr: float) -> None:
+        """Crash insurance: policy + optimizer + counters, atomic-ish (tmp+rename)."""
+        for name, obj in (("latest.pt", policy.state_dict()),
+                          ("optim.pt", optimizer.state_dict())):
+            tmp = ckpt_dir / (name + ".tmp")
+            torch.save(obj, tmp)
+            tmp.replace(ckpt_dir / name)
+        (ckpt_dir / "meta.json").write_text(json.dumps(
+            {"update": update, "best_winrate": best_wr, "args": vars(args)}))
 
     nparams = sum(p.numel() for p in policy.parameters())
     print(f"=== PPO self-play ===", flush=True)
@@ -116,8 +156,8 @@ def main():
     print(f"ckpt_dir={ckpt_dir}", flush=True)
 
     best_return = float("-inf")
-    best_winrate = -1.0
-    for update in range(args.updates):
+    best_winrate = best_winrate0
+    for update in range(start_update, args.updates):
         t0 = time.time()
         rollout = collect_rollout(engine, policy, args.steps, device)
         stats = ppo_update(
@@ -154,6 +194,9 @@ def main():
                 print(f"kafka publish failed: {e}", flush=True)
 
         best_return = max(best_return, mean_ret)
+
+        if (update + 1) % args.save_every == 0:
+            save_latest(update, best_winrate)
 
         if (update + 1) % args.ckpt_every == 0:
             torch.save(policy.state_dict(), ckpt_dir / f"upd_{update:05d}.pt")

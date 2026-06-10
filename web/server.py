@@ -177,8 +177,8 @@ class GameSession:
                 e._doom_pos[0, t] = e.cursor_pos[0, t].float()
                 e._doom_str[0, t] = 32.0 * frac ** 1.5
                 e._doom_range[0, t] = max(70.0, 2.2 * ring)
-                e._doom_horizon[0, t] = max(14.0, 0.9 * blob_r)
-                e._doom_cap[0, t] = 0.12
+                e._doom_horizon[0, t] = max(6.7, 0.9 * blob_r)   # shrinks with the army (no 14-cell floor)
+                e._doom_cap[0, t] = 0.12 * frac ** 0.5           # devour dies with the disk
                 if self._ai_doom is None:
                     self._ai_doom = [t, *e.cursor_pos[0, t].tolist()]
             else:
@@ -438,9 +438,15 @@ async def ws(sock: WebSocket) -> None:
                     # committed finisher, not a vacuum.
                     _e._doom_range[0, 0] = max(70.0, 2.2 * _ring_val)
                     # horizon ~ the disk's inner mass edge, not the whole blob
-                    # radius (1.5x blob swallowed anything within ~75 cells)
-                    _e._doom_horizon[0, 0] = max(14.0, 0.9 * (_mass / 3.14159) ** 0.5)
-                    _e._doom_cap[0, 0] = 0.12                               # fraction devoured per tick (was 0.18)
+                    # radius — and it SHRINKS with the army (floor = the rendered
+                    # hole r_in, was a generous 14): a whittled army's event
+                    # horizon stops being a 14-cell kill zone.
+                    _e._doom_horizon[0, 0] = max(_r_in, 0.9 * (_mass / 3.14159) ** 0.5)
+                    # capture rate scales with YOUR mass (was a flat 0.12): a
+                    # losing army can no longer hold Doom as an unkillable last
+                    # stand — the devour dies with the disk, so the bigger blob
+                    # finally gets to consume it.
+                    _e._doom_cap[0, 0] = 0.12 * _frac ** 0.5
                 elif stance == 6:                           # Maelstrom: a whirlpool CURRENT (cross-team vorticity)
                     sgn = spin_sign if spin_sign != 0 else 1
                     mm = ctrl["mael_mode"]                  # 0 undertow / 1 ejecta / 2 shear (tap 7)
