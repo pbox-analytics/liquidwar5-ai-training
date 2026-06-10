@@ -78,6 +78,7 @@ class GameSession:
         self.engine._wall = torch.zeros(1, teams, 2, device=DEVICE)  # per-team shield facing (wall stance)
         self.engine._fig8 = torch.zeros(1, teams, device=DEVICE)  # per-team figure-8 flag (Atom stance)
         self.engine._ring = torch.zeros(1, teams, device=DEVICE)  # per-team orbit radius (Doom's accretion disk)
+        self.engine._ring_ecc = torch.zeros(1, teams, device=DEVICE)  # ring shape: 1 oblate Gargantua (Doom) / 0 circular (Maelstrom)
         self.engine._node_l = torch.zeros(1, teams, device=DEVICE)  # Chladni radial wavelength (Pulse rings mode)
         self.engine._node_m = torch.zeros(1, teams, device=DEVICE)  # Chladni angular petals (Pulse star / Spin modes)
         self.engine._node_k = torch.zeros(1, teams, device=DEVICE)  # angular-mode radial pitch (galaxy spiral arms)
@@ -210,7 +211,8 @@ async def ws(sock: WebSocket) -> None:
                             "map": None, "spin": None, "stance": 0, "drill_mode": 0, "doom_level": 1,
                             "wall_orient": 0,   # 0 = horizontal bar, 1 = vertical bar (tap 4 to flip)
                             "pulse_mode": 0,    # 0 wave / 1 cymatic rings / 2 cymatic star (tap 5 to cycle)
-                            "spin_mode": 0}     # 0 calm / 1 vortex / 2 frenzy (tap 2 to shift gear)
+                            "spin_mode": 0,     # 0 calm / 1 vortex / 2 frenzy (tap 2 to shift gear)
+                            "mael_mode": 0}     # 0 undertow / 1 ejecta / 2 shear (tap 7 to cycle)
 
     async def receiver() -> None:
         try:
@@ -244,6 +246,10 @@ async def ws(sock: WebSocket) -> None:
                         ctrl["spin_mode"] = (ctrl["spin_mode"] + 1) % 3
                     elif s == 1:
                         ctrl["spin_mode"] = 0
+                    if s == 6 and ctrl["stance"] == 6:    # re-tap Maelstrom cycles undertow -> ejecta -> shear
+                        ctrl["mael_mode"] = (ctrl["mael_mode"] + 1) % 3
+                    elif s == 6:
+                        ctrl["mael_mode"] = 0
                     ctrl["stance"] = s
                 elif "dir" in msg:                 # keyboard (arrows/WASD)
                     ctrl["dir"] = msg["dir"]
@@ -271,21 +277,21 @@ async def ws(sock: WebSocket) -> None:
             if ctrl["reset"]:
                 session.engine._map_choice = ctrl["map"]   # apply the picked map (None=random)
                 session.reset(); ctrl["reset"] = False; hold = 0; logged = False
-                _e = session.engine; _e._surge = None; _e._blackhole_pos = None                   # clear all stance knobs per game
-                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_()
+                _e = session.engine; _e._surge = None; _e._blackhole_pos = None; _e._vortex_pos = None   # clear all stance knobs per game
+                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_()
             elif session.done:
                 hold += 1
                 if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
                     session.engine._map_choice = ctrl["map"]   # keep the picked map across games
                     session.reset(); hold = 0; logged = False
-                    _e = session.engine; _e._surge = None; _e._blackhole_pos = None
-                    _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_()
+                    _e = session.engine; _e._surge = None; _e._blackhole_pos = None; _e._vortex_pos = None
+                    _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_()
             else:
                 if ctrl["dir"] and (ctrl["dir"][0] or ctrl["dir"][1]):
                     last_dir = ctrl["dir"]                  # heading the Drill/Wall point at
                 _e = session.engine
-                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_()
-                _e._surge = None; _e._blackhole_pos = None
+                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_()
+                _e._surge = None; _e._blackhole_pos = None; _e._vortex_pos = None
                 stance = ctrl["stance"]                     # 0 Swarm 1 Spin 2 Drill 3 Wall 4 Pulse
                 if stance == 0:                             # Swarm: loose, varied-radius orbits (electron cloud)
                     _e._spin[0, 0] = 0.5 * spin_sign
@@ -360,6 +366,7 @@ async def ws(sock: WebSocket) -> None:
                     # open and the whole army becomes the spinning accretion disk.
                     _r_in = (6.7, 9.0, 11.3)[lvl - 1]
                     _e._ring[0, 0] = 0.5 * (_r_in + (_r_in ** 2 + _mass / 3.14159) ** 0.5)
+                    _e._ring_ecc[0, 0] = 1.0                # full oblate -> the edge-on Gargantua blade
                     _frac = _mass / max(1.0, _e.fighters_per_team)
                     _e._blackhole_str = ctrl["doom_level"] * 32.0 * _frac ** 1.5  # super-linear in mass: gentler pull peels the loosely-bound periphery off the enemy, not the whole army (x1/x2/x3 charge, tap 6)
                     # FINITE reach (was the full map diagonal, which made Doom
@@ -371,10 +378,37 @@ async def ws(sock: WebSocket) -> None:
                     # radius (1.5x blob swallowed anything within ~75 cells)
                     _e._blackhole_horizon = max(14.0, 0.9 * (_mass / 3.14159) ** 0.5)
                     _e._blackhole_capture_rate = 0.12                       # fraction devoured per tick (was 0.18)
-                elif stance == 6:                           # Maelstrom: fast wide orbiting shell (whirlpool)
+                elif stance == 6:                           # Maelstrom: a whirlpool CURRENT (cross-team vorticity)
                     sgn = spin_sign if spin_sign != 0 else 1
-                    _e._spin[0, 0] = 2.0 * sgn              # whirl fast and wide around the cursor
-                    _e._burst[0, 0] = 0.6                   # pushed out into a spinning ring, not a dense core
+                    mm = ctrl["mael_mode"]                  # 0 undertow / 1 ejecta / 2 shear (tap 7)
+                    # Your army IS the whirlpool wall: a fast CIRCULAR spinning
+                    # annulus with an open eye (_ring_ecc stays 0 -> round, so
+                    # it doesn't share Doom's oblate-blade silhouette). Radius
+                    # mass-scaled like Doom's disk so the band stays solid.
+                    _e._spin[0, 0] = 2.0 * sgn
+                    _mass = float(_e.team_oh[0, 0].sum())
+                    _r_eye = 9.0
+                    _e._ring[0, 0] = 0.5 * (_r_eye + (_r_eye ** 2 + _mass / 3.14159) ** 0.5)
+                    # The CURRENT — Doom's radial devour rotated 90°: enemies
+                    # near the well are swept TANGENTIALLY off their gradient
+                    # and entrained into orbit through your grinding rim; no
+                    # capture, attrition by ordinary contact combat. Strength
+                    # scales with YOUR mass — a whittled army stirs a weak eddy.
+                    _frac = _mass / max(1.0, _e.fighters_per_team)
+                    _e._vortex_pos = _e.cursor_pos[:, 0].float().clone()
+                    _e._vortex_team = 0
+                    _e._vortex_sign = float(sgn)            # current direction follows Q/E
+                    # Server-tunable dial (cf. _blackhole_str). 30 at full mass
+                    # entrains: ~80 deg swept / 2 s, outward escape roughly
+                    # halved (measured vs the enemy gradient); <~16 is inert.
+                    # sqrt(frac), not Doom's frac^1.5: a half-strength army
+                    # still stirs a usable eddy (~21), a quarter one doesn't.
+                    _e._vortex_str = 30.0 * _frac ** 0.5
+                    _e._vortex_range = max(60.0, 2.0 * float(_e._ring[0, 0]))
+                    # radial component per mode: undertow spirals them inward to
+                    # the rim, ejecta flings entrained enemies outward (scatters
+                    # a formation off its cursor), shear is pure deflection
+                    _e._vortex_rad = (0.30, -0.45, 0.0)[mm]
                 elif stance == 7:                           # Atom: figure-8 electron orbitals
                     sgn = spin_sign if spin_sign != 0 else 1
                     _e._spin[0, 0] = 1.8 * sgn              # orbital speed
@@ -393,7 +427,8 @@ async def ws(sock: WebSocket) -> None:
                           else f"{ctrl['doom_level']}x" if ctrl["stance"] == 5
                           else ("horiz", "vert")[ctrl["wall_orient"]] if ctrl["stance"] == 3
                           else ("wave", "rings", "star")[ctrl["pulse_mode"]] if ctrl["stance"] == 4
-                          else ("vortex", "sawblade", "galaxy")[ctrl["spin_mode"]] if ctrl["stance"] == 1 else "")
+                          else ("vortex", "sawblade", "galaxy")[ctrl["spin_mode"]] if ctrl["stance"] == 1
+                          else ("undertow", "ejecta", "shear")[ctrl["mael_mode"]] if ctrl["stance"] == 6 else "")
             st["spin_dir"] = spin_sign
             if session.done and not logged:
                 w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])

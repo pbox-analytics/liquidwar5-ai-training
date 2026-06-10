@@ -644,11 +644,15 @@ class LiquidWarEngine:
         if burst_f is not None:                                       # gather (-1) inward / burst (+1) outward
             score = score - 15.0 * burst_f.unsqueeze(-1) * out_align
         if ring_f is not None:                                        # accretion ring: settle on the orbit radius
-            # OBLATE (Gargantua) disk: the target radius is angle-dependent —
-            # pinched vertically (0.78x) and stretched along the equator (1.28x)
-            # — so the spinning disk reads as the edge-on silhouette, pinching
-            # outward along its long axis, not a circular donut.
-            ell = ring_f * (0.78 + 0.5 * (rx / rn) ** 2)
+            # Ring shape is a per-team dial ``_ring_ecc`` (0..1, default 1):
+            # at 1, an OBLATE (Gargantua) disk — the target radius is
+            # angle-dependent, pinched vertically (0.78x) and stretched along
+            # the equator (1.28x) — so Doom's spinning disk reads as the
+            # edge-on silhouette. At 0, a CIRCULAR annulus (Maelstrom's
+            # whirlpool), so the two stances don't share a silhouette.
+            ecc_f = (self._ring_ecc.gather(1, self.fteam)
+                     if hasattr(self, "_ring_ecc") else torch.ones_like(ring_f))
+            ell = ring_f * (1.0 - 0.22 * ecc_f + 0.5 * ecc_f * (rx / rn) ** 2)
             rbias = ((ell - rn) / 4.0).clamp(-1.0, 1.0) * (ring_f > 0).float()
             # Outward (inside the ring) needs MORE weight than inward: it fights
             # the gradient's 10-14/step pull toward the cursor, else stragglers
@@ -658,8 +662,10 @@ class LiquidWarEngine:
             # GARGANTUA BLADE: fighters well OUTSIDE the disk also flatten toward
             # the cursor's equator row and stream in along it — so the formation
             # reads as the edge-on accretion blade feeding an orbiting halo (the
-            # Interstellar silhouette), not a plain donut.
-            far = ((rn > ell * 1.25) & (ring_f > 0)).float()
+            # Interstellar silhouette), not a plain donut. Scaled by ``ecc_f``:
+            # a circular ring (Maelstrom) wants stragglers spiraling in on the
+            # swirl, not streaming along an equator it doesn't have.
+            far = ((rn > ell * 1.25) & (ring_f > 0)).float() * ecc_f
             eq_align = torch.sign(ry).unsqueeze(-1) * self._dy_t      # toward the equator line
             score = score - 15.0 * far.unsqueeze(-1) * eq_align
         # CHLADNI RESONANCE (Pulse's cymatic modes): standing-wave nodal patterns,
@@ -744,6 +750,35 @@ class LiquidWarEngine:
             bh_align = (bhy / bhn).unsqueeze(-1) * self._dy_t + (bhx / bhn).unsqueeze(-1) * self._dx_t
             score = score - pull * bh_align                            # near enemies sucked in; distant ones free
             movable = movable | ((is_en & in_range).unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 40))
+        # WHIRLPOOL (Maelstrom): a cross-team CURRENT at one team's cursor — the
+        # rotational counterpart of Doom's gravity well. Where Doom drags enemies
+        # RADIALLY into a singularity and captures them, the maelstrom is
+        # vorticity: nearby enemy fighters are swept TANGENTIALLY off their own
+        # gradient and entrained into orbit around the well, plus a radial
+        # component ``_vortex_rad`` (>0 undertow: spiral them inward / <0 ejecta:
+        # fling them outward / 0 pure shear). No capture — entrained enemies
+        # circle through the owner's spinning rim and are ground down by ordinary
+        # adjacency combat. Disruption and area-denial, not a devour.
+        wp = getattr(self, "_vortex_pos", None)
+        if wp is not None:
+            wp_team = getattr(self, "_vortex_team", 0)
+            wp_str = getattr(self, "_vortex_str", 14.0)
+            wp_R = getattr(self, "_vortex_range", 60.0)                # FINITE reach, like Doom's
+            wp_sgn = getattr(self, "_vortex_sign", 1.0)                # current direction (owner's Q/E)
+            wp_rad = getattr(self, "_vortex_rad", 0.3)
+            wy = wp[:, 0:1] - self.fy                                  # (B,N) toward the well
+            wx = wp[:, 1:2] - self.fx
+            wn = (wy * wy + wx * wx).sqrt().clamp(min=1.0)
+            wfall = (wp_R * wp_R) / (wn * wn + wp_R * wp_R)            # 1 at the well, ->0 far
+            w_en = (self.fteam != wp_team)                             # only the OTHER teams feel the current
+            w_in = wn < wp_R * 2.5
+            drag = (wp_str * wfall * w_en.float()).unsqueeze(-1)       # (B,N,1) distance-weighted
+            # tangential alignment matches the own-team swirl convention (615),
+            # so +1 entrains enemies in the same sense as the owner's spin
+            w_tan = wp_sgn * ((-wx / wn).unsqueeze(-1) * self._dy_t + (wy / wn).unsqueeze(-1) * self._dx_t)
+            w_radial = (wy / wn).unsqueeze(-1) * self._dy_t + (wx / wn).unsqueeze(-1) * self._dx_t
+            score = score - drag * (w_tan + wp_rad * w_radial)         # bend their flow; their gradient still fights
+            movable = movable | ((w_en & w_in).unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 40))
         order = torch.where(movable, score, score.new_full((), float(BIGG))).argsort(dim=-1)
         ncell_s = ncell.gather(-1, order)                              # cells, best-first
         down_s = movable.gather(-1, order)
