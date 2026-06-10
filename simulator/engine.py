@@ -744,6 +744,17 @@ class LiquidWarEngine:
             wdd = wall.gather(1, self.fteam.unsqueeze(-1).expand(B, N, 2))      # (B,N,2) facing
             won = (wdd.abs().sum(-1, keepdim=True) > 0)
             movable = movable | (won & (ng <= cur.unsqueeze(-1) + 30))
+        # TIDAL WAVE (Pulse tide mode): the standing-wave machinery made
+        # DIRECTIONAL — the phase travels along ``_tide``'s (dy,dx) heading, so
+        # the army advances in rolling crests (a marching front), not radial
+        # rings. Per-team (B,T,2); zero = off. (Score term added below with the
+        # other wave biases.)
+        tide = getattr(self, "_tide", None)
+        tdd = None
+        if tide is not None:
+            tdd = tide.gather(1, self.fteam.unsqueeze(-1).expand(B, N, 2))      # (B,N,2) wave heading
+            t_on = (tdd.abs().sum(-1, keepdim=True) > 0)
+            movable = movable | (t_on & (ng <= cur.unsqueeze(-1) + 30))
         jitter = torch.randint(0, 7, ng.shape, device=self.device)
         # MOMENTUM / INERTIA: bias each candidate's score toward the fighter's
         # velocity, so a moving mass carries weight — it overshoots, banks around
@@ -770,18 +781,33 @@ class LiquidWarEngine:
         spin = getattr(self, "_spin", None)
         spin_f = spin.gather(1, self.fteam).unsqueeze(-1) if spin is not None else 1.0
         swirl = spin_f * SWIRL_W * swirl_jit * ((-rx / rn).unsqueeze(-1) * self._dy_t + (ry / rn).unsqueeze(-1) * self._dx_t)
-        # ATOM (figure-8): flip the orbit sense across the cursor's vertical axis, so
-        # the left and right halves counter-rotate -> the mass loops in two lobes that
-        # cross at the center = a lemniscate / electron-orbital churn, not a flat spin.
+        # ATOM (figure-8 / binary star): ``_fig8`` is a per-team MODE — 1 puts
+        # the lobes on the FIXED x-axis with counter-rotating halves (the mass
+        # loops in two lobes crossing at the center = a lemniscate); 2 puts
+        # them on a slowly ROTATING axis, co-rotating with extra separation and
+        # lobe cohesion -> two distinct discs orbiting their barycenter (the
+        # cursor), like a close binary star.
         fig8 = getattr(self, "_fig8", None)
         if fig8 is not None:
-            on8 = (fig8.gather(1, self.fteam) > 0)                     # (B,N) is this team in Atom?
-            R8 = 8.0                                                   # half-distance between the two lobe centers
-            s = torch.sign(-rx)                                        # +1 right of cursor, -1 left (fx-cx)
-            lrx = rx + s * R8                                          # radial to the per-side lobe centre (±R8 in x)
-            lrn = (lrx * lrx + ry * ry).sqrt().clamp(min=1.0)
-            tang = (-lrx / lrn).unsqueeze(-1) * self._dy_t + (ry / lrn).unsqueeze(-1) * self._dx_t
-            swirl8 = spin_f * SWIRL_W * swirl_jit * s.unsqueeze(-1) * tang   # lobes counter-rotate -> connect into a ∞
+            f8 = fig8.gather(1, self.fteam)                            # (B,N) 0 off / 1 lemniscate / 2 binary
+            on8 = f8 > 0
+            is_bin = (f8 > 1.5).float()
+            bphi = self._tick_f * 0.035                                # binary axis angle (slow orbit)
+            axy = is_bin * torch.sin(bphi)                             # lobe axis: rotating for binary,
+            axx = is_bin * torch.cos(bphi) + (1.0 - is_bin)            #   the x-axis for the lemniscate
+            R8 = 8.0 + 6.0 * is_bin                                    # binary lobes sit wider apart
+            s = torch.sign(-(ry * axy + rx * axx))                     # which side of the axis plane
+            lry = ry + s * R8 * axy                                    # radial to the per-side lobe centre
+            lrx = rx + s * R8 * axx
+            lrn = (lrx * lrx + lry * lry).sqrt().clamp(min=1.0)
+            tang = (-lrx / lrn).unsqueeze(-1) * self._dy_t + (lry / lrn).unsqueeze(-1) * self._dx_t
+            sense = is_bin + (1.0 - is_bin) * s                        # binary co-rotates; lemniscate counter-rotates
+            # binary lobe COHESION folded into the swirl term (swirl enters the
+            # score negated): pull toward the assigned lobe centre so the two
+            # discs stay distinct instead of merging across the barycenter
+            l_align = (lry / lrn).unsqueeze(-1) * self._dy_t + (lrx / lrn).unsqueeze(-1) * self._dx_t
+            swirl8 = (spin_f * SWIRL_W * swirl_jit * sense.unsqueeze(-1) * tang
+                      + 9.0 * is_bin.unsqueeze(-1) * l_align)
             swirl = torch.where(on8.unsqueeze(-1), swirl8, swirl)
         # PERISTALTIC EDGE PUSH: a wave-modulated OUTWARD bias (rides the same
         # traveling wave as the restless gate). On a crest the rim extends outward
@@ -863,6 +889,15 @@ class LiquidWarEngine:
             w_f = self._node_w.gather(1, self.fteam) if hasattr(self, "_node_w") else 0.0
             ang = torch.sin(m_f * theta + k_f * rn + w_f * self._tick_f)
             score = score - 16.0 * (m_on.float() * ang).unsqueeze(-1) * tang_n
+        if tdd is not None:                                           # TIDAL WAVE: rolling directional crests
+            t_along = self.fy.float() * tdd[..., 0] + self.fx.float() * tdd[..., 1]
+            t_ph = torch.sin(t_along * 0.30 - self._tick_f * 0.22)    # crest sweeps ALONG the heading
+            t_align = tdd[..., 0:1] * self._dy_t + tdd[..., 1:2] * self._dx_t
+            t_on_f = (tdd.abs().sum(-1) > 0).float()
+            # a crest must out-weigh the gradient's 10-14/step (like the ring /
+            # node terms) to push the mass forward; the trough lets the
+            # gradient regroup it -> the army marches in waves
+            score = score - 22.0 * (t_on_f * t_ph).unsqueeze(-1) * t_align
         if drill_fwd is not None:                                     # DRILL: pierce forward, concentrated
             # |_drill| encodes ADVANCE SPEED (drill mode): a small magnitude weakens
             # the forward bias so the spin/squeeze dominate -> the fast (high-spin)

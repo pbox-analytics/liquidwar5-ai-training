@@ -160,6 +160,8 @@ uniform vec2 uRes, uGrid;
 uniform float uBloomK, uTrailK;
 uniform vec4 uHole;                 // Doom black hole: x, y (grid), horizon radius (cells), strength (0=off)
 uniform vec2 uHoleT;                // (time, spin direction)
+uniform vec4 uWhirl;                // Maelstrom: x, y (grid), radius (cells), strength (0=off)
+uniform float uWhirlDir;            // current direction (the owner's Q/E)
 out vec4 o;
 void main() {
   vec2 uv = gl_FragCoord.xy / uRes;
@@ -175,6 +177,19 @@ void main() {
     float pull = uHole.w * rh * rh * 2.6 / (hr * hr + rh * rh * 0.6);   // bend, strongest near the horizon
     vec2 dg = (hd / max(hr, 1e-3)) * min(pull, hr * 0.85);              // never pull past the centre
     uvL = uv - vec2(dg.x / uGrid.x, -dg.y / uGrid.y);
+  }
+  // --- Maelstrom: whirlpool refraction. Light from the army/trail layers is
+  // sampled along ROTATED rays about the well (rotation decays with radius),
+  // so the scene visibly swirls into the current — the water analog of the
+  // Doom lensing above (the two compose).
+  vec2 wd = uvg - uWhirl.xy;
+  float wr = length(wd);
+  if (uWhirl.w > 0.001) {
+    float wR = uWhirl.z;
+    float wang = uWhirl.w * uWhirlDir * 1.1 * exp(-(wr * wr) / (wR * wR));
+    float cs = cos(wang), sn = sin(wang);
+    vec2 rwd = vec2(cs * wd.x - sn * wd.y, sn * wd.x + cs * wd.y) - wd;
+    uvL -= vec2(rwd.x / uGrid.x, -rwd.y / uGrid.y);
   }
   // wall texture: R = crisp mask, G = blurred mask (wide ramp for bevel + shadow)
   vec2 wm = texture(uWalls, vec2(uv.x, 1.0 - uv.y)).rg;     // v-flip: row 0 = top
@@ -213,6 +228,15 @@ void main() {
     float hot = min(uHole.w, 1.0) * exp(-pow((hr - rh * 1.2) / (rh * 0.8), 2.0));
     col *= mix(vec3(1.0), vec3(1.45, 1.02, 0.55), hot);
     col *= smoothstep(rh * 0.85, rh * 1.02, hr);            // the horizon: pure black
+  }
+  // --- Maelstrom: cool spiraling shimmer riding the refraction — ripple
+  // rings drifting inward, slight darkening toward the eye of the storm.
+  if (uWhirl.w > 0.001) {
+    float wR = uWhirl.z;
+    float rip = 0.5 + 0.5 * sin(wr * 0.7 - uHoleT.x * 6.0);
+    float wmask = min(uWhirl.w, 1.0) * exp(-(wr * wr) / (wR * wR * 1.3));
+    col += vec3(0.05, 0.14, 0.20) * rip * wmask;
+    col *= 1.0 - 0.18 * wmask;
   }
   col = 1.0 - exp(-col * 1.8);                              // soft filmic clip (no harsh saturate)
   col *= 1.0 - 0.30 * smoothstep(0.55, 1.05, dC);           // final vignette
@@ -482,6 +506,9 @@ function create(canvas, teamColors) {
     const hole = o.hole || { x: 0, y: 0, r: 1, a: 0, spin: 1 };
     gl.uniform4f(U.comp.uHole, hole.x, hole.y, hole.r, hole.a);
     gl.uniform2f(U.comp.uHoleT, o.time, hole.spin);
+    const wh = o.whirl || { x: 0, y: 0, r: 1, a: 0, dir: 1 };
+    gl.uniform4f(U.comp.uWhirl, wh.x, wh.y, wh.r, wh.a);
+    gl.uniform1f(U.comp.uWhirlDir, wh.dir);
     fullscreen();
     gl.activeTexture(gl.TEXTURE0);
 

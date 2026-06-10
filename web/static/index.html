@@ -89,7 +89,7 @@
   </div>
   <div class="muted" style="text-align:center; line-height:1.8;">
     <b>↑ ↓ ← → / WASD</b> steer (or hold mouse) &nbsp;·&nbsp;
-    <b>Stances</b> (hold one): <b>1</b> 🐝 Swarm &nbsp; <b>2</b> 🌀 Spin <span class="muted">(tap to cycle: vortex→sawblade→galaxy)</span> &nbsp; <b>3</b> ➤ Drill <span class="muted">(tap to rev: slow→fast)</span> &nbsp; <b>4</b> 🛡 Wall <span class="muted">(tap to flip)</span> &nbsp; <b>5</b> 💥 Pulse <span class="muted">(tap to cycle: wave→rings→star)</span> &nbsp; <b>6</b> 🕳 Doom <span class="muted">(tap to charge)</span> &nbsp; <b>7</b> 🌪 Maelstrom <span class="muted">(tap to cycle: undertow→ejecta→shear)</span> &nbsp; <b>8</b> ⚛ Atom &nbsp; <b>9</b> 🌊 Classic &nbsp;·&nbsp;
+    <b>Stances</b> (hold one): <b>1</b> 🐝 Swarm <span class="muted">(tap: cloud→comet)</span> &nbsp; <b>2</b> 🌀 Spin <span class="muted">(tap to cycle: vortex→sawblade→galaxy)</span> &nbsp; <b>3</b> ➤ Drill <span class="muted">(tap to rev: slow→fast)</span> &nbsp; <b>4</b> 🛡 Wall <span class="muted">(tap to flip)</span> &nbsp; <b>5</b> 💥 Pulse <span class="muted">(tap: wave→rings→star→lattice→nova→tide)</span> &nbsp; <b>6</b> 🕳 Doom <span class="muted">(tap to charge)</span> &nbsp; <b>7</b> 🌪 Maelstrom <span class="muted">(tap to cycle: undertow→ejecta→shear)</span> &nbsp; <b>8</b> ⚛ Atom <span class="muted">(tap: orbital→binary)</span> &nbsp; <b>9</b> 🌊 Classic &nbsp;·&nbsp;
     <b>Q</b>/<b>E</b> spin direction &nbsp;·&nbsp;
     <b>T</b> trails &nbsp;·&nbsp;
     <b>F</b> fullscreen &nbsp;·&nbsp; 🎮 gamepad: stick/d-pad move, LB/RB stance, A mode, X/B spin, Y trails, Start new game &nbsp;·&nbsp;
@@ -146,6 +146,7 @@ const MAXFLASH = 120;  // cap spawns per server frame (conversions can be hundre
 let tLast = 0, dtServer = 22;                          // ms between server frames (EMA)
 let lastTick = -1, lastMap = "";
 let doomA = 0, doomR = 5, doomLvl = 1;                 // black-hole strength/radius (animated)
+let whirlA = 0;                                        // maelstrom whirlpool strength (animated)
 let lastFrameT = 0;
 // Live visual dials (wired to the on-screen sliders) — tune the look without redeploying.
 let pTail = 0.45, pCurve = 0.55, pWidth = 1.0, pTrail = 0.25, pAlpha = 0.85, pGlow = 0.9;
@@ -304,6 +305,14 @@ function frame() {                                     // 60fps interpolated ren
   const holeC = aiDoom ? [aiDoom[2], aiDoom[1]] : [curSt.cursors[0][1], curSt.cursors[0][0]];
   const hole = { x: holeC[0] + .5, y: holeC[1] + .5,
                  r: doomR, a: doomA, spin: curSt.spin_dir || 1 };
+  // Maelstrom whirlpool: same one-effect slot policy as the hole (yours wins).
+  const maelOn = curSt.stance === "Maelstrom";
+  const aiMael = !maelOn && curSt.ai_mael;
+  whirlA += (((maelOn || aiMael) ? 1.0 : 0) - whirlA) * Math.min(1, dt * ((maelOn || aiMael) ? 2.5 : 6));
+  if (whirlA < 0.01) whirlA = 0;
+  const wc = maelOn ? [curSt.cursors[0][1], curSt.cursors[0][0]] : (aiMael ? [aiMael[2], aiMael[1]] : [0, 0]);
+  const whirl = { x: wc[0] + .5, y: wc[1] + .5, r: 30,
+                  a: whirlA, dir: maelOn ? (curSt.spin_dir || 1) : 1 };
   // cursors: soft halo + pulsating ring + white core (drawn crisp, post-bloom)
   let ck = 0;
   const beat = 1 + 0.3 * Math.sin(performance.now() / 170);
@@ -327,7 +336,7 @@ function frame() {                                     // 60fps interpolated ren
     trailVis: (trails ? 0.55 : 0.0) + 0.3 * doomA,   // infall paths burn brighter
     fx: fxArr, fxCount: k,
     cursorFx: curArr, cursorFxCount: ck,
-    hole,
+    hole, whirl,
   });
   cv.style.boxShadow = curSt.pulse_active ? "0 0 18px 2px rgba(253,224,71,.35)" : "";
 }
