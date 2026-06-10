@@ -116,7 +116,16 @@ class GameSession:
     @torch.no_grad()
     def step(self, human_target: list[int] | None,
              human_dir: list[int] | None = None) -> None:
-        dydx, ai_stance = self._ai_dydx()
+        # Policy inference every 2nd tick: the engine still steps at full rate,
+        # the AI just holds its dydx/stance for ~32ms — imperceptible, and it
+        # buys back ~half the inference cost (the last ms to a locked 60fps).
+        cache = getattr(self, "_ai_cache", None)
+        if cache is None or self.engine.tick % 2 == 0:
+            raw_dydx, ai_stance = self._ai_dydx()
+            self._ai_cache = (raw_dydx, ai_stance)
+        else:
+            raw_dydx, ai_stance = cache
+        dydx = raw_dydx.clone()                   # human rows are written below
         if self.mode == "play":
             if human_dir is not None and (human_dir[0] or human_dir[1]):
                 # Keyboard (arrows/WASD): drive the cursor directly, LW-style.
