@@ -4,6 +4,10 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Liquid War — play the AI</title>
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#0b0e14" />
+<link rel="icon" type="image/png" href="icon-192.png" />
+<link rel="apple-touch-icon" href="icon-192.png" />
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -30,6 +34,10 @@
   canvas { background: #05070c; border: 1px solid #232a3a; border-radius: 8px;
            max-width: 95vw; height: auto; cursor: crosshair; }
   .muted { color: #6b7280; }
+  /* Big-screen mode: the canvas alone goes fullscreen — chrome disappears,
+     the game fills the panel (works on TVs via any browser). */
+  canvas:fullscreen { max-width: 100vw; width: 100vw; height: 100vh;
+                      border: 0; border-radius: 0; object-fit: contain; background: #05070c; }
 </style>
 </head>
 <body>
@@ -67,6 +75,7 @@
       <option value="5">Map: Corners</option>
     </select>
     <button id="reset">New game</button>
+    <button id="fs" title="Fullscreen (F)">⛶</button>
   </div>
   <canvas id="c" width="110" height="80"></canvas>
   <div id="visuals" class="muted" style="margin-top:6px; font-size:13px; display:flex; gap:14px; flex-wrap:wrap; justify-content:center; align-items:center;">
@@ -83,10 +92,16 @@
     <b>Stances</b> (hold one): <b>1</b> 🐝 Swarm &nbsp; <b>2</b> 🌀 Spin <span class="muted">(tap to cycle: vortex→sawblade→galaxy)</span> &nbsp; <b>3</b> ➤ Drill <span class="muted">(tap to rev: slow→fast)</span> &nbsp; <b>4</b> 🛡 Wall <span class="muted">(tap to flip)</span> &nbsp; <b>5</b> 💥 Pulse <span class="muted">(tap to cycle: wave→rings→star)</span> &nbsp; <b>6</b> 🕳 Doom <span class="muted">(tap to charge)</span> &nbsp; <b>7</b> 🌪 Maelstrom <span class="muted">(tap to cycle: undertow→ejecta→shear)</span> &nbsp; <b>8</b> ⚛ Atom &nbsp; <b>9</b> 🌊 Classic &nbsp;·&nbsp;
     <b>Q</b>/<b>E</b> spin direction &nbsp;·&nbsp;
     <b>T</b> trails &nbsp;·&nbsp;
+    <b>F</b> fullscreen &nbsp;·&nbsp; 🎮 gamepad: stick/d-pad move, LB/RB stance, A mode, X/B spin, Y trails, Start new game &nbsp;·&nbsp;
     <b>New game</b> / <b>Map</b> picker above &nbsp;·&nbsp;
     <a href="index-2d.html" class="muted">old 2D renderer</a>
   </div>
 
+<script>
+// PWA install support (Add to Home Screen). Note: browsers only offer the
+// install prompt over HTTPS — behind plain http this is inert but harmless.
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+</script>
 <script src="gl.js"></script>
 <script>
 const COLORS = ["#2f7bff","#ff3a2e","#4ade80","#fbbf24","#c084fc","#fb923c"]; // team 0 = you (vivid blue) / team 1 = warm red
@@ -106,11 +121,22 @@ let W = 110, H = 80, TEAMS = 4, target = null, ws = null;
 
 function sizeCanvas() {
   // Fit the whole grid on screen; the GL renderer sizes its buffers to the
-  // resulting CSS box * devicePixelRatio (native-res rendering).
+  // resulting CSS box * devicePixelRatio (native-res rendering). In
+  // fullscreen the canvas owns the whole panel (CSS), just resize buffers.
+  if (document.fullscreenElement === cv) { R.resize(); return; }
   const scale = Math.min(window.innerWidth * 0.95 / W, (window.innerHeight - 160) / H);
   cv.style.width = (W * scale) + "px"; cv.style.height = (H * scale) + "px";
   R.resize();
 }
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else cv.requestFullscreen().catch(() => {});
+}
+document.getElementById("fs").onclick = toggleFullscreen;
+document.addEventListener("fullscreenchange", () => {
+  if (!document.fullscreenElement) cv.style.width = "";   // back to fitted layout
+  sizeCanvas();
+});
 
 // ---- server snapshots: the GL renderer keeps the 3-frame interpolation ring;
 // we keep one team copy for conversion-flash detection + the grid for sparks.
@@ -164,24 +190,28 @@ function onWS(st) {                                     // a fresh server frame 
     }
   }
   // grid: wall mask for the shader (re-upload on new game/map), army-vs-army
-  // contact -> spawn sparks
-  const raw = atob(st.grid_b64), g = new Int8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) g[i] = (raw.charCodeAt(i) << 24) >> 24;
-  if (sized || st.map !== lastMap || st.tick < lastTick) {
-    const mask = new Uint8Array(g.length);
-    for (let i = 0; i < g.length; i++) if (g[i] === -2) mask[i] = 255;
-    R.setGrid(W, H, mask);
-    flashes = []; particles = [];
-  }
-  lastTick = st.tick; lastMap = st.map;
-  for (let i = 0; i < g.length; i++) {
-    const t = g[i]; if (t < 0) continue;
-    const right = (i % W !== W-1) ? g[i+1] : -1, down = (i+W < g.length) ? g[i+W] : -1;
-    if (((right >= 0 && right !== t) || (down >= 0 && down !== t)) && particles.length < MAXP && Math.random() < 0.05) {
-      const a = Math.random()*6.283, sp = 0.5 + Math.random()*1.3;
-      particles.push({ x:(i%W)+0.5, y:((i/W)|0)+0.5, vx:Math.cos(a)*sp, vy:Math.sin(a)*sp-0.3, life:1, col:RGB[t%RGB.length] });
+  // contact -> spawn sparks. FRAME DIET: the server only ships the grid ~5Hz
+  // (plus game start/end) — most frames carry motes only, so guard and reuse.
+  if (st.grid_b64) {
+    const raw = atob(st.grid_b64), g = new Int8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) g[i] = (raw.charCodeAt(i) << 24) >> 24;
+    if (sized || st.map !== lastMap || st.tick < lastTick) {
+      const mask = new Uint8Array(g.length);
+      for (let i = 0; i < g.length; i++) if (g[i] === -2) mask[i] = 255;
+      R.setGrid(W, H, mask);
+      flashes = []; particles = [];
+    }
+    lastMap = st.map;
+    for (let i = 0; i < g.length; i++) {
+      const t = g[i]; if (t < 0) continue;
+      const right = (i % W !== W-1) ? g[i+1] : -1, down = (i+W < g.length) ? g[i+W] : -1;
+      if (((right >= 0 && right !== t) || (down >= 0 && down !== t)) && particles.length < MAXP && Math.random() < 0.05) {
+        const a = Math.random()*6.283, sp = 0.5 + Math.random()*1.3;
+        particles.push({ x:(i%W)+0.5, y:((i/W)|0)+0.5, vx:Math.cos(a)*sp, vy:Math.sin(a)*sp-0.3, life:1, col:RGB[t%RGB.length] });
+      }
     }
   }
+  lastTick = st.tick;
   updateHUD(st);
 }
 
@@ -198,8 +228,40 @@ function pushFx(arr, k, x, y, size, shape, c, a) {
 }
 const WHITE = [1, 1, 1], YELLOW = [0.99, 0.88, 0.28];
 
+// ---- Gamepad (couch/TV play): left stick or d-pad steers the cursor;
+// LB/RB cycle the held stance, A re-taps it (cycles its mode), X/B set spin
+// CCW/CW (tap again to stop), Y toggles trails, Start = new game.
+// Polled in the render loop (the Gamepad API is poll-based); dir messages
+// are sent only on change, mirroring the keyboard's semantics.
+let padDir = [0, 0], padPrev = [], padStance = 0;
+const DEAD = 0.35;
+function pollGamepad() {
+  const gp = (navigator.getGamepads ? navigator.getGamepads() : [])[0];
+  if (!gp) return;
+  const b = gp.buttons.map(x => x.pressed);
+  const press = i => b[i] && !padPrev[i];                  // edge detect
+  let dy = Math.abs(gp.axes[1]) > DEAD ? Math.sign(gp.axes[1]) : 0;
+  let dx = Math.abs(gp.axes[0]) > DEAD ? Math.sign(gp.axes[0]) : 0;
+  if (b[12]) dy = -1; if (b[13]) dy = 1;                   // d-pad overrides
+  if (b[14]) dx = -1; if (b[15]) dx = 1;
+  if ((dy !== padDir[0] || dx !== padDir[1]) && ws && ws.readyState === 1) {
+    padDir = [dy, dx];
+    ws.send(JSON.stringify({ dir: padDir }));
+  }
+  const sendStance = () => ws && ws.readyState === 1 && ws.send(JSON.stringify({ stance: padStance }));
+  if (press(4)) { padStance = (padStance + 8) % 9; sendStance(); }   // LB: prev stance
+  if (press(5)) { padStance = (padStance + 1) % 9; sendStance(); }   // RB: next stance
+  if (press(0)) sendStance();                                        // A: re-tap = cycle mode
+  if (press(2)) { spin = spin === -1 ? 0 : -1; sendSpin(); }         // X: orbit CCW / off
+  if (press(1)) { spin = spin === 1 ? 0 : 1; sendSpin(); }           // B: orbit CW / off
+  if (press(3)) trails = !trails;                                    // Y: trails
+  if (press(9)) ws && ws.readyState === 1 && ws.send(JSON.stringify({ reset: true }));  // Start
+  padPrev = b;
+}
+
 function frame() {                                     // 60fps interpolated render
   requestAnimationFrame(frame);
+  pollGamepad();
   if (!curSt) return;
   const f = Math.max(0, Math.min(1.1, (performance.now() - tLast) / Math.max(8, dtServer)));
   const time = performance.now() / 1000;
@@ -333,6 +395,7 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   if (e.key === "t" || e.key === "T") { trails = !trails; return; }   // toggle motion trails
+  if (e.key === "f" || e.key === "F") { toggleFullscreen(); return; }  // big-screen mode
   if (e.key === "q" || e.key === "Q") { spin = spin === -1 ? 0 : -1; sendSpin(); return; }  // orbit CCW / off
   if (e.key === "e" || e.key === "E") { spin = spin === 1 ? 0 : 1; sendSpin(); return; }    // orbit CW / off
   if (e.key in KEYS) { KEYS[e.key] = 1; e.preventDefault(); sendDir(); }

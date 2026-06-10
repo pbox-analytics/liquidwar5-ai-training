@@ -194,10 +194,21 @@ class GameSession:
     def state(self) -> dict[str, Any]:
         e = self.engine
         oh = e.team_oh[0]                                  # (T,H,W) presence
-        present = oh.sum(0) > 0
-        cell = oh.argmax(0).to(torch.int8)
-        cell = torch.where(present, cell, torch.full_like(cell, -1))
-        cell = torch.where(e.walls[0], torch.full_like(cell, -2), cell)  # -2 = wall
+        # FRAME DIET: the full cell grid is ~295 KB of base64 per frame —
+        # 140 Mbit/s at 60fps, the whole reason the stream wasn't
+        # network-friendly — and the client only needs it for the wall mask
+        # (new game) and cosmetic contact sparks. Ship it at ~5 Hz (every
+        # 12th tick), plus the first ticks of a game (fresh walls reach a
+        # new client fast) and the end screen. Motes carry the per-frame
+        # motion. Also skips the per-tick GPU->CPU grid copy server-side.
+        send_grid = (int(e.tick) % 12 == 0) or int(e.tick) < 8 or self.done
+        grid_b64 = None
+        if send_grid:
+            present = oh.sum(0) > 0
+            cell = oh.argmax(0).to(torch.int8)
+            cell = torch.where(present, cell, torch.full_like(cell, -1))
+            cell = torch.where(e.walls[0], torch.full_like(cell, -2), cell)  # -2 = wall
+            grid_b64 = base64.b64encode(cell.cpu().numpy().tobytes()).decode()
         # Telemetry: gradient coverage (is the flood-fill complete?) and per-team
         # army spread = mean fighter distance to its own cursor. Spread should
         # FALL as the army flows in and packs around the cursor; a stuck/funneled
@@ -235,7 +246,7 @@ class GameSession:
             "tick": int(e.tick),
             "h": e.H, "w": e.W, "teams": e.T,
             "opponent": self.ckpt_name,
-            "grid_b64": base64.b64encode(cell.cpu().numpy().tobytes()).decode(),
+            "grid_b64": grid_b64,                         # None on most frames (see frame diet above)
             "pos_b64": base64.b64encode(pos.cpu().numpy().tobytes()).decode(),
             "pteam_b64": base64.b64encode(pteam.cpu().numpy().tobytes()).decode(),
             "pn": int(pidx.numel()),
@@ -393,6 +404,9 @@ async def ws(sock: WebSocket) -> None:
                     _e._burst[0, 0] = -0.9                  # strong inward pull -> a dense solid COLUMN, not a picket line
                 elif stance == 4:                           # Pulse: 3 modes (tap 5 to cycle)
                     pm = ctrl["pulse_mode"]
+                    # Q/E swirl works DURING Pulse (was never set -> the spin
+                    # keys silently did nothing while pulsing)
+                    _e._spin[0, 0] = 0.9 * spin_sign
                     if pm == 0:                             # wave: traveling rings + damage crests (the original)
                         ring = math.sin(n * 0.33)
                         _e._burst[0, 0] = 1.0 if ring > 0 else -0.6
@@ -405,7 +419,9 @@ async def ws(sock: WebSocket) -> None:
                     else:                                   # star: cymatic nodal-diameter mode — a 6-petal figure
                         _e._node_l[0, 0] = 16.0
                         _e._node_m[0, 0] = 6.0
-                        _e._node_w[0, 0] = 0.05             # petal sweep you can actually see (was 0.01 drift)
+                        # petal sweep you can actually see (was 0.01 drift);
+                        # direction follows Q/E like the sawblade's
+                        _e._node_w[0, 0] = 0.05 * (spin_sign if spin_sign != 0 else 1)
                         _e._node_v[0, 0] = 0.05             # rings pump under the petals
                         _e._surge[0, 0] = 3.0               # (was 2.0)
                 elif stance == 5:                           # Doom: violent black-hole implosion
