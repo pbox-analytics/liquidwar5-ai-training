@@ -83,6 +83,7 @@ class GameSession:
         self.engine._node_m = torch.zeros(1, teams, device=DEVICE)  # Chladni angular petals (Pulse star / Spin modes)
         self.engine._node_k = torch.zeros(1, teams, device=DEVICE)  # angular-mode radial pitch (galaxy spiral arms)
         self.engine._node_w = torch.zeros(1, teams, device=DEVICE)  # angular-mode rotation speed (sawblade sweep)
+        self.engine._node_v = torch.zeros(1, teams, device=DEVICE)  # ring breathe speed (Pulse rings/star energy)
         self.engine._surge = torch.ones(1, teams, device=DEVICE)  # per-team damage mult; IN-PLACE writes only (graph input)
         self.engine._wells_enabled = True            # play casts real cross-team wells (slots in engine.reset)
         # CUDA-graph capture/replay of the engine tick (the play loop is
@@ -337,7 +338,7 @@ async def ws(sock: WebSocket) -> None:
                 _e = session.engine                                # clear all stance knobs per game
                 _e._surge.fill_(1.0)   # neutral damage mult (in-place: graph input)
                 _e._doom_str.zero_(); _e._doom_horizon.zero_(); _e._doom_cap.zero_(); _e._vortex_str.zero_()
-                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_()
+                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_(); _e._node_v.zero_()
             elif session.done:
                 hold += 1
                 if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
@@ -346,12 +347,12 @@ async def ws(sock: WebSocket) -> None:
                     _e = session.engine
                     _e._surge.fill_(1.0)   # neutral damage mult (in-place: graph input)
                     _e._doom_str.zero_(); _e._doom_horizon.zero_(); _e._doom_cap.zero_(); _e._vortex_str.zero_()
-                    _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_()
+                    _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_(); _e._node_v.zero_()
             else:
                 if ctrl["dir"] and (ctrl["dir"][0] or ctrl["dir"][1]):
                     last_dir = ctrl["dir"]                  # heading the Drill/Wall point at
                 _e = session.engine
-                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_()
+                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_(); _e._node_v.zero_()
                 _e._surge.fill_(1.0)   # neutral damage mult (in-place: graph input)
                 _e._doom_str.zero_(); _e._doom_horizon.zero_(); _e._doom_cap.zero_(); _e._vortex_str.zero_()
                 stance = ctrl["stance"]                     # 0 Swarm 1 Spin 2 Drill 3 Wall 4 Pulse
@@ -398,13 +399,15 @@ async def ws(sock: WebSocket) -> None:
                         if ring > 0.5:
                             _e._surge[0, 0] = 4.0           # surge on each ring's crest
                     elif pm == 1:                           # rings: cymatic STANDING rings (Chladni circular mode)
-                        _e._node_l[0, 0] = 14.0             # nodal wavelength — concentric resonance bands
-                        _e._surge[0, 0] = 2.0
+                        _e._node_l[0, 0] = 12.0             # nodal wavelength — concentric resonance bands (was 14: tighter)
+                        _e._node_v[0, 0] = 0.05             # breathe 2.5x the old fixed 0.02 — visibly pumping
+                        _e._surge[0, 0] = 3.0               # (was 2.0) the resonance hits harder
                     else:                                   # star: cymatic nodal-diameter mode — a 6-petal figure
-                        _e._node_l[0, 0] = 18.0
+                        _e._node_l[0, 0] = 16.0
                         _e._node_m[0, 0] = 6.0
-                        _e._node_w[0, 0] = 0.01             # barely-breathing pattern drift
-                        _e._surge[0, 0] = 2.0
+                        _e._node_w[0, 0] = 0.05             # petal sweep you can actually see (was 0.01 drift)
+                        _e._node_v[0, 0] = 0.05             # rings pump under the petals
+                        _e._surge[0, 0] = 3.0               # (was 2.0)
                 elif stance == 5:                           # Doom: violent black-hole implosion
                     sgn = spin_sign if spin_sign != 0 else 1
                     lvl = ctrl["doom_level"]                # 1x/2x/3x charge (tap 6)

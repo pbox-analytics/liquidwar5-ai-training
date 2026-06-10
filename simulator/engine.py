@@ -838,7 +838,11 @@ class LiquidWarEngine:
             l_f = nodel.gather(1, self.fteam)                          # (B,N) wavelength or 0
             l_on = l_f > 0
             movable = movable | (l_on.unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 24))
-            rad = torch.sin(rn * 6.2832 / l_f.clamp(min=1.0) - self._tick_f * 0.02)
+            # ``_node_v``: per-team ring BREATHE speed (rad/tick; was a fixed
+            # 0.02 — the play server dials it up for a more energetic Pulse)
+            v_f = (self._node_v.gather(1, self.fteam)
+                   if hasattr(self, "_node_v") else 0.02)
+            rad = torch.sin(rn * 6.2832 / l_f.clamp(min=1.0) - self._tick_f * v_f)
             # outward (rad>0) must out-weigh the gradient's 10-14/step inward
             # pull or the standing rings never separate (same as _ring above)
             rw_n = torch.where(rad > 0, 26.0, 15.0) * l_on.float()
