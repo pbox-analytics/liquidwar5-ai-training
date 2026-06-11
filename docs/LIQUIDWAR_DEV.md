@@ -263,11 +263,15 @@ stays valid. Balance history (all server-tunable dials in the stance blocks):
 - **Parity**: the AI casts the same wells with the same dials — before
   2026-06-10 its Doom was a cosmetic self-collapse and the human duelled with
   superpowers the opponent lacked.
-- **Counterplay** (`well_shield` in the engine): your own active **Maelstrom
-  is the counter-current** — inside its radius your fighters shed up to 75% of
-  enemy well forces *and* the event-horizon devour (whirlpool vs black hole);
-  a held **Wall braces** for a further 45%. Same physics in training, so the
-  policy can learn the matchup.
+- **Counterplay** (`well_shield` + the reel in the engine): your own active
+  **Maelstrom is the counter-current** — your fighters shed up to 85% of enemy
+  well forces *and* the event-horizon devour (linear falloff sized to cover
+  the whole storm shell, not just the eye), and the storm **reels back its own
+  strays** beyond ~0.8R, so a Doom must out-muscle your current for every
+  fighter it strips. A held **Wall braces** for a further 45%. Measured:
+  vs a 2x Doom, undefended loses ~25% of its army; a Maelstrom defender wins
+  the engagement outright. Same physics in training, so the policy can learn
+  the matchup.
 
 ## 12. The mode system — every stance got a re-tap
 

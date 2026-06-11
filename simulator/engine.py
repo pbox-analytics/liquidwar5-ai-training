@@ -418,12 +418,12 @@ class LiquidWarEngine:
             o_R = self._vortex_range.gather(1, self.fteam).clamp(min=1.0)
             oy = o_pos[..., 0] - self.fy
             ox = o_pos[..., 1] - self.fx
-            o_fall = ((o_R * o_R / ((oy * oy + ox * ox) + o_R * o_R)) ** 2
+            o_fall = ((1.3 * o_R * o_R / ((oy * oy + ox * ox) + o_R * o_R)).clamp(max=1.0)
                       * (o_str > 0).float())
             wall_t = getattr(self, "_wall", None)
             brace = ((wall_t.abs().sum(-1).gather(1, self.fteam) > 0).float()
                      if wall_t is not None else torch.zeros(B2, N2, device=self.device))
-            cap_shield = (1.0 - 0.75 * o_fall) * (1.0 - 0.45 * brace)
+            cap_shield = (1.0 - 0.85 * o_fall) * (1.0 - 0.45 * brace)
             for t in range(self.T):
                 R_h = self._doom_horizon[:, t:t + 1]
                 dy = self._doom_pos[:, t, 0:1] - self.fy.float()
@@ -958,9 +958,14 @@ class LiquidWarEngine:
             oy = o_pos[..., 0] - self.fy
             ox = o_pos[..., 1] - self.fx
             on2 = oy * oy + ox * ox
-            o_fall = (o_R * o_R / (on2 + o_R * o_R)) ** 2 * (o_str > 0).float()
+            # LINEAR falloff x1.3 capped at 1 (was squared): the Maelstrom
+            # formation is a WIDE shell — a cursor-peaked shield left the rim
+            # at ~25% protection and Doom peeled it. Now ~85% at the eye and
+            # still ~50% at the shell's edge.
+            o_fall = ((1.3 * o_R * o_R / (on2 + o_R * o_R)).clamp(max=1.0)
+                      * (o_str > 0).float())
             brace = (wdd.abs().sum(-1) > 0).float() if wdd is not None else torch.zeros(B, N, device=self.device)
-            well_shield = (1.0 - 0.75 * o_fall) * (1.0 - 0.45 * brace)
+            well_shield = (1.0 - 0.85 * o_fall) * (1.0 - 0.45 * brace)
         # BLACK HOLE (Doom): a cross-team gravity well at a team's cursor that drags
         # the OTHER teams' fighters in (overriding their own gradient) so they get pulled
         # into the singularity and devastated. One SLOT per team (play server writes
@@ -1013,6 +1018,15 @@ class LiquidWarEngine:
                 w_radial = (wy / wn).unsqueeze(-1) * self._dy_t + (wx / wn).unsqueeze(-1) * self._dx_t
                 score = score - drag * (w_tan + wp_rad.unsqueeze(-1) * w_radial)  # bend their flow; their gradient still fights
                 movable = movable | ((w_en & w_in).unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 40))
+                # THE REEL: the storm recovers its OWN strays — fighters of the
+                # wielding team beyond ~0.8R feel a ramping pull back into the
+                # circulation, so an enemy Doom must out-muscle your current for
+                # every fighter it tries to strip off the shell.
+                w_own = (self.fteam == t).float() * (wp_str > 0).float()
+                reel = (16.0 * w_own * ((wn - 0.8 * wp_R) / wp_R).clamp(0.0, 1.0)).unsqueeze(-1)
+                score = score - reel * w_radial
+                movable = movable | (((self.fteam == t) & (wp_str > 0) & (wn > 0.8 * wp_R)).unsqueeze(-1)
+                                     & (ng <= cur.unsqueeze(-1) + 30))
         order = torch.where(movable, score, score.new_full((), float(BIGG))).argsort(dim=-1)
         ncell_s = ncell.gather(-1, order)                              # cells, best-first
         down_s = movable.gather(-1, order)
