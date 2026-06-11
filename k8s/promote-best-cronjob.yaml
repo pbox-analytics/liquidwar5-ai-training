@@ -33,7 +33,7 @@ spec:
               image: busybox:stable
               env:
                 - name: RUN
-                  value: wells-090
+                  value: wells-100
               command: ["/bin/sh", "-c"]
               args:
                 - |
