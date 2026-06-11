@@ -108,9 +108,10 @@ class GameSession:
             if path:
                 self.policy, n_act = _load_policy(path)
                 self.ckpt_name = Path(path).name
-                # legacy 8-stance checkpoint -> flat-action translation table
-                self._legacy = (torch.tensor(LEGACY_ACTION, device=DEVICE)
-                                if n_act == len(LEGACY_ACTION) else None)
+                # legacy small-head checkpoint (5- or 8-stance eras) -> the
+                # flat actions those base stances meant; full-width heads map raw
+                self._legacy = (torch.tensor(LEGACY_ACTION[:n_act], device=DEVICE)
+                                if n_act <= len(LEGACY_ACTION) else None)
 
     @property
     def done(self) -> bool:
