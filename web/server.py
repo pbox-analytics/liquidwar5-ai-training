@@ -184,15 +184,19 @@ class GameSession:
             # once the flood has reached the cursor, a little polish then stop
             if float(st["f"][0, 0, cy, cx]) < 1e8:
                 st["left"] = min(st["left"], 128)
+        fg = st["f"][0, 0]
+        fval = float(fg[cy, cx])
         # ARRIVE, don't orbit: the cursor steps cursor_speed (~6) cells/tick,
         # so near the click it overshoots back and forth forever (the jitter).
-        # Cap this seat's speed at the remaining Chebyshev distance — it
-        # decelerates and lands exactly on the clicked cell.
+        # Cap this seat's speed at the remaining PATH distance (the flood
+        # field's own value /10; Chebyshev fallback pre-flood) — full speed on
+        # detours, decelerating to land exactly on the clicked cell.
+        rem = (int(fval // 10) + (1 if fval % 10 else 0)) if fval < 1e8 \
+            else max(abs(ty - cy), abs(tx - cx))
         spd = getattr(e, "_cursor_speed_t", None)
         if spd is not None:
-            spd[t] = max(0, min(spd[t], max(abs(ty - cy), abs(tx - cx))))
-        fg = st["f"][0, 0]
-        if float(fg[cy, cx]) >= 1e8:                 # flood not here yet: greedy meanwhile
+            spd[t] = max(0, min(spd[t], rem))
+        if fval >= 1e8:                              # flood not here yet: greedy meanwhile
             return [max(-1, min(1, ty - cy)), max(-1, min(1, tx - cx))]
         patch = fg[cy - 1:cy + 2, cx - 1:cx + 2]     # cursor lives in 1..H-2, safe
         k = int(patch.argmin())
