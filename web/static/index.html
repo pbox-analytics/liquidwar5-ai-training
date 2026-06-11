@@ -77,6 +77,7 @@
     <input id="room" placeholder="room (blank = solo)" size="12"
            title="LAN play: open the same room name on another machine to join as the next team"
            style="background:#1b2233;color:#cdd6f4;border:1px solid #2a3550;border-radius:8px;padding:6px 10px">
+    <button id="invite" title="Copy a join link for another player on your network">🔗 invite</button>
     <button id="reset">New game</button>
     <button id="fs" title="Fullscreen (F)">⛶</button>
   </div>
@@ -166,58 +167,69 @@ function b64bytes(b64) {
   return a;
 }
 
-function onWS(st) {                                     // a fresh server frame (~45-60Hz)
+// ---- BINARY mote channel: u8 type(1=keyframe i16/2=delta i8) | u8 hasGrid |
+// u16 pn | u32 tick | pos | pteam u8[pn] | grid i8[W*H]?. Deltas accumulate
+// into curPos (fighters move <=6 cells/tick, so 1 byte each) — about half the
+// bytes of the old base64 stream and no atob/JSON parse on the hot path.
+let curPos = null, pendingGrid = null;
+function processGrid(g) {              // walls mask (cheap ~5Hz re-upload) + contact sparks
+  const mask = new Uint8Array(g.length);
+  for (let i = 0; i < g.length; i++) if (g[i] === -2) mask[i] = 255;
+  R.setGrid(W, H, mask);
+  for (let i = 0; i < g.length; i++) {
+    const t = g[i]; if (t < 0) continue;
+    const right = (i % W !== W-1) ? g[i+1] : -1, down = (i+W < g.length) ? g[i+W] : -1;
+    if (((right >= 0 && right !== t) || (down >= 0 && down !== t)) && particles.length < MAXP && Math.random() < 0.05) {
+      const a = Math.random()*6.283, sp = 0.5 + Math.random()*1.3;
+      particles.push({ x:(i%W)+0.5, y:((i/W)|0)+0.5, vx:Math.cos(a)*sp, vy:Math.sin(a)*sp-0.3, life:1, col:RGB[t%RGB.length] });
+    }
+  }
+}
+function onFrame(buf) {                                 // a fresh binary frame (~60Hz)
+  const dv = new DataView(buf);
+  const type = dv.getUint8(0), hasGrid = dv.getUint8(1);
+  const pn = dv.getUint16(2, true);
+  let off = 8;
+  if (type === 1) {                                     // keyframe: absolute int16
+    curPos = new Int16Array(buf.slice(off, off + pn * 4)); off += pn * 4;
+  } else {                                              // delta: int8, accumulate
+    if (!curPos || curPos.length !== pn * 2) return;    // lost sync — wait for a keyframe
+    const d = new Int8Array(buf, off, pn * 2); off += pn * 2;
+    for (let i = 0; i < pn * 2; i++) curPos[i] += d[i];
+  }
+  const now = performance.now();
+  if (tLast) dtServer = 0.85 * dtServer + 0.15 * (now - tLast);
+  tLast = now;
+  prevPT = curPT; curPT = new Uint8Array(buf.slice(off, off + pn)); off += pn;
+  R.pushFrame(curPos, curPT, pn);                       // bufferData copies — mutation-safe
+  // Conversion flashes: a mote whose team changed since last frame just got
+  // converted in combat. Cap spawns/frame — conversions can be hundreds.
+  if (prevPT && prevPT.length === curPT.length) {
+    let conv = 0;
+    for (let i = 0; i < pn; i++) if (prevPT[i] !== curPT[i] && curPT[i] < TEAMS) conv++;
+    const prob = conv > MAXFLASH ? MAXFLASH / conv : 1;
+    let spawned = 0;
+    for (let i = 0; i < pn && spawned < MAXFLASH; i++) {
+      const t = curPT[i];
+      if (prevPT[i] === t || t >= TEAMS) continue;
+      if (prob < 1 && Math.random() >= prob) continue;
+      flashes.push({ x: curPos[2*i+1] + 0.5, y: curPos[2*i] + 0.5, life: 1, col: RGB[t % RGB.length] });
+      spawned++;
+    }
+  }
+  if (hasGrid) {                                        // dims come from the HUD channel
+    const g = new Int8Array(buf.slice(off));
+    if (g.length === W * H) processGrid(g); else pendingGrid = g;
+  }
+}
+function onHud(st) {                                    // the JSON channel: HUD + cursors
   if (st.you !== undefined) MYT = st.you;
   const sized = (st.w !== W || st.h !== H);
   W = st.w; H = st.h; TEAMS = st.teams; curSt = st;
   if (sized) sizeCanvas();
-  const now = performance.now();
-  if (tLast) dtServer = 0.85 * dtServer + 0.15 * (now - tLast);
-  tLast = now;
-  // mote positions + teams -> straight into the GL ring buffers
-  const pos = new Int16Array(b64bytes(st.pos_b64).buffer);
-  prevPT = curPT; curPT = b64bytes(st.pteam_b64);
-  R.pushFrame(pos, curPT, st.pn);
-  // Conversion flashes: a mote whose team changed since last frame just got
-  // converted in combat. Pop a bright flash at its new position, coloured by
-  // the NEW team. Cap spawns/frame (random sampling) — conversions can be hundreds.
-  if (prevPT && prevPT.length === curPT.length) {
-    const cn = Math.min(curPT.length, pos.length >> 1);
-    let conv = 0;
-    for (let i = 0; i < cn; i++) if (prevPT[i] !== curPT[i] && curPT[i] < TEAMS) conv++;
-    const prob = conv > MAXFLASH ? MAXFLASH / conv : 1;
-    let spawned = 0;
-    for (let i = 0; i < cn && spawned < MAXFLASH; i++) {
-      const t = curPT[i];
-      if (prevPT[i] === t || t >= TEAMS) continue;
-      if (prob < 1 && Math.random() >= prob) continue;
-      flashes.push({ x: pos[2*i+1] + 0.5, y: pos[2*i] + 0.5, life: 1, col: RGB[t % RGB.length] });
-      spawned++;
-    }
-  }
-  // grid: wall mask for the shader (re-upload on new game/map), army-vs-army
-  // contact -> spawn sparks. FRAME DIET: the server only ships the grid ~5Hz
-  // (plus game start/end) — most frames carry motes only, so guard and reuse.
-  if (st.grid_b64) {
-    const raw = atob(st.grid_b64), g = new Int8Array(raw.length);
-    for (let i = 0; i < raw.length; i++) g[i] = (raw.charCodeAt(i) << 24) >> 24;
-    if (sized || st.map !== lastMap || st.tick < lastTick) {
-      const mask = new Uint8Array(g.length);
-      for (let i = 0; i < g.length; i++) if (g[i] === -2) mask[i] = 255;
-      R.setGrid(W, H, mask);
-      flashes = []; particles = [];
-    }
-    lastMap = st.map;
-    for (let i = 0; i < g.length; i++) {
-      const t = g[i]; if (t < 0) continue;
-      const right = (i % W !== W-1) ? g[i+1] : -1, down = (i+W < g.length) ? g[i+W] : -1;
-      if (((right >= 0 && right !== t) || (down >= 0 && down !== t)) && particles.length < MAXP && Math.random() < 0.05) {
-        const a = Math.random()*6.283, sp = 0.5 + Math.random()*1.3;
-        particles.push({ x:(i%W)+0.5, y:((i/W)|0)+0.5, vx:Math.cos(a)*sp, vy:Math.sin(a)*sp-0.3, life:1, col:RGB[t%RGB.length] });
-      }
-    }
-  }
-  lastTick = st.tick;
+  if (st.tick < lastTick || st.map !== lastMap) { flashes = []; particles = []; }   // new game
+  lastTick = st.tick; lastMap = st.map;
+  if (pendingGrid && pendingGrid.length === W * H) { processGrid(pendingGrid); pendingGrid = null; }
   updateHUD(st);
 }
 
@@ -361,7 +373,11 @@ function updateHUD(st) {
   const tdiv = document.getElementById("teams"); tdiv.innerHTML = "";
   st.fighters.forEach((f, t) => {
     const el = document.createElement("span"); el.className = "t";
-    el.innerHTML = `<span class="swatch" style="background:${COLORS[t%COLORS.length]}"></span><span style="display:inline-block;min-width:4ch;text-align:right">${f}</span>`;
+    const human = (st.seats || []).includes(t);
+    const tag = t === MYT ? "you" : human ? "P" + ((st.seats || []).indexOf(t) + 1) : "";
+    el.innerHTML = `<span class="swatch" style="background:${COLORS[t%COLORS.length]};${human ? "outline:2px solid #cdd6f4;outline-offset:1px" : ""}"></span>` +
+                   (tag ? `<span class="muted" style="font-size:11px">${tag}</span>` : "") +
+                   `<span style="display:inline-block;min-width:4ch;text-align:right">${f}</span>`;
     if (!st.alive[t]) el.style.opacity = .35; tdiv.appendChild(el);
   });
 }
@@ -376,13 +392,26 @@ function connect() {
   curSt = null; prevPT = curPT = null; flashes = []; tLast = 0; lastTick = -1; lastMap = ""; MYT = 0;
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?mode=${mode}&opponent=${opp}&teams=${teams}` +
                      (room ? `&room=${encodeURIComponent(room)}` : ""));
-  ws.onmessage = (e) => onWS(JSON.parse(e.data));      // store frame; the rAF loop interpolates + draws
+  ws.binaryType = "arraybuffer";
+  curPos = null; pendingGrid = null;
+  ws.onmessage = (e) => (e.data instanceof ArrayBuffer ? onFrame(e.data) : onHud(JSON.parse(e.data)));
 }
 // /?room=NAME deep link: prefill + auto-join (share this URL with the other player)
 {
   const r = new URLSearchParams(location.search).get("room");
   if (r) document.getElementById("room").value = r;
   document.getElementById("room").addEventListener("change", connect);
+  document.getElementById("invite").onclick = () => {
+    const el = document.getElementById("room");
+    if (!el.value.trim()) {                          // no room yet: mint one and join it
+      el.value = "lw-" + Math.random().toString(36).slice(2, 6);
+      connect();
+    }
+    const url = `${location.origin}${location.pathname}?room=${encodeURIComponent(el.value.trim())}`;
+    (navigator.clipboard ? navigator.clipboard.writeText(url) : Promise.reject())
+      .then(() => { const b = document.getElementById("invite"); b.textContent = "✓ copied"; setTimeout(() => b.textContent = "🔗 invite", 1500); })
+      .catch(() => prompt("Share this link:", url));
+  };
 }
 
 // Mouse is OPT-IN: it only steers while a button is held, so it doesn't fight

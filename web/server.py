@@ -194,25 +194,44 @@ class GameSession:
 
     def reset(self) -> None:
         self.engine.reset()
+        self._prev_pos = None                  # force a keyframe after every reset
 
-    def state(self) -> dict[str, Any]:
+    def frame_blob(self) -> bytes:
+        """The per-tick BINARY channel: mote positions + teams (+ the cell
+        grid at ~5 Hz). Fighters move <= unit_speed (6) cells/tick, so between
+        periodic int16 KEYFRAMES every position update is an int8 DELTA —
+        about half the bytes of the old base64-in-JSON stream, with zero
+        client-side atob/JSON cost. Layout (little-endian):
+          u8 type (1=keyframe int16 abs, 2=delta int8) | u8 hasGrid |
+          u16 pn | u32 tick | pos[2*pn] | pteam u8[pn] | grid i8[H*W]?
+        """
         e = self.engine
-        oh = e.team_oh[0]                                  # (T,H,W) presence
-        # FRAME DIET: the full cell grid is ~295 KB of base64 per frame —
-        # 140 Mbit/s at 60fps, the whole reason the stream wasn't
-        # network-friendly — and the client only needs it for the wall mask
-        # (new game) and cosmetic contact sparks. Ship it at ~5 Hz (every
-        # 12th tick), plus the first ticks of a game (fresh walls reach a
-        # new client fast) and the end screen. Motes carry the per-frame
-        # motion. Also skips the per-tick GPU->CPU grid copy server-side.
+        step = max(1, e.N // 9000)
+        pidx = torch.arange(0, e.N, step, device=e.device)
+        pos = torch.stack((e.fy[0, pidx], e.fx[0, pidx]), dim=1).reshape(-1).to(torch.int16).cpu()
+        prev = getattr(self, "_prev_pos", None)
+        key = prev is None or prev.numel() != pos.numel() or int(e.tick) % 30 == 0
+        self._prev_pos = pos
+        body = (pos if key else (pos - prev).to(torch.int8)).numpy().tobytes()
+        pteam = e.fteam[0, pidx].to(torch.uint8).cpu().numpy().tobytes()
         send_grid = (int(e.tick) % 12 == 0) or int(e.tick) < 8 or self.done
-        grid_b64 = None
+        grid = b""
         if send_grid:
+            oh = e.team_oh[0]
             present = oh.sum(0) > 0
             cell = oh.argmax(0).to(torch.int8)
             cell = torch.where(present, cell, torch.full_like(cell, -1))
             cell = torch.where(e.walls[0], torch.full_like(cell, -2), cell)  # -2 = wall
-            grid_b64 = base64.b64encode(cell.cpu().numpy().tobytes()).decode()
+            grid = cell.cpu().numpy().tobytes()
+        import struct
+        head = struct.pack("<BBHI", 1 if key else 2, 1 if send_grid else 0,
+                           pidx.numel(), int(e.tick))
+        return head + body + pteam + grid
+
+    def state(self) -> dict[str, Any]:
+        e = self.engine
+        oh = e.team_oh[0]                                  # (T,H,W) presence
+        # (motes + grid travel on the BINARY channel — see frame_blob)
         # Telemetry: gradient coverage (is the flood-fill complete?) and per-team
         # army spread = mean fighter distance to its own cursor. Spread should
         # FALL as the army flows in and packs around the cursor; a stuck/funneled
@@ -237,23 +256,10 @@ class GameSession:
                 "flood_pct": round(100 * flood / max(reach, 1)),
                 "spread": spread,
             }
-        # Particle stream for the animated client: a fixed-stride sample of fighter
-        # positions (identity-stable indices) + their team. The client interpolates
-        # each mote between frames and streaks it along its velocity (curr - prev),
-        # so motion is smooth 60fps flow rather than blinking cells. int16 positions
-        # pack tighter than the per-cell grid.
-        step = max(1, e.N // 9000)
-        pidx = torch.arange(0, e.N, step, device=e.device)
-        pos = torch.stack((e.fy[0, pidx], e.fx[0, pidx]), dim=1).reshape(-1).to(torch.int16)
-        pteam = e.fteam[0, pidx].to(torch.uint8)
         return {
             "tick": int(e.tick),
             "h": e.H, "w": e.W, "teams": e.T,
             "opponent": self.ckpt_name,
-            "grid_b64": grid_b64,                         # None on most frames (see frame diet above)
-            "pos_b64": base64.b64encode(pos.cpu().numpy().tobytes()).decode(),
-            "pteam_b64": base64.b64encode(pteam.cpu().numpy().tobytes()).decode(),
-            "pn": int(pidx.numel()),
             "cursors": e.cursor_pos[0].tolist(),
             "alive": e.team_alive[0].tolist(),
             "ai_doom": getattr(self, "_ai_doom", None),   # [team, y, x, lvl] while an AI holds Doom
@@ -476,7 +482,10 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n) -> int:
 
 
 class Player:
-    """One human seat in a room: socket + held-control state."""
+    """One human seat in a room: socket + held-control state + its own send
+    queue. LATEST-FRAME-WINS: the room loop never awaits a client send — a
+    slow WiFi link just drops stale frames instead of throttling the game for
+    everyone (the queue holds at most one pending frame)."""
 
     def __init__(self, sock: WebSocket, team: int) -> None:
         self.sock = sock
@@ -485,6 +494,27 @@ class Player:
         self.spin_sign = 1
         self.last_dir = [0, 1]
         self.c0_hist = [[0, 0], [0, 0]]
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        self.dead = False
+        self.task: asyncio.Task | None = None
+
+    def offer(self, frame) -> None:
+        """Queue a frame, evicting a stale unsent one (latest wins)."""
+        if self.queue.full():
+            try:
+                self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        self.queue.put_nowait(frame)
+
+    async def sender(self) -> None:
+        try:
+            while True:
+                blob, hud = await self.queue.get()
+                await self.sock.send_bytes(blob)
+                await self.sock.send_json(hud)
+        except Exception:
+            self.dead = True
 
 
 class Room:
@@ -515,11 +545,14 @@ class Room:
         if not free:
             return None
         p = Player(sock, free[0])
+        p.task = asyncio.create_task(p.sender())
         self.players[p.team] = p
         return p
 
     def leave(self, team: int) -> None:
-        self.players.pop(team, None)        # the seat reverts to AI control
+        p = self.players.pop(team, None)    # the seat reverts to AI control
+        if p is not None and p.task is not None:
+            p.task.cancel()
         if not self.players:
             self.closed = True
 
@@ -576,8 +609,10 @@ class Room:
                     humans[p.team] = (p.ctrl["target"], p.ctrl["dir"])
                 _e._cursor_speed_t = speeds                   # per-seat (Doom slows ITS holder only)
                 session.step(humans)
+            blob = session.frame_blob()
             st = session.state(); st["fps"] = round(fps, 1)
             st["players"] = len(players)
+            st["seats"] = sorted(self.players)            # which teams are humans (lobby chips)
             for p in players:
                 p.c0_hist.append(list(st["cursors"][p.team])); del p.c0_hist[:-7]   # comet aim window
             if session.done and not logged:
@@ -588,20 +623,18 @@ class Room:
             elif not session.done and st["tick"] and st["tick"] % 150 == 0:
                 print(f"[telemetry] tick={st['tick']} fps={fps:.1f} flood={st['flood_pct']}% "
                       f"spread={st['spread']} counts={st['fighters']}", flush=True)
-            # one shared frame; per-seat HUD fields layered on top
-            sends = []
+            # one shared binary frame + per-seat HUD JSON, via each player's
+            # latest-wins queue — the room loop NEVER blocks on a slow client
             for p in players:
+                if p.dead:
+                    self.leave(p.team)
+                    continue
                 msg = dict(st)
                 msg["you"] = p.team
                 msg["stance"] = STANCES[p.ctrl["stance"]]
                 msg["mode"] = _mode_name(p.ctrl)
                 msg["spin_dir"] = p.spin_sign
-                sends.append(p.sock.send_json(msg))
-            if sends:
-                results = await asyncio.gather(*sends, return_exceptions=True)
-                for p, r in zip(players, results):
-                    if isinstance(r, Exception):
-                        self.leave(p.team)
+                p.offer((blob, msg))
             t_work = loop.time()
             next_dl += dt                                # advance the absolute deadline
             sleep = next_dl - loop.time()

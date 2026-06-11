@@ -136,19 +136,7 @@ function onWS(st) {                                     // a fresh server frame 
   const bw = Math.max(1, (W / BLOOM_DIV) | 0), bh = Math.max(1, (H / BLOOM_DIV) | 0);
   if (bloom.width !== bw) { bloom.width = bw; bloom.height = bh; }
   if (glow.width !== W) { glow.width = W; glow.height = H; }
-  const now = performance.now();
-  if (tLast) dtServer = 0.85 * dtServer + 0.15 * (now - tLast);
-  tLast = now;
-  // particle positions (int16 y,x interleaved) + team -> typed arrays
-  pp = prevP; prevP = curP; prevPT = curPT;            // shift 3 snapshots: prevprev, prev, cur (+ prev team)
-  const pr = atob(st.pos_b64), pbuf = new Uint8Array(pr.length);
-  for (let i = 0; i < pr.length; i++) pbuf[i] = pr.charCodeAt(i);
-  curP = new Int16Array(pbuf.buffer);
-  const tr = atob(st.pteam_b64); curPT = new Uint8Array(tr.length);
-  for (let i = 0; i < tr.length; i++) curPT[i] = tr.charCodeAt(i);
-  pn = st.pn;
-  if (!prevP || prevP.length !== curP.length) prevP = curP;   // first frame / team-count change
-  if (!pp || pp.length !== curP.length) pp = prevP;           // ditto for the prevprev buffer
+  if (pendingGrid && pendingGrid.length === W * H) { applyGrid(pendingGrid); pendingGrid = null; }
   // Conversion flashes: a mote whose team changed since last frame just got
   // converted in combat. Pop a bright flash at its new position, coloured by
   // the NEW team. Cap spawns/frame (random sampling) — conversions can be hundreds.
@@ -167,11 +155,13 @@ function onWS(st) {                                     // a fresh server frame 
       spawned++;
     }
   }
-  // walls -> cached layer (static between maps); army-vs-army contact -> spawn sparks
-  // (the server ships the grid ~5Hz now — guard and reuse the cached wall layer)
-  if (st.grid_b64) {
-  const raw = atob(st.grid_b64), g = new Int8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) g[i] = (raw.charCodeAt(i) << 24) >> 24;
+  updateHUD(st);
+}
+
+// walls -> cached layer; army-vs-army contact -> spawn sparks (binary channel, ~5Hz)
+let acc = null, pendingGrid = null;
+function applyGrid(g) {
+  {
   const wimg = tmpCtx.createImageData(W, H);
   for (let i = 0; i < g.length; i++) {
     if (g[i] === -2) { wimg.data[i*4]=WALLRGB[0]; wimg.data[i*4+1]=WALLRGB[1]; wimg.data[i*4+2]=WALLRGB[2]; wimg.data[i*4+3]=255; }
@@ -187,7 +177,47 @@ function onWS(st) {                                     // a fresh server frame 
     }
   }
   }
-  updateHUD(st);
+}
+
+function onFrame(buf) {                 // binary mote frame (keyframe int16 / delta int8)
+  const dv = new DataView(buf);
+  const type = dv.getUint8(0), hasGrid = dv.getUint8(1);
+  const n = dv.getUint16(2, true);
+  let off = 8;
+  if (type === 1) {
+    acc = new Int16Array(buf.slice(off, off + n * 4)); off += n * 4;
+  } else {
+    if (!acc || acc.length !== n * 2) return;        // wait for a keyframe
+    const d = new Int8Array(buf, off, n * 2); off += n * 2;
+    for (let i = 0; i < n * 2; i++) acc[i] += d[i];
+  }
+  const now = performance.now();
+  if (tLast) dtServer = 0.85 * dtServer + 0.15 * (now - tLast);
+  tLast = now;
+  pp = prevP; prevP = curP; prevPT = curPT;          // shift the 3-snapshot history
+  curP = acc.slice();                                // copy: acc mutates under deltas
+  curPT = new Uint8Array(buf.slice(off, off + n)); off += n;
+  pn = n;
+  if (!prevP || prevP.length !== curP.length) prevP = curP;
+  if (!pp || pp.length !== curP.length) pp = prevP;
+  if (prevPT && prevPT.length === curPT.length) {
+    const cn = Math.min(curPT.length, curP.length >> 1);
+    let conv = 0;
+    for (let i = 0; i < cn; i++) if (prevPT[i] !== curPT[i] && curPT[i] < TEAMS) conv++;
+    const prob = conv > MAXFLASH ? MAXFLASH / conv : 1;
+    let spawned = 0;
+    for (let i = 0; i < cn && spawned < MAXFLASH; i++) {
+      const t = curPT[i];
+      if (prevPT[i] === t || t >= TEAMS) continue;
+      if (prob < 1 && Math.random() >= prob) continue;
+      flashes.push({ x: curP[2*i+1] + 0.5, y: curP[2*i] + 0.5, life: 1, col: COLORS[t % COLORS.length] });
+      spawned++;
+    }
+  }
+  if (hasGrid) {
+    const g = new Int8Array(buf.slice(off));
+    if (g.length === W * H) applyGrid(g); else pendingGrid = g;
+  }
 }
 
 function frame() {                                     // 60fps interpolated render of the motes
@@ -369,7 +399,8 @@ function connect() {
   const teams = parseInt(document.getElementById("oppcount").value) + 1;   // you + N opponents
   prevP = curP = curSt = pp = null; prevPT = curPT = null; flashes = []; tLast = 0;  // reset interpolation across a new game
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?mode=${mode}&opponent=${opp}&teams=${teams}`);
-  ws.onmessage = (e) => onWS(JSON.parse(e.data));      // store frame; the rAF loop interpolates + draws
+  ws.binaryType = "arraybuffer"; acc = null; pendingGrid = null;
+  ws.onmessage = (e) => (e.data instanceof ArrayBuffer ? onFrame(e.data) : onWS(JSON.parse(e.data)));
 }
 
 // Mouse is OPT-IN: it only steers while a button is held, so it doesn't fight
