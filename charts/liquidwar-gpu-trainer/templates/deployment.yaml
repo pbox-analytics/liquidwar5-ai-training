@@ -60,6 +60,10 @@ spec:
             - {{ .Values.config.updates | quote }}
             - "--lr"
             - {{ .Values.config.lr | quote }}
+            {{- with .Values.config.minibatches }}
+            - "--minibatches"
+            - {{ . | quote }}
+            {{- end }}
             {{- with .Values.config.entCoef }}
             - "--ent-coef"
             - {{ . | quote }}

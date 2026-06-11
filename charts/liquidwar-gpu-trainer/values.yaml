@@ -14,7 +14,7 @@ image:
   # registries.yaml trusts (the in-cluster svc DNS x509-fails on kubelet pull;
   # same lesson as the cpu-worker chart).
   repository: pandoras-box.local:5000/pbox/liquidwar-gpu-trainer
-  tag: "0.9.0-amd64"
+  tag: "0.9.1-amd64"
   pullPolicy: IfNotPresent
 
 # Exactly one trainer (single shared policy; self-play). Do not scale UP.
@@ -49,9 +49,11 @@ resources:
 config:
   # PPO / env hyperparameters (passed as rl.train CLI args).
   device: cuda
-  batchSize: 128          # 256 OOMed the 96 GB card: ppo_update materializes the
-                          # whole minibatch's egocentric views at once (a single
-                          # 28.7 GiB alloc in backward at 256). 128 peaks ~45 GB.
+  batchSize: 256          # 256 parallel games. The earlier 256-OOM was the
+                          # LEARNER, not the sim: minibatch memory scales with
+                          # batch/minibatches — 16 minibatches (was 4) cuts the
+                          # peak alloc 4x, so double the games fit fine.
+  minibatches: 16
   teams: 2                # duels, like play
   height: 80
   width: 110
@@ -63,7 +65,7 @@ config:
   # head — at 25 actions it pinned the joint entropy at ~5.3/5.42 (near
   # uniform) for 1100+ updates and the eval win-rate whipsawed 0<->1. Smaller
   # bonus lets the policy actually commit.
-  entCoef: "0.003"
+  entCoef: "0.001"
   wells: true             # cast the REAL cross-team Doom/Maelstrom in training
   # Fixed run dir (relative to /opt/training, lands on the NFS mount): first
   # boot starts fresh in place, every restart after resumes policy+optimizer.
