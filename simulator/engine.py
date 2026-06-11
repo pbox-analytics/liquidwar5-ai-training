@@ -410,13 +410,27 @@ class LiquidWarEngine:
         # the strip steals the enemy army instead of just relocating it onto you. Convert,
         # not delete (count invariant). horizon==0 (slot off) grabs nothing.
         if getattr(self, "_wells_enabled", False):
+            # the Maelstrom counter-current / Wall brace also slow the DEVOUR
+            # (same shield as the move-phase well forces, recomputed per tick)
+            B2, N2 = self.B, self.N
+            o_pos = self._vortex_pos.gather(1, self.fteam.unsqueeze(-1).expand(B2, N2, 2))
+            o_str = self._vortex_str.gather(1, self.fteam)
+            o_R = self._vortex_range.gather(1, self.fteam).clamp(min=1.0)
+            oy = o_pos[..., 0] - self.fy
+            ox = o_pos[..., 1] - self.fx
+            o_fall = ((o_R * o_R / ((oy * oy + ox * ox) + o_R * o_R)) ** 2
+                      * (o_str > 0).float())
+            wall_t = getattr(self, "_wall", None)
+            brace = ((wall_t.abs().sum(-1).gather(1, self.fteam) > 0).float()
+                     if wall_t is not None else torch.zeros(B2, N2, device=self.device))
+            cap_shield = (1.0 - 0.75 * o_fall) * (1.0 - 0.45 * brace)
             for t in range(self.T):
                 R_h = self._doom_horizon[:, t:t + 1]
                 dy = self._doom_pos[:, t, 0:1] - self.fy.float()
                 dx = self._doom_pos[:, t, 1:2] - self.fx.float()
                 grab = ((dy * dy + dx * dx) <= R_h * R_h) & (self.fteam != t)
                 grab = grab & (torch.rand(self.B, self.N, device=self.device)
-                               < self._doom_cap[:, t:t + 1])  # devour GRADUALLY — a drain you can fight
+                               < self._doom_cap[:, t:t + 1] * cap_shield)  # devour GRADUALLY — a drain you can fight
                 self.fteam = torch.where(grab, torch.full_like(self.fteam, t), self.fteam)
                 self.fhealth = torch.where(grab, torch.full_like(self.fhealth, NEW_HEALTH), self.fhealth)
         self._rebuild_views()
@@ -929,6 +943,24 @@ class LiquidWarEngine:
             # bar packs DENSE — with the server's stronger inward burst it reads
             # as a solid column, not a loose picket line.
             score = score + 20.0 * torch.sign(fwd_comp).unsqueeze(-1) * c_face
+        # WELL COUNTERPLAY: a team's OWN active Maelstrom is a COUNTER-CURRENT —
+        # whirlpool vs black hole: inside its radius your fighters are shielded
+        # from enemy well forces (up to 75% at the eye, squared falloff like the
+        # offensive current). A held Wall BRACES: dug-in fighters resist 45% of
+        # the drag. Both feed ``well_shield`` (B,N), multiplied into every
+        # enemy-well force below — so Maelstrom is the answer to Doom, and the
+        # policy can learn the matchup (same physics in training).
+        well_shield = None
+        if getattr(self, "_wells_enabled", False):
+            o_pos = self._vortex_pos.gather(1, self.fteam.unsqueeze(-1).expand(B, N, 2))
+            o_str = self._vortex_str.gather(1, self.fteam)
+            o_R = self._vortex_range.gather(1, self.fteam).clamp(min=1.0)
+            oy = o_pos[..., 0] - self.fy
+            ox = o_pos[..., 1] - self.fx
+            on2 = oy * oy + ox * ox
+            o_fall = (o_R * o_R / (on2 + o_R * o_R)) ** 2 * (o_str > 0).float()
+            brace = (wdd.abs().sum(-1) > 0).float() if wdd is not None else torch.zeros(B, N, device=self.device)
+            well_shield = (1.0 - 0.75 * o_fall) * (1.0 - 0.45 * brace)
         # BLACK HOLE (Doom): a cross-team gravity well at a team's cursor that drags
         # the OTHER teams' fighters in (overriding their own gradient) so they get pulled
         # into the singularity and devastated. One SLOT per team (play server writes
@@ -943,7 +975,7 @@ class LiquidWarEngine:
                 falloff = (bh_R * bh_R) / (bhn * bhn + bh_R * bh_R)    # 1 at the well, ->0 far (no map-wide vacuum)
                 is_en = (self.fteam != t)                              # (B,N) not the well's own team
                 in_range = (bhn < bh_R * 2.5) & (bh_str > 0)           # only nearby enemies get caught/dragged
-                pull = (bh_str * falloff * is_en.float()).unsqueeze(-1)  # (B,N,1) distance-weighted
+                pull = (bh_str * falloff * is_en.float() * well_shield).unsqueeze(-1)  # (B,N,1) shield-damped
                 bh_align = (bhy / bhn).unsqueeze(-1) * self._dy_t + (bhx / bhn).unsqueeze(-1) * self._dx_t
                 score = score - pull * bh_align                        # near enemies sucked in; distant ones free
                 movable = movable | ((is_en & in_range).unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 40))
@@ -974,7 +1006,7 @@ class LiquidWarEngine:
                 wfall = wfall * wfall
                 w_en = (self.fteam != t)                               # only the OTHER teams feel the current
                 w_in = (wn < wp_R * 2.5) & (wp_str > 0)
-                drag = (wp_str * wfall * w_en.float()).unsqueeze(-1)   # (B,N,1) distance-weighted
+                drag = (wp_str * wfall * w_en.float() * well_shield).unsqueeze(-1)  # (B,N,1) shield-damped
                 # tangential alignment matches the own-team swirl convention, so
                 # +1 entrains enemies in the same sense as the owner's spin
                 w_tan = wp_sgn.unsqueeze(-1) * ((-wx / wn).unsqueeze(-1) * self._dy_t + (wy / wn).unsqueeze(-1) * self._dx_t)

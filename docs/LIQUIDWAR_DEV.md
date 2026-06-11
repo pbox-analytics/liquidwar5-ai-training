@@ -263,6 +263,11 @@ stays valid. Balance history (all server-tunable dials in the stance blocks):
 - **Parity**: the AI casts the same wells with the same dials — before
   2026-06-10 its Doom was a cosmetic self-collapse and the human duelled with
   superpowers the opponent lacked.
+- **Counterplay** (`well_shield` in the engine): your own active **Maelstrom
+  is the counter-current** — inside its radius your fighters shed up to 75% of
+  enemy well forces *and* the event-horizon devour (whirlpool vs black hole);
+  a held **Wall braces** for a further 45%. Same physics in training, so the
+  policy can learn the matchup.
 
 ## 12. The mode system — every stance got a re-tap
 
