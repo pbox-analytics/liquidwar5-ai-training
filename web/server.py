@@ -99,7 +99,12 @@ class GameSession:
         self.policy: CursorPolicy | None = None
         self.ckpt_name = opponent
         if opponent not in ("heuristic", "random"):
-            path = _latest_checkpoint() if opponent == "latest" else opponent
+            if opponent == "latest":
+                path = _latest_checkpoint()
+            else:                                  # roster pick: a path RELATIVE to CKPT_DIR only
+                cand = (Path(CKPT_DIR) / opponent).resolve()
+                path = (str(cand) if str(cand).startswith(str(Path(CKPT_DIR).resolve()) + os.sep)
+                        and cand.is_file() else _latest_checkpoint())
             if path:
                 self.policy, n_act = _load_policy(path)
                 self.ckpt_name = Path(path).name
@@ -726,6 +731,22 @@ async def ws(sock: WebSocket) -> None:
         room.leave(player.team)
         if room.closed:
             ROOMS.pop(key, None)
+
+
+@app.get("/checkpoints")
+def checkpoints() -> list[dict[str, Any]]:
+    """The opponent roster: every checkpoint under CKPT_DIR (the live
+    ``rl/best/policy.pt`` plus the promotion job's datestamped archive),
+    newest first. The client populates the opponent dropdown from this."""
+    root = Path(CKPT_DIR)
+    seen = {}
+    for pat in ("rl/*/*.pt", "*/*.pt"):
+        for f in glob.glob(str(root / pat)):
+            seen[f] = os.path.getmtime(f)
+    return [{"id": str(Path(f).relative_to(root)),
+             "name": Path(f).stem,
+             "mtime": int(m)}
+            for f, m in sorted(seen.items(), key=lambda kv: -kv[1])]
 
 
 @app.get("/healthz")

@@ -44,7 +44,11 @@ spec:
                   mkdir -p /lwgood/rl/best
                   if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
                     cp "$src" "$dst.tmp" && mv "$dst.tmp" "$dst"
-                    echo "promoted $RUN best.pt ($(wc -c < "$dst") bytes)"
+                    # archive the generation (frozen roster entry; -p keeps the
+                    # trainer's mtime so "latest" stays the live slot)
+                    mkdir -p /lwgood/rl/archive
+                    cp -p "$src" "/lwgood/rl/archive/policy-$RUN-$(date +%m%d-%H%M).pt"
+                    echo "promoted + archived $RUN best.pt ($(wc -c < "$dst") bytes)"
                   else
                     echo "up to date"
                   fi

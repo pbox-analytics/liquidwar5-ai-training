@@ -55,7 +55,7 @@
       <option value="play">Play (you = team 0)</option>
       <option value="spectate">Spectate (AI vs AI)</option>
     </select>
-    <select id="opponent">
+    <select id="opponent" title="Latest auto-upgrades as training improves; archive entries are frozen generations">
       <option value="latest">Latest checkpoint</option>
       <option value="heuristic">Heuristic AI</option>
     </select>
@@ -396,6 +396,19 @@ function connect() {
   curPos = null; pendingGrid = null;
   ws.onmessage = (e) => (e.data instanceof ArrayBuffer ? onFrame(e.data) : onHud(JSON.parse(e.data)));
 }
+// Opponent roster: archived generations from /checkpoints (newest first) —
+// pick an older one to feel how far training has come.
+fetch("checkpoints").then(r => r.json()).then(list => {
+  const sel = document.getElementById("opponent");
+  for (const c of list) {
+    if (c.id === "rl/best/policy.pt") continue;       // that IS "Latest checkpoint"
+    const o = document.createElement("option");
+    o.value = c.id;
+    o.textContent = c.name.replace(/^policy-/, "gen ") + " (" + new Date(c.mtime * 1000).toLocaleDateString() + ")";
+    sel.appendChild(o);
+  }
+}).catch(() => {});
+
 // /?room=NAME deep link: prefill + auto-join (share this URL with the other player)
 {
   const r = new URLSearchParams(location.search).get("room");
