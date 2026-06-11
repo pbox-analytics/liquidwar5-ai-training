@@ -43,6 +43,12 @@ def collect_rollout(engine, policy, steps, device):
     anchored = torch.zeros(B, T, dtype=torch.bool, device=device)
     if n_anchor > 0:
         anchored[:n_anchor, 1:] = True
+    # STICKY STANCES: re-decide the stance every K ticks and HOLD it between —
+    # formations need time to exist before they can earn credit (see act()).
+    K_HOLD = 45
+    held = getattr(engine, "_held_stance", None)
+    if held is None or held.shape != (B, T):
+        held = torch.zeros(B, T, dtype=torch.long, device=device)
     obs_buf = []
     act_buf = torch.zeros(steps, B, T, dtype=torch.long, device=device)
     stance_buf = torch.zeros(steps, B, T, dtype=torch.long, device=device)
@@ -51,6 +57,7 @@ def collect_rollout(engine, policy, steps, device):
     rew_buf = torch.zeros(steps, B, T, device=device)
     alive_buf = torch.zeros(steps, B, T, dtype=torch.bool, device=device)
     done_buf = torch.zeros(steps, B, T, device=device)
+    decide_buf = torch.zeros(steps, dtype=torch.bool, device=device)
 
     prev_share = _team_share(engine)
 
@@ -59,7 +66,11 @@ def collect_rollout(engine, policy, steps, device):
         alive = engine.team_alive.clone()
         # Policy picks a cursor move AND a tactical stance per team; the joint
         # log-prob (move + stance) is stored for the PPO ratio.
-        dydx, stance, logprob, value, _ = act(policy, obs, T, alive)
+        decide = int(engine.tick) % K_HOLD == 0
+        dydx, stance, logprob, value, _ = act(policy, obs, T, alive,
+                                              held_stance=held, decide=decide)
+        held = stance                                  # carry the held stance forward
+        decide_buf[s] = decide
         if n_anchor > 0:                               # anchored opponents follow the heuristic, no stance
             h = _heuristic_dydx(engine)
             dydx = torch.where(anchored.unsqueeze(-1), h, dydx)
@@ -109,6 +120,7 @@ def collect_rollout(engine, policy, steps, device):
 
         rew_buf[s] = reward
 
+    engine._held_stance = held                          # persists across rollouts
     # Bootstrap value for the final obs.
     with torch.no_grad():
         last_obs = engine.get_observation()
@@ -118,6 +130,7 @@ def collect_rollout(engine, policy, steps, device):
         "obs": torch.stack(obs_buf, dim=0),             # (steps,B,1+3T,H,W)
         "actions": act_buf,
         "stances": stance_buf,
+        "stance_decide": decide_buf,
         "logprobs": logp_buf,
         "values": val_buf,
         "rewards": rew_buf,
@@ -175,6 +188,11 @@ def ppo_update(policy, optimizer, rollout, num_teams,
     alive = rollout["alive"].reshape(-1)                  # (steps*B*T,)
     actions = rollout["actions"].reshape(-1)
     stances = rollout["stances"].reshape(-1)
+    # sticky stances: the stance log-prob/entropy only exist on DECISION ticks
+    # (collection stored move-only logprobs on held ticks — mirror that here
+    # or the importance ratio is wrong)
+    smask = (rollout["stance_decide"].view(steps, 1, 1)
+             .expand(steps, B, T).reshape(-1).float())
     old_logp = rollout["logprobs"].reshape(-1)
     adv_f = adv.reshape(-1)
     ret_f = ret.reshape(-1)
@@ -205,14 +223,15 @@ def ppo_update(policy, optimizer, rollout, num_teams,
             move_logits, stance_logits, value = policy(ego[mb])
             mdist = torch.distributions.Categorical(logits=move_logits)
             sdist = torch.distributions.Categorical(logits=stance_logits)
-            new_logp = mdist.log_prob(actions[mb]) + sdist.log_prob(stances[mb])
+            m = smask[mb]
+            new_logp = mdist.log_prob(actions[mb]) + m * sdist.log_prob(stances[mb])
             ratio = (new_logp - old_logp[mb]).exp()
             a = adv_f[mb]
             l1 = ratio * a
             l2 = torch.clamp(ratio, 1 - clip, 1 + clip) * a
             policy_loss = -torch.min(l1, l2).mean()
             value_loss = (value - ret_f[mb]).pow(2).mean()
-            entropy = (mdist.entropy() + sdist.entropy()).mean()
+            entropy = (mdist.entropy() + m * sdist.entropy()).mean()
             loss = policy_loss + vf_coef * value_loss - ent_coef * entropy
 
             optimizer.zero_grad()

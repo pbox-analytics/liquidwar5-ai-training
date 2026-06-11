@@ -179,7 +179,8 @@ class CursorPolicy(nn.Module):
         return move_logits, stance_logits, value
 
 
-def act(policy, obs, num_teams, team_alive=None, deterministic=False):
+def act(policy, obs, num_teams, team_alive=None, deterministic=False,
+        held_stance=None, decide=True):
     """Sample cursor actions for all teams from the shared policy.
 
     Args:
@@ -188,6 +189,14 @@ def act(policy, obs, num_teams, team_alive=None, deterministic=False):
         num_teams: T.
         team_alive: (B, T) bool — dead teams emit "stay" with zero logprob.
         deterministic: argmax instead of sampling (eval).
+        held_stance: (B, T) long — STICKY STANCES (training): the stance held
+            since the last decision tick. When ``decide`` is False the held
+            stance is reused and the joint logprob/entropy carry the MOVE term
+            only — a stance that lasts one tick can never form a sawblade or
+            charge a nova, so per-tick resampling starves the stance head of
+            credit (the entropy bonus then pins it at uniform). Decisions
+            happen every K ticks; ppo_update masks the stance terms to match.
+        decide: this tick is a stance-decision tick (always True in play/eval).
 
     Returns:
         actions: (B, T, 2) long in {-1,0,1} for engine.step.
@@ -209,8 +218,13 @@ def act(policy, obs, num_teams, team_alive=None, deterministic=False):
     else:
         move = mdist.sample()
         stance = sdist.sample()
-    logprob = mdist.log_prob(move) + sdist.log_prob(stance)   # joint (independent heads)
-    entropy = mdist.entropy() + sdist.entropy()
+    if held_stance is not None and not decide:               # sticky: hold, move-only credit
+        stance = held_stance.reshape(-1)
+        logprob = mdist.log_prob(move)
+        entropy = mdist.entropy()
+    else:
+        logprob = mdist.log_prob(move) + sdist.log_prob(stance)   # joint (independent heads)
+        entropy = mdist.entropy() + sdist.entropy()
 
     move = move.view(B, T)
     stance = stance.view(B, T)
