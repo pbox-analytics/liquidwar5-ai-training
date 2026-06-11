@@ -484,9 +484,10 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n) -> int:
         _e._vortex_str[0, t] = 22.0 * _frac ** 0.5
         _e._vortex_range[0, t] = max(60.0, 1.5 * (_mass / 3.14159) ** 0.5)
         # radial component per mode: undertow spirals them inward to
-        # the rim, ejecta flings entrained enemies outward (scatters
-        # a formation off its cursor), shear is pure deflection
-        _e._vortex_rad[0, t] = (0.30, -0.45, 0.0)[mm]
+        # the rim, ejecta SHOVES them out (the siege-breaker vs an
+        # advancing Doom: -0.45 -> -0.7 so the push actually holds a
+        # disk off your shell), shear is pure deflection
+        _e._vortex_rad[0, t] = (0.30, -0.7, 0.0)[mm]
     elif stance == 7:                           # Atom: 2 forms (tap 8): orbital -> binary star
         sgn = spin_sign if spin_sign != 0 else 1
         if ctrl["atom_mode"] == 0:              # figure-8 electron orbitals
