@@ -78,9 +78,9 @@ _KNOBS = [
     (0.0,  0.0,  2.5, 0, 16, 8,  0.15, 0.03, 0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Pulse lattice
     (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Pulse nova (tick-phased)
     (0.0,  0.0,  2.5, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 1, 0.0,  0, 0, 0.0,  0),  # Pulse tide
-    (1.2,  0.0,  4.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 6.7,  1, 1, 0.0,  0),  # Doom 1x
-    (1.8,  0.0,  5.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 9.0,  1, 2, 0.0,  0),  # Doom 2x
-    (2.4,  0.0,  6.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 11.3, 1, 3, 0.0,  0),  # Doom 3x
+    (1.2,  0.0,  1.5, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 6.7,  1, 1, 0.0,  0),  # Doom 1x
+    (1.8,  0.0,  1.75, 0, 0, 0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 9.0,  1, 2, 0.0,  0),  # Doom 2x
+    (2.4,  0.0,  2.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 11.3, 1, 3, 0.0,  0),  # Doom 3x
     (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.30, 1),  # Maelstrom undertow
     (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, -0.45, 1), # Maelstrom ejecta
     (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  1),  # Maelstrom shear
@@ -325,7 +325,7 @@ def apply_stances(engine, action, dydx, team_start=0, human_teams=None):
         cpos = engine.cursor_pos.float()
         d_on = (doom_lvl > 0).float()
         engine._doom_pos[:, cols] = cpos[:, cols]
-        engine._doom_str[:, cols] = (doom_lvl * 32.0 * frac ** 1.5)[:, cols]
+        engine._doom_str[:, cols] = (doom_lvl * 24.0 * frac ** 1.5)[:, cols]
         engine._doom_range[:, cols] = (2.2 * ring).clamp(min=70.0)[:, cols]
         engine._doom_horizon[:, cols] = ((0.9 * blob_r).clamp(min=6.7) * d_on)[:, cols]
         engine._doom_cap[:, cols] = (0.12 * frac.sqrt() * d_on)[:, cols]

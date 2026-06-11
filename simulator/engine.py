@@ -418,12 +418,18 @@ class LiquidWarEngine:
             o_R = self._vortex_range.gather(1, self.fteam).clamp(min=1.0)
             oy = o_pos[..., 0] - self.fy
             ox = o_pos[..., 1] - self.fx
-            o_fall = ((1.3 * o_R * o_R / ((oy * oy + ox * ox) + o_R * o_R)).clamp(max=1.0)
+            o_d = (oy * oy + ox * ox).sqrt()
+            o_fall = (((1.5 * o_R - o_d) / (0.3 * o_R)).clamp(0.0, 1.0)
                       * (o_str > 0).float())
             wall_t = getattr(self, "_wall", None)
             brace = ((wall_t.abs().sum(-1).gather(1, self.fteam) > 0).float()
                      if wall_t is not None else torch.zeros(B2, N2, device=self.device))
-            cap_shield = (1.0 - 0.85 * o_fall) * (1.0 - 0.45 * brace)
+            # the DEVOUR shield is harder than the force shield (95% vs 85%):
+            # a parked Doom's horizon overlaps the storm's near arc and the
+            # rotation cycles fighters through it — at 85% that still ate the
+            # shell over ~30s; at 95% the storm holds while contact combat
+            # stays an honest fight
+            cap_shield = (1.0 - 0.95 * o_fall) * (1.0 - 0.45 * brace)
             for t in range(self.T):
                 R_h = self._doom_horizon[:, t:t + 1]
                 dy = self._doom_pos[:, t, 0:1] - self.fy.float()
@@ -958,11 +964,16 @@ class LiquidWarEngine:
             oy = o_pos[..., 0] - self.fy
             ox = o_pos[..., 1] - self.fx
             on2 = oy * oy + ox * ox
-            # LINEAR falloff x1.3 capped at 1 (was squared): the Maelstrom
-            # formation is a WIDE shell — a cursor-peaked shield left the rim
-            # at ~25% protection and Doom peeled it. Now ~85% at the eye and
-            # still ~50% at the shell's edge.
-            o_fall = ((1.3 * o_R * o_R / (on2 + o_R * o_R)).clamp(max=1.0)
+            # PLATEAU, not a slope: full 85% protection across the WHOLE
+            # storm (out to 1.2R, fading to zero by 1.5R). The two slope
+            # attempts both failed the same way — at close range Doom's
+            # falloff nears 1 while any mid-shell shield gap leaves the
+            # rim losing pull-vs-gradient, and stripping runs away as the
+            # victim drifts off the shield. Inside the plateau a 3x Doom's
+            # point-blank pull (~96) drops to ~14 ~= the gradient, and the
+            # reel finishes the argument.
+            o_d = on2.sqrt()
+            o_fall = (((1.5 * o_R - o_d) / (0.3 * o_R)).clamp(0.0, 1.0)
                       * (o_str > 0).float())
             brace = (wdd.abs().sum(-1) > 0).float() if wdd is not None else torch.zeros(B, N, device=self.device)
             well_shield = (1.0 - 0.85 * o_fall) * (1.0 - 0.45 * brace)
@@ -983,7 +994,12 @@ class LiquidWarEngine:
                 pull = (bh_str * falloff * is_en.float() * well_shield).unsqueeze(-1)  # (B,N,1) shield-damped
                 bh_align = (bhy / bhn).unsqueeze(-1) * self._dy_t + (bhx / bhn).unsqueeze(-1) * self._dx_t
                 score = score - pull * bh_align                        # near enemies sucked in; distant ones free
-                movable = movable | ((is_en & in_range).unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 40))
+                # the well can only PRY fighters off-gradient (movable relax)
+                # where their shield is weak — inside a defender's storm
+                # plateau Doom keeps the score bias but loses permission to
+                # move them, which is what stripping-on-approach actually was
+                movable = movable | ((is_en & in_range & (well_shield > 0.5)).unsqueeze(-1)
+                                     & (ng <= cur.unsqueeze(-1) + 40))
         # WHIRLPOOL (Maelstrom): a cross-team CURRENT at one team's cursor — the
         # rotational counterpart of Doom's gravity well. Where Doom drags enemies
         # RADIALLY into a singularity and captures them, the maelstrom is
@@ -1017,13 +1033,16 @@ class LiquidWarEngine:
                 w_tan = wp_sgn.unsqueeze(-1) * ((-wx / wn).unsqueeze(-1) * self._dy_t + (wy / wn).unsqueeze(-1) * self._dx_t)
                 w_radial = (wy / wn).unsqueeze(-1) * self._dy_t + (wx / wn).unsqueeze(-1) * self._dx_t
                 score = score - drag * (w_tan + wp_rad.unsqueeze(-1) * w_radial)  # bend their flow; their gradient still fights
-                movable = movable | ((w_en & w_in).unsqueeze(-1) & (ng <= cur.unsqueeze(-1) + 40))
+                movable = movable | ((w_en & w_in & (well_shield > 0.5)).unsqueeze(-1)
+                                     & (ng <= cur.unsqueeze(-1) + 40))
                 # THE REEL: the storm recovers its OWN strays — fighters of the
                 # wielding team beyond ~0.8R feel a ramping pull back into the
                 # circulation, so an enemy Doom must out-muscle your current for
                 # every fighter it tries to strip off the shell.
                 w_own = (self.fteam == t).float() * (wp_str > 0).float()
-                reel = (16.0 * w_own * ((wn - 0.8 * wp_R) / wp_R).clamp(0.0, 1.0)).unsqueeze(-1)
+                # full reel strength AT the rim (ramp 0.6R -> 1.0R), not a
+                # gentle slope that only matters two radii out
+                reel = (16.0 * w_own * ((wn - 0.6 * wp_R) / (0.4 * wp_R)).clamp(0.0, 1.0)).unsqueeze(-1)
                 score = score - reel * w_radial
                 movable = movable | (((self.fteam == t) & (wp_str > 0) & (wn > 0.8 * wp_R)).unsqueeze(-1)
                                      & (ng <= cur.unsqueeze(-1) + 30))

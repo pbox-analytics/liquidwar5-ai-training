@@ -422,8 +422,13 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n) -> int:
         # dark centre), the swirl spins it, both growing with charge.
         # The client's lensing/amber-disk shader sits in the hole.
         _e._spin[0, t] = (1.2, 1.8, 2.4)[lvl - 1] * sgn
-        # tidal surge scales with charge (was a flat 6x at every level)
-        _e._surge[0, t] = (4.0, 5.0, 6.0)[lvl - 1]
+        # tidal surge kept MODEST (1.5-2x; was 4-6x): gravity is Doom's
+        # weapon. Diagnosis behind the cut: conversions clustered at the
+        # FRONT, not the horizon — the old surge made the conveyor-fed rim
+        # a meat grinder that beat every formation; at ~2x a rebalanced
+        # Doom assault lands near parity with a plain attack (measured),
+        # so it's a strong commit, not an auto-win.
+        _e._surge[0, t] = (1.5, 1.75, 2.0)[lvl - 1]
         _e._doom_pos[0, t] = _e.cursor_pos[0, t].float()         # gravity well at YOUR cursor;
         _mass = float(_e.team_oh[0, t].sum())                     # pull ∝ YOUR mass (real black hole)
         # Disk target radius is MASS-SCALED: fighters pack one-per-cell,
@@ -437,7 +442,7 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n) -> int:
         _e._ring[0, t] = _ring_val
         _e._ring_ecc[0, t] = 1.0                # full oblate -> the edge-on Gargantua blade
         _frac = _mass / max(1.0, _e.fighters_per_team)
-        _e._doom_str[0, t] = lvl * 32.0 * _frac ** 1.5  # super-linear in mass: gentler pull peels the loosely-bound periphery off the enemy, not the whole army (x1/x2/x3 charge, tap 6)
+        _e._doom_str[0, t] = lvl * 24.0 * _frac ** 1.5  # (32->24, parity rebalance) super-linear in mass: peels the loosely-bound periphery, not the whole army (x1/x2/x3 charge, tap 6)
         # FINITE reach (was the full map diagonal, which made Doom
         # inescapable -> an auto-win): ~2.2x the disk radius, so a
         # dispersed or kiting enemy escapes the pull and Doom is a
