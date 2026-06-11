@@ -16,7 +16,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: liquidwar-gpu-trainer-build-0006
+  name: liquidwar-gpu-trainer-build-0007
   namespace: liquidwar
   labels:
     app.kubernetes.io/name: liquidwar-gpu-trainer
@@ -38,7 +38,7 @@ spec:
           image: alpine/git:latest
           env:
             - name: TRAINING_REF
-              value: "6381596"   # sticky stances + best.pt gate fix
+              value: "543547f"   # consolidated physics + curriculum + warm-start
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -55,7 +55,7 @@ spec:
           args:
             - "--context=dir:///workspace"
             - "--dockerfile=docker/Dockerfile.gpu-trainer"
-            - "--destination=registry.homer-ai.svc.cluster.local:5000/pbox/liquidwar-gpu-trainer:0.9.2-amd64"
+            - "--destination=registry.homer-ai.svc.cluster.local:5000/pbox/liquidwar-gpu-trainer:0.10.0-amd64"
             - "--skip-tls-verify"
             - "--single-snapshot"
             - "--use-new-run"
