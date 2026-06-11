@@ -126,8 +126,11 @@ class GameSession:
         return dydx, stance
 
     @torch.no_grad()
-    def step(self, human_target: list[int] | None,
-             human_dir: list[int] | None = None) -> None:
+    def step(self, humans: dict[int, tuple] | None = None) -> None:
+        """Advance one tick. ``humans`` maps each occupied seat (team index)
+        to its player's ``(mouse_target, key_dir)``; every other seat is
+        AI-driven (knobs + wells via apply_stances' seat masking)."""
+        humans = humans or {}
         # Policy inference every 2nd tick: the engine still steps at full rate,
         # the AI just holds its dydx/stance for ~32ms — imperceptible, and it
         # buys back ~half the inference cost (the last ms to a locked 60fps).
@@ -139,32 +142,40 @@ class GameSession:
             raw_dydx, ai_stance = cache
         dydx = raw_dydx.clone()                   # human rows are written below
         if self.mode == "play":
-            if human_dir is not None and (human_dir[0] or human_dir[1]):
-                # Keyboard (arrows/WASD): drive the cursor directly, LW-style.
-                dydx[0, 0, 0] = max(-1, min(1, human_dir[0]))
-                dydx[0, 0, 1] = max(-1, min(1, human_dir[1]))
-            elif human_target is not None:
-                # Mouse: cursor homes toward the pointed-at cell.
-                cy, cx = self.engine.cursor_pos[0, 0].tolist()
-                ty, tx = human_target
-                dydx[0, 0, 0] = max(-1, min(1, ty - cy))
-                dydx[0, 0, 1] = max(-1, min(1, tx - cx))
-            else:
-                # No human input: team 0 stays put — never let the AI drive YOUR
-                # cursor (that read as "the cursor moves on its own").
-                dydx[0, 0, 0] = 0
-                dydx[0, 0, 1] = 0
-        # apply_stances (flat actions) writes BOTH the AI knobs and the AI
-        # well slots [:, 1:] each tick — the human's slot 0, written by the ws
-        # loop, is never touched. Here we only extract the HUD markers.
+            for t, (target, hdir) in humans.items():
+                if hdir is not None and (hdir[0] or hdir[1]):
+                    # Keyboard (arrows/WASD): drive the cursor directly, LW-style.
+                    dydx[0, t, 0] = max(-1, min(1, hdir[0]))
+                    dydx[0, t, 1] = max(-1, min(1, hdir[1]))
+                elif target is not None:
+                    # Mouse: cursor homes toward the pointed-at cell.
+                    cy, cx = self.engine.cursor_pos[0, t].tolist()
+                    ty, tx = target
+                    dydx[0, t, 0] = max(-1, min(1, ty - cy))
+                    dydx[0, t, 1] = max(-1, min(1, tx - cx))
+                else:
+                    # No input: a human seat stays put — never let the AI
+                    # drive a player's cursor.
+                    dydx[0, t, 0] = 0
+                    dydx[0, t, 1] = 0
+        human_set = set(humans) if self.mode == "play" else set()
         self._ai_doom = None
         self._ai_mael = None
-        if ai_stance is not None:                  # AI opponents (teams 1..) hold their own stances
-            apply_stances(self.engine, ai_stance, dydx, team_start=1)
-            self._ai_fx_markers(ai_stance)
+        if ai_stance is not None:                  # AI fills every seat without a human
+            apply_stances(self.engine, ai_stance, dydx, human_teams=human_set)
+            self._ai_fx_markers(ai_stance, human_set)
+            # AI Doom holders glide slow too (parity with the human dial)
+            spd = getattr(self.engine, "_cursor_speed_t", None)
+            if spd is not None:
+                base = max(1, round(self.engine.W / 96))
+                acts = ai_stance[0].tolist()
+                for t in range(self.engine.T):
+                    if t not in human_set:
+                        a = acts[t]
+                        spd[t] = max(1, base // (a - 15)) if 16 <= a <= 18 else base
         self.engine.step(dydx)
 
-    def _ai_fx_markers(self, ai_stance: torch.Tensor) -> None:
+    def _ai_fx_markers(self, ai_stance: torch.Tensor, human_set=()) -> None:
         """HUD markers for the client's shaders: the first AI team holding a
         Doom action (16-18, charge level encoded) feeds the black-hole shader,
         the first holding Maelstrom (19-21) feeds the whirlpool. The wells
@@ -172,9 +183,9 @@ class GameSession:
         e = self.engine
         acts = ai_stance[0].tolist()
         alive = e.team_alive[0].tolist()
-        for t in range(1, e.T):
+        for t in range(e.T):
             a = acts[t]
-            if not alive[t]:
+            if not alive[t] or t in human_set:
                 continue
             if 16 <= a <= 18 and self._ai_doom is None:
                 self._ai_doom = [t, *e.cursor_pos[0, t].tolist(), a - 15]

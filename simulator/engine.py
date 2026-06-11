@@ -502,6 +502,8 @@ class LiquidWarEngine:
             adir = actions[0].long().clamp(-1, 1).tolist()
             cur = self.cursor_pos[0].tolist()
             alive = self.team_alive[0].tolist()
+            # optional per-team speeds (rooms: each Doom holder slows ITSELF)
+            speeds = getattr(self, "_cursor_speed_t", None)
             moved_l = [False] * self.T
             cost_l = [0] * self.T
             for t in range(self.T):
@@ -509,7 +511,7 @@ class LiquidWarEngine:
                 if not alive[t] or (dy0 == 0 and dx0 == 0):
                     continue
                 cy, cx = int(cur[t][0]), int(cur[t][1])
-                for _ in range(self.cursor_speed):
+                for _ in range(int(speeds[t]) if speeds is not None else self.cursor_speed):
                     for dy, dx in ((dy0, dx0), (dy0, 0), (0, dx0)):
                         ny = min(max(cy + dy, 1), self.H - 2)
                         nx = min(max(cx + dx, 1), self.W - 2)

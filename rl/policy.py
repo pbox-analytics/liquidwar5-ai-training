@@ -232,7 +232,7 @@ def act(policy, obs, num_teams, team_alive=None, deterministic=False):
     return dydx, stance, logprob, value, entropy
 
 
-def apply_stances(engine, action, dydx, team_start=0):
+def apply_stances(engine, action, dydx, team_start=0, human_teams=None):
     """Set the engine's per-team knobs from each team's chosen FLAT action —
     the exact stance+mode mapping the play server applies from player keys,
     vectorized over all (B, T) teams via the per-action knob tables. Also
@@ -246,6 +246,9 @@ def apply_stances(engine, action, dydx, team_start=0):
     :param team_start: only write knobs for teams ``>= team_start`` (so the
         play server can stance the AI opponents 1.. while leaving the human's
         team-0 knobs, already set from keys, intact). 0 = all teams (training).
+    :param human_teams: room play — the set of seats held by HUMANS; the AI
+        drives exactly the complement (overrides ``team_start``). The human
+        seats' knobs and well slots are never touched.
     """
     B, T = action.shape
     dev = action.device
@@ -280,40 +283,40 @@ def apply_stances(engine, action, dydx, team_start=0):
     ring = torch.where(ring_rin > 0,
                        0.5 * (ring_rin + (ring_rin ** 2 + af / 3.14159).sqrt()),
                        torch.zeros_like(ring_rin))
-    if team_start <= 0:                                          # training: drive all teams
+    if human_teams is None and team_start <= 0:                 # training: drive all teams
         engine._spin, engine._burst, engine._drill, engine._wall, engine._surge = spin, burst, drill, wall, surge
         engine._fig8 = fig8
         engine._node_l, engine._node_m, engine._node_k = node_l, node_m, node_k
         engine._node_w, engine._node_v = node_w, node_v
         engine._tide = tide
         engine._ring, engine._ring_ecc = ring, ring_ecc
-    else:                                                        # play: ONLY the AI opponents 1..; keep team 0 (human)
+        cols = list(range(T))                                    # wells: every team
+    else:                                                        # play: ONLY the AI-held seats; humans keep their key-set knobs
         if engine._surge is None:
             engine._surge = torch.ones(B, T, device=dev)
-        ts = team_start
-        for name, val in (("_spin", spin), ("_burst", burst), ("_surge", surge),
-                          ("_fig8", fig8), ("_node_l", node_l), ("_node_m", node_m),
-                          ("_node_k", node_k), ("_node_w", node_w), ("_node_v", node_v),
-                          ("_ring", ring), ("_ring_ecc", ring_ecc)):
-            getattr(engine, name)[:, ts:] = val[:, ts:]
-        engine._drill[:, ts:] = drill[:, ts:]
-        engine._wall[:, ts:] = wall[:, ts:]
-        engine._tide[:, ts:] = tide[:, ts:]
-    if getattr(engine, "_wells_enabled", False):
+        cols = ([t for t in range(T) if t not in human_teams] if human_teams is not None
+                else list(range(team_start, T)))
+        if cols:
+            for name, val in (("_spin", spin), ("_burst", burst), ("_surge", surge),
+                              ("_fig8", fig8), ("_node_l", node_l), ("_node_m", node_m),
+                              ("_node_k", node_k), ("_node_w", node_w), ("_node_v", node_v),
+                              ("_ring", ring), ("_ring_ecc", ring_ecc),
+                              ("_drill", drill), ("_wall", wall), ("_tide", tide)):
+                getattr(engine, name)[:, cols] = val[:, cols]
+    if getattr(engine, "_wells_enabled", False) and cols:
         # REAL cross-team wells, mass-scaled like the play server's key
         # handling (Doom charge level from the action; Maelstrom mode sets the
-        # radial component). In-place slot writes; slices respect team_start so
-        # the play server's human slot 0 is never touched.
-        sl = slice(max(0, team_start), None)
+        # radial component). In-place slot writes on the AI-held seats only —
+        # human seats' slots, written from their keys, are never touched.
         cpos = engine.cursor_pos.float()
         d_on = (doom_lvl > 0).float()
-        engine._doom_pos[:, sl] = cpos[:, sl]
-        engine._doom_str[:, sl] = (doom_lvl * 32.0 * frac ** 1.5)[:, sl]
-        engine._doom_range[:, sl] = (2.2 * ring).clamp(min=70.0)[:, sl]
-        engine._doom_horizon[:, sl] = ((0.9 * blob_r).clamp(min=6.7) * d_on)[:, sl]
-        engine._doom_cap[:, sl] = (0.12 * frac.sqrt() * d_on)[:, sl]
-        engine._vortex_pos[:, sl] = cpos[:, sl]
-        engine._vortex_str[:, sl] = (22.0 * frac.sqrt() * mael_on)[:, sl]
-        engine._vortex_range[:, sl] = (1.5 * blob_r).clamp(min=60.0)[:, sl]
-        engine._vortex_sign[:, sl] = 1.0
-        engine._vortex_rad[:, sl] = mael_rad[:, sl]
+        engine._doom_pos[:, cols] = cpos[:, cols]
+        engine._doom_str[:, cols] = (doom_lvl * 32.0 * frac ** 1.5)[:, cols]
+        engine._doom_range[:, cols] = (2.2 * ring).clamp(min=70.0)[:, cols]
+        engine._doom_horizon[:, cols] = ((0.9 * blob_r).clamp(min=6.7) * d_on)[:, cols]
+        engine._doom_cap[:, cols] = (0.12 * frac.sqrt() * d_on)[:, cols]
+        engine._vortex_pos[:, cols] = cpos[:, cols]
+        engine._vortex_str[:, cols] = (22.0 * frac.sqrt() * mael_on)[:, cols]
+        engine._vortex_range[:, cols] = (1.5 * blob_r).clamp(min=60.0)[:, cols]
+        engine._vortex_sign[:, cols] = 1.0
+        engine._vortex_rad[:, cols] = mael_rad[:, cols]
