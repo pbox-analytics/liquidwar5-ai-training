@@ -73,6 +73,14 @@ def parse_args():
     p.add_argument("--wells", action="store_true",
                    help="Cast the REAL cross-team Doom/Maelstrom wells in training "
                         "(matches play, where they are weapons, not body-shapes)")
+    p.add_argument("--warm-start", default="",
+                   help="Policy .pt to warm-start FROM when the run dir is fresh "
+                        "(ignored once latest.pt exists — resume wins)")
+    p.add_argument("--big-every", type=int, default=0,
+                   help="MAP-SIZE CURRICULUM: every Nth update collects on a "
+                        "160x240 board (batch 64, 1200 fighters/team) so the "
+                        "policy sees play-scale maps — the cure for small-map "
+                        "instincts scaling up into corner-camping. 0 = off")
     p.add_argument("--seed", type=int, default=0)
     # Kafka (optional)
     p.add_argument("--bootstrap-servers", default="")
@@ -121,6 +129,18 @@ def main():
         device=device, grad_iters=args.grad_iters)
     engine._wells_enabled = args.wells
     engine.reset()
+    big_engine = None
+    if args.big_every > 0:
+        big_engine = LiquidWarEngine(
+            batch_size=64, height=160, width=240,
+            num_teams=args.teams, fighters_per_team=1200,
+            device=device, grad_iters=args.grad_iters)
+        big_engine._wells_enabled = args.wells
+        # spread the big board's cold flood over ticks (play-server style):
+        # full convergence at 160x240 is ~800 sweeps and re-runs per game
+        # reset — uncapped, one big rollout took ~50 minutes
+        big_engine._grad_cap = 64
+        big_engine.reset()
 
     policy = CursorPolicy().to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
@@ -140,6 +160,10 @@ def main():
                   f"(best win-rate so far {best_winrate0:.3f})", flush=True)
         else:
             print(f"--resume {resume}: nothing saved yet — fresh run in place", flush=True)
+            if args.warm_start and Path(args.warm_start).exists():
+                policy.load_state_dict(torch.load(args.warm_start, map_location=device,
+                                                  weights_only=True))
+                print(f"warm-started policy from {args.warm_start}", flush=True)
     kafka = setup_kafka(args.bootstrap_servers, args.schema_registry)
 
     def save_latest(update: int, best_wr: float) -> None:
@@ -163,7 +187,9 @@ def main():
     best_winrate = best_winrate0
     for update in range(start_update, args.updates):
         t0 = time.time()
-        rollout = collect_rollout(engine, policy, args.steps, device)
+        env = (big_engine if big_engine is not None and args.big_every > 0
+               and update % args.big_every == args.big_every - 1 else engine)
+        rollout = collect_rollout(env, policy, args.steps, device)
         stats = ppo_update(
             policy, optimizer, rollout, num_teams=args.teams,
             epochs=args.epochs, minibatches=args.minibatches,
