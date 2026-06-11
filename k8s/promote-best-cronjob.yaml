@@ -1,0 +1,63 @@
+# Auto-promote the trainer's best.pt to the play server's checkpoint mount.
+#
+# The trainer (pandoras-box PRO 6000) writes eval-gated checkpoints to the
+# pbox NFS; the play server (pandora-storm, docker `lwplay`) loads the newest
+# .pt under /tmp/lwgood per SESSION — so promotion is just an mtime-gated copy
+# on the pstorm node, and the next game a client starts uses the new opponent.
+# best.pt is only written when the 48-game win-rate vs the fixed heuristic
+# ties-or-beats the run's best, so the eval gate lives in the trainer; this
+# job only moves the file. RUN selects which run dir is "live".
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: liquidwar-promote-best
+  namespace: liquidwar
+  labels:
+    app.kubernetes.io/name: liquidwar-promote-best
+    app.kubernetes.io/part-of: liquidwar5-ai
+spec:
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: pandora-storm
+          containers:
+            - name: promote
+              image: busybox:stable
+              env:
+                - name: RUN
+                  value: wells-090
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  src="/results/rl/$RUN/best.pt"
+                  dst="/lwgood/rl/best/policy.pt"
+                  [ -f "$src" ] || { echo "no best.pt yet for $RUN"; exit 0; }
+                  mkdir -p /lwgood/rl/best
+                  if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
+                    cp "$src" "$dst.tmp" && mv "$dst.tmp" "$dst"
+                    echo "promoted $RUN best.pt ($(wc -c < "$dst") bytes)"
+                  else
+                    echo "up to date"
+                  fi
+              volumeMounts:
+                - { name: results, mountPath: /results, readOnly: true }
+                - { name: lwgood, mountPath: /lwgood }
+          volumes:
+            - name: results
+              nfs:
+                server: 192.168.1.226
+                path: /mnt/dlred1/datalake/liquidwar/results
+                readOnly: true
+            - name: lwgood
+              hostPath:
+                path: /tmp/lwgood
+                type: DirectoryOrCreate
