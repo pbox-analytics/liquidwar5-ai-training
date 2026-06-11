@@ -194,7 +194,8 @@ class GameSession:
                 for t in range(self.engine.T):
                     if t not in human_set:
                         a = acts[t]
-                        spd[t] = max(1, base // (a - 15)) if 16 <= a <= 18 else base
+                        spd[t] = (max(1, round(base * (0.7, 0.5, 0.35)[a - 16]))
+                                  if 16 <= a <= 18 else base)
         self.engine.step(dydx)
 
     def _ai_fx_markers(self, ai_stance: torch.Tensor, human_set=()) -> None:
@@ -457,7 +458,7 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n) -> int:
         # losing army can no longer hold Doom as an unkillable last
         # stand — the devour dies with the disk, so the bigger blob
         # finally gets to consume it.
-        _e._doom_cap[0, t] = 0.12 * _frac ** 0.5
+        _e._doom_cap[0, t] = 0.09 * _frac ** 0.5    # (0.12 -> 0.09, third pass: the passive drain still out-earned its cost)
     elif stance == 6:                           # Maelstrom: a whirlpool CURRENT (cross-team vorticity)
         sgn = spin_sign if spin_sign != 0 else 1
         mm = ctrl["mael_mode"]                  # 0 undertow / 1 ejecta / 2 shear (tap 7)
@@ -506,7 +507,12 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n) -> int:
     # stance == 8 (Classic) sets NOTHING: every knob stays at the per-tick
     # zero, so the army just flows down the gradient — the original blob.
     _base_cs = max(1, round(_e.W / 96))
-    return max(1, _base_cs // ctrl["doom_level"]) if ctrl["stance"] == 5 else _base_cs
+    # EVERY Doom charge pays a mobility tax now (1x included — it was all
+    # upside: full speed + pull + free devour, and the AI camps it). The well
+    # is a commitment at any level; outmaneuvering it is the baseline counter.
+    if ctrl["stance"] == 5:
+        return max(1, round(_base_cs * (0.7, 0.5, 0.35)[ctrl["doom_level"] - 1]))
+    return _base_cs
 
 
 class Player:
