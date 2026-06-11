@@ -36,7 +36,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 
 from rl.eval import _heuristic_dydx
-from rl.policy import LEGACY_ACTION, CursorPolicy, act, apply_stances
+from rl.policy import LEGACY_ACTION, NUM_STANCES, CursorPolicy, act, apply_stances
 from simulator.engine import LiquidWarEngine, GRADIENT_INF, MAP_NAMES
 
 CKPT_DIR = os.environ.get("LW_CKPT_DIR", "/opt/training/results")  # NFS mount
@@ -58,9 +58,19 @@ def _load_policy(path: str) -> tuple[CursorPolicy, int]:
     8-stance policies keep working (their actions are mapped through
     ``LEGACY_ACTION`` to the flat stance-mode space)."""
     sd = torch.load(path, map_location=DEVICE, weights_only=True)
-    n_act = sd["stance_head.2.weight"].shape[0]
-    policy = CursorPolicy(num_stances=n_act).to(DEVICE)
-    policy.load_state_dict(sd)
+    if "stance_head.2.weight" in sd:
+        n_act = sd["stance_head.2.weight"].shape[0]
+        policy = CursorPolicy(num_stances=n_act).to(DEVICE)
+        policy.load_state_dict(sd)
+    else:
+        # PRE-STANCE era (move-only policy, June 2026-06-07 and earlier):
+        # load the matching weights; the stance head stays untrained and the
+        # session forces Classic — exactly how the game played in that era.
+        n_act = 0
+        policy = CursorPolicy().to(DEVICE)
+        own = policy.state_dict()
+        own.update({k: v for k, v in sd.items() if k in own and v.shape == own[k].shape})
+        policy.load_state_dict(own)
     policy.eval()
     return policy, n_act
 
@@ -109,9 +119,15 @@ class GameSession:
                 self.policy, n_act = _load_policy(path)
                 self.ckpt_name = Path(path).name
                 # legacy small-head checkpoint (5- or 8-stance eras) -> the
-                # flat actions those base stances meant; full-width heads map raw
-                self._legacy = (torch.tensor(LEGACY_ACTION[:n_act], device=DEVICE)
-                                if n_act <= len(LEGACY_ACTION) else None)
+                # flat actions those base stances meant; pre-stance era -> all
+                # Classic (the pure blob); full-width heads map raw
+                if n_act == 0:
+                    self._legacy = torch.full((NUM_STANCES,), NUM_STANCES - 1,
+                                              dtype=torch.long, device=DEVICE)
+                elif n_act <= len(LEGACY_ACTION):
+                    self._legacy = torch.tensor(LEGACY_ACTION[:n_act], device=DEVICE)
+                else:
+                    self._legacy = None
 
     @property
     def done(self) -> bool:
