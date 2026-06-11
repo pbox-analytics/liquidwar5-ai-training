@@ -1,6 +1,39 @@
 # Liquid War 5 AI Training
 
-Parameter evolution and neural network training for [liquidwar5-ai](https://github.com/pandora-wolf-meow/liquidwar5-ai).
+A GPU-native Liquid War: one PyTorch engine (`simulator/engine.py`) is **both
+the playable game and the RL training environment** — you play the exact engine
+the policy trains in, no fidelity gap.
+
+## Current state (June 2026)
+
+- **Play it**: `scripts/run-play.sh` → http://192.168.1.133:8099 — 60fps at
+  384×576 with 8000 fighters/team (the whole engine tick is CUDA-graph
+  captured; it is kernel-launch bound at batch=1). 9 stances × re-tap modes
+  (25 combinations), cross-team Doom/Maelstrom physics, WebGL2 mote renderer.
+- **LAN multiplayer**: open the same `/?room=<name>` on two machines (or use
+  the 🔗 invite button) — rooms share one game, humans + AI fill the seats,
+  binary delta protocol + per-client send queues keep slow WiFi guests cheap.
+- **The opponent** is a PPO self-play policy (`rl/`) trained on the cluster's
+  RTX PRO 6000 via ArgoCD (`charts/liquidwar-gpu-trainer`): a flat 25-action
+  stance-mode head with the real cross-team wells in training (`--wells`),
+  crash-proof `--resume` (a pod restart loses ≤10 updates). `best.pt` is
+  selected by win-rate vs a fixed heuristic and promoted to the play server's
+  checkpoint mount.
+- **Big screen / PWA**: F = fullscreen, gamepad supported, installable as a
+  web app over HTTPS.
+
+The full story — engine mechanics, the capturable-tick contract, stance system,
+balance history, training pipeline, and network protocol — lives in
+[`docs/LIQUIDWAR_DEV.md`](docs/LIQUIDWAR_DEV.md). Cluster/machine setup:
+[`docs/SETUP.md`](docs/SETUP.md).
+
+---
+
+## Historical: the genetic-evolution era (April 2026)
+
+*The sections below describe the original parameter-evolution system this repo
+started as (Kafka-distributed GA over the C engine's 11 scoring parameters).
+That pipeline still exists but is dormant; the PPO trainer above superseded it.*
 
 Uses a genetic algorithm to evolve 11 AI scoring parameters through self-play — pitting different parameter sets against each other across thousands of headless game simulations. Runs on a **5-node [k3s](https://k3s.io) cluster** — 104 CPU cores, 6 GPUs — distributed via Kafka.
 

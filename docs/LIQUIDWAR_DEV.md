@@ -6,9 +6,12 @@ How the GPU-native Liquid War clone got from "the browser version is broken" to
 playable game served at `web/server.py`. No C-engine bridge, no fidelity gap: you
 play the exact engine the policy trains in.
 
-Deploy: `scripts/run-play.sh` → http://192.168.1.133:8099 (pandora-storm, RTX 5090 Laptop, GPU-direct; moved off the RTX PRO 6000 2026-06-09).
-Controls: **arrows / WASD** move the cursor, **1–8** hold a stance (Swarm / Spin /
-Drill / Wall / Pulse / Doom / Maelstrom / Atom), **Q/E** spin direction, **T** trails.
+Deploy: `scripts/run-play.sh` → http://192.168.1.133:8099 (pandora-storm, RTX 5090 Laptop, GPU-direct; moved off the RTX PRO 6000 2026-06-09 — the PRO 6000 now trains the opponent, §13).
+Controls: **arrows / WASD** move the cursor (or hold the mouse), **1–9** hold a
+stance (Swarm / Spin / Drill / Wall / Pulse / Doom / Maelstrom / Atom / Classic;
+re-tap to cycle a stance's modes, §12), **Q/E** spin direction, **T** trails,
+**F** fullscreen, gamepad supported (§15). LAN multiplayer: open the same
+`/?room=<name>` link on two machines, or use the 🔗 invite button (§14).
 
 ---
 
@@ -165,7 +168,10 @@ pTrail/pAlpha`, which `frame()` reads each tick — find a feel, then bake the n
 
 ## 6. Hitting 60fps
 
-Profiling beat guessing — the engine was never the cap (8ms of a 16.7ms budget):
+*(2026-06-10: superseded in part by §10 — the engine eventually DID become the
+cap at the 384×576/8000 scale, and the fix was CUDA-graphing the whole tick.)*
+
+Profiling beat guessing — at the original scale the engine was never the cap (8ms of a 16.7ms budget):
 
 1. The loop slept a *full* `dt` *after* the work → fixed to sleep the remainder. 35→48.
 2. The per-frame sleep overshot ~1ms with no correction → **absolute-deadline
@@ -203,10 +209,170 @@ steps cell-by-cell so it can't slide through a barrier.
   bevel, tonemap) live in the shaders in `web/static/gl.js`.
 - **Combat / Pulse** — constants in the engine / `web/server.py`.
 
-## 9. Next
+## 10. The CUDA-graph tick (2026-06-10)
 
-- **Play test** the 100+ maps — find archetypes/params that play badly, tune.
-- **Retrain the policy** on the corrected engine + maps — the original project goal;
-  the current opponent is the heuristic, and old checkpoints learned in the broken
-  world (see the engine module docstring).
+At 384×576 with 8000 fighters/team the tick had crept to ~29ms — half the 60fps
+budget gone before serving a frame. Profiling showed the engine is
+**kernel-launch bound at B=1**: ~3,800 tiny CUDA kernels per tick, only ~11.5ms
+of actual GPU work; the rest was launch overhead and hidden GPU→CPU syncs.
+The fix, in order of payoff:
+
+1. **Strip every `.any()`/`.item()` sync from the hot path** (priority rounds,
+   rotation fixpoint, combat, capture). Each guard cost a blocking sync per
+   sub-step; the no-op kernels they "saved" are cheaper. The rotation fixpoint
+   became a fixed-count shrink + a branchless on-GPU select.
+2. **Cheaper algorithms where they were free**: priority rounds 8→4 (a blocked
+   fighter retries next sub-step anyway), the gradient relax as 3 pooling ops
+   per sweep instead of 8 shifted-slice minimums (bit-identical field, float32
+   carries exact integers), B=1 cursor stepping in plain python over a CPU
+   walls mirror (~180 launches/tick gone, verified bit-identical).
+3. **CUDA-graph capture of the whole tick** (`_graph_step`): record the kernel
+   sequence once per game (at tick 70, after the cold flood converges), then
+   replay it as a single unit. Engine: 20 → **11.2ms — the hardware floor**.
+
+The capturable-tick contract (anything inside `_step_body` must honor it):
+no data-dependent python control flow or CPU syncs; every cross-tick tensor
+round-trips through persistent buffers (a replay reads inputs at fixed
+addresses); time-varying scalars are GPU tensors (`_tick_f` — a python
+`self.tick` would bake into the graph as a constant); per-team effect dials are
+**slot tensors written in-place** (zero = off, so the kernel sequence is
+static). Kill switch: `LW_CUDA_GRAPH=0`. Training (B>1) keeps the eager path.
+Caveat discovered along the way: the engine is inherently nondeterministic on
+CUDA (argsort ties), so refactors are validated by invariants (one-per-cell,
+conservation, health bounds), never by same-seed replay.
+
+With the policy inference cached every 2nd tick, the live server holds
+**60+fps**, and ~58fps with two players in a room.
+
+## 11. Cross-team wells — Doom & Maelstrom as real weapons
+
+Doom's gravity well and Maelstrom's whirlpool current are the only effects that
+act on the *enemy*. Both live in per-team **slot tensors**
+(`_doom_*` / `_vortex_*`, one slot per team, in-place writes, str==0 = off) so
+any number of wielders coexist — dueling Dooms included — and the CUDA graph
+stays valid. Balance history (all server-tunable dials in the stance blocks):
+
+- **Maelstrom** = Doom rotated 90°: tangential entrainment (enemies near the
+  well are swept into orbit through your storm-cloud), undertow/ejecta/shear
+  radial modes. Nerfed from a cross-arena tractor beam to a local hazard:
+  squared falloff (25% at R), str `22·√frac`, reach 1.5× blob radius.
+- **Doom** can no longer be an unkillable last stand: capture rate scales with
+  the wielder's mass (`0.12·√frac`) and the horizon floor dropped 14 → the
+  rendered hole radius, so a whittled army's well stops out-eating the blob
+  consuming it.
+- **Parity**: the AI casts the same wells with the same dials — before
+  2026-06-10 its Doom was a cosmetic self-collapse and the human duelled with
+  superpowers the opponent lacked.
+
+## 12. The mode system — every stance got a re-tap
+
+Re-tapping a held stance's key cycles its modes (the HUD pill shows the mode):
+
+| key | stance | modes |
+|-----|--------|-------|
+| 1 | Swarm | cloud → **comet** (drill machinery aimed along your recent cursor motion) |
+| 2 | Spin | vortex → sawblade → galaxy |
+| 3 | Drill | slow → med → fast |
+| 4 | Wall | horizontal → vertical |
+| 5 | Pulse | wave → rings → star → **lattice** (superposed Chladni modes) → **nova** (~2.3s charge then detonation, 5× surge) → **tide** (directional traveling crests — new engine `_tide` bias) |
+| 6 | Doom | 1x → 2x → 3x charge |
+| 7 | Maelstrom | undertow → ejecta → shear |
+| 8 | Atom | orbital → **binary star** (lobes on a rotating axis, co-rotating with cohesion: two discs orbiting their barycenter) |
+| 9 | Classic | — (no knobs at all: the original gradient-following blob) |
+
+Maelstrom renders a whirlpool refraction shader (rotational ray-bending that
+composes with Doom's lensing); the AI's casts are visible via `ai_doom` /
+`ai_mael` HUD markers.
+
+## 13. Training the opponent — what we're doing now, and why
+
+**The goal:** an opponent that earns its difficulty — it should know every
+weapon the human has, use them when they pay, and know how to fight against
+them. Two structural problems blocked that, and 2026-06-10 removed both:
+
+1. **Crash fragility.** Earlier runs died and lost everything (no resume, no
+   optimizer checkpointing, numbered saves every 50 updates). Now:
+   `--resume <run-dir>` continues a run in place — `latest.pt` + `optim.pt` +
+   `meta.json` refresh every 10 updates (atomic tmp+rename), so the k8s pod can
+   crash or be re-deployed and the run continues within 10 updates. The same
+   mechanism doubles as a **mid-run hyperparameter swap**: push a chart change,
+   the pod restarts, training resumes with the new flag.
+2. **The action-space gap.** The policy used to pick from 8 base stances while
+   humans played 25 stance-mode combinations, and its Doom/Maelstrom were
+   training-time no-ops. Now the policy's stance head is the **flat 25-action
+   space** (`rl/policy.py:ACTIONS` — every stance×mode pair, including Doom
+   charge levels and wall orientation), `apply_stances` maps actions through
+   per-action knob tables carrying the *exact* play-server dials, and
+   `--wells` casts the real cross-team physics in training. Self-play means it
+   learns to use *and* defend against everything simultaneously. Legacy
+   8-action checkpoints still load in play via `LEGACY_ACTION` mapping.
+
+**The pipeline** (gitops, ArgoCD watches `main`):
+`gitops-containerize` branch (working code) → kaniko in-cluster build
+(`k8s/kaniko-build-job-gpu.yaml`, bump job name + `TRAINING_REF` + tag) →
+`charts/liquidwar-gpu-trainer` values on `main` (image tag, `replicaCount: 1`,
+`config.*` hyperparameters) → trainer Deployment on **pandoras-box's RTX PRO
+6000** (96 GB; freed by parking `comfyui-pbox-{0,1,2}` via project-homer's
+`gpus.yaml` mode toggle — flip replicas, run `scripts/regen-gpu-values.py`,
+push both repos). Checkpoints land on the pbox NFS
+(`/mnt/dlred1/datalake/liquidwar/results/rl/<run>/`); promote a winning
+`best.pt` to `/tmp/lwgood/rl/best/policy.pt` on pstorm to upgrade the live
+opponent. **Batch ≤128**: 256 OOMs even 96 GB (ppo_update materializes
+whole-minibatch egocentric views — a single 28.7 GiB alloc in backward).
+
+**Current run** (`wells-090`): 5000 updates, batch 128, teams 2, `--wells`,
+flat 25-action head. Watch the `[eval] win-rate vs heuristic` lines —
+`best.pt` is selected by that, not by self-play return. Known issue being
+tuned: with 25 actions the default entropy bonus (`--ent-coef 0.01`) pinned
+the joint entropy near uniform (~5.3 of max 5.42) for 1000+ updates with
+whipsawing evals; dropped to 0.003 mid-run (via the resume mechanism) to let
+the policy commit. If it still won't sharpen, anneal further (0.001).
+
+## 14. Multiplayer rooms & the network protocol
+
+`/?room=<name>` shares one game: the first client creates the room (their
+mode/opponent/teams win), later clients take the next free seat, leavers hand
+their seat back to the AI mid-game. One server game loop per room; every seat
+holds stances/modes independently (`_apply_player_stance`), including per-seat
+Doom cursor slowdown. The 🔗 invite button mints a room and copies the join
+link; toolbar chips show human seats ("you" / "P2").
+
+The wire (designed so a phone on weak WiFi is a fine guest):
+
+- **Binary mote channel**: `u8 type | u8 hasGrid | u16 pn | u32 tick | pos |
+  teams | grid?`. Positions are int16 **keyframes** every 30 ticks and int8
+  **deltas** between (fighters move ≤6 cells/tick — always fits a byte).
+  Delta frames are ~48KB vs ~110KB of the old base64-in-JSON; decode is a
+  typed-array add loop, no `atob`/JSON on the hot path.
+- **The cell grid ships at ~5Hz** (plus game start/end) inside the blob — the
+  clients only need it for the wall mask and cosmetic contact sparks; motes
+  carry the motion (the renderer interpolates between frames).
+- **HUD JSON per seat** (small): cursors, counts, seats, your stance pill.
+- **Latest-frame-wins send queues**: the room loop never awaits a client
+  send — each player has a 1-deep queue + sender task, so a slow consumer
+  drops stale frames instead of throttling the room (verified: a 6fps-reader
+  guest left the room loop at 63fps and a fast peer at full rate).
+
+Headroom if internet play ever matters: permessage-deflate (the grid is highly
+compressible), 30Hz frames for remote clients, client-side cursor echo.
+
+## 15. Big screen & PWA
+
+**F** (or ⛶) sends the canvas fullscreen — chrome disappears, works on any
+TV browser. Gamepad: stick/d-pad moves, LB/RB cycle the held stance, A re-taps
+(cycles its mode), X/B set spin, Y trails, Start = new game. The page is an
+installable PWA (`manifest.json` + icons + a minimal service worker) — the
+install prompt needs HTTPS, e.g. `tailscale serve` on pstorm.
+
+## 16. Next
+
+- **Watch `wells-090`** converge (entropy should fall, evals stabilize); promote
+  its `best.pt` to `/tmp/lwgood` when it beats the current opponent in play.
+  Consider auto-promotion with an eval gate.
+- **League training** — anchor against 2-3 frozen past checkpoints, not just the
+  heuristic, to punish one-trick strategies (~20 lines in `collect_rollout`).
+- **Internet play** — deflate + 30Hz remote frames + cursor echo (see §14).
+- **Telemetry** — the trainer's Kafka publishing is wired but off; the cluster
+  has Kafka + Grafana. A `/metrics` endpoint on the play server would close the
+  loop.
 - `docs/POTENTIAL_FEATURES.md` — slime-mold special moves + fluid-clash backlog.
