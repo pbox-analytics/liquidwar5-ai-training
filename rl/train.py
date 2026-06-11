@@ -206,10 +206,14 @@ def main():
             torch.save(policy.state_dict(), ckpt_dir / f"upd_{update:05d}.pt")
             # Select best.pt by REAL skill — 1v1 win-rate vs the fixed heuristic — not the
             # self-play return (which doesn't track skill and gave us a weak best.pt last run).
-            wr = win_rate(policy, "heuristic", games=24, teams=2, height=args.height,
+            wr = win_rate(policy, "heuristic", games=48, teams=2, height=args.height,
                           width=args.width, fighters=args.fighters, device=device)
             print(f"  [eval] win-rate vs heuristic 1v1 = {wr:.3f}  (best {best_winrate:.3f})", flush=True)
-            if wr > best_winrate:
+            # >= not >: once a (possibly lucky) eval hits 1.000, a strict > can
+            # never be beaten and best.pt freezes for the rest of the run —
+            # on ties the LATER checkpoint wins (better on average), and 48
+            # games (was 24) keeps noise from minting cheap 1.000s.
+            if wr >= best_winrate:
                 best_winrate = wr
                 torch.save(policy.state_dict(), ckpt_dir / "best.pt")
 
