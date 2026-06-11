@@ -74,6 +74,9 @@
       <option value="4">Map: Rooms</option>
       <option value="5">Map: Corners</option>
     </select>
+    <input id="room" placeholder="room (blank = solo)" size="12"
+           title="LAN play: open the same room name on another machine to join as the next team"
+           style="background:#1b2233;color:#cdd6f4;border:1px solid #2a3550;border-radius:8px;padding:6px 10px">
     <button id="reset">New game</button>
     <button id="fs" title="Fullscreen (F)">⛶</button>
   </div>
@@ -118,6 +121,7 @@ let spin = 1;        // swarm orbit sign mirrored to the server (1 / -1 / 0)
 function updateSpinPill() { document.getElementById("spinPill").textContent = "spin " + (spin === 1 ? "↻" : spin === -1 ? "↺" : "·"); }
 function sendSpin() { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ spin })); updateSpinPill(); }
 let W = 110, H = 80, TEAMS = 4, target = null, ws = null;
+let MYT = 0;                                           // our seat (team index) — server-assigned in rooms
 
 function sizeCanvas() {
   // Fit the whole grid on screen; the GL renderer sizes its buffers to the
@@ -163,6 +167,7 @@ function b64bytes(b64) {
 }
 
 function onWS(st) {                                     // a fresh server frame (~45-60Hz)
+  if (st.you !== undefined) MYT = st.you;
   const sized = (st.w !== W || st.h !== H);
   W = st.w; H = st.h; TEAMS = st.teams; curSt = st;
   if (sized) sizeCanvas();
@@ -302,7 +307,7 @@ function frame() {                                     // 60fps interpolated ren
   doomA += ((holeOn ? 0.55 + 0.45 * doomLvl : 0) - doomA) * Math.min(1, dt * (holeOn ? 2.2 : 9));
   doomR += ((4.4 + 2.3 * doomLvl) - doomR) * Math.min(1, dt * 3.5);   // amber band (1.5*r) tracks the fighters' _ring orbit
   if (doomA < 0.006) doomA = 0;
-  const holeC = aiDoom ? [aiDoom[2], aiDoom[1]] : [curSt.cursors[0][1], curSt.cursors[0][0]];
+  const holeC = aiDoom ? [aiDoom[2], aiDoom[1]] : [curSt.cursors[MYT][1], curSt.cursors[MYT][0]];
   const hole = { x: holeC[0] + .5, y: holeC[1] + .5,
                  r: doomR, a: doomA, spin: curSt.spin_dir || 1 };
   // Maelstrom whirlpool: same one-effect slot policy as the hole (yours wins).
@@ -310,7 +315,7 @@ function frame() {                                     // 60fps interpolated ren
   const aiMael = !maelOn && curSt.ai_mael;
   whirlA += (((maelOn || aiMael) ? 1.0 : 0) - whirlA) * Math.min(1, dt * ((maelOn || aiMael) ? 2.5 : 6));
   if (whirlA < 0.01) whirlA = 0;
-  const wc = maelOn ? [curSt.cursors[0][1], curSt.cursors[0][0]] : (aiMael ? [aiMael[2], aiMael[1]] : [0, 0]);
+  const wc = maelOn ? [curSt.cursors[MYT][1], curSt.cursors[MYT][0]] : (aiMael ? [aiMael[2], aiMael[1]] : [0, 0]);
   const whirl = { x: wc[0] + .5, y: wc[1] + .5, r: 30,
                   a: whirlA, dir: maelOn ? (curSt.spin_dir || 1) : 1 };
   // cursors: soft halo + pulsating ring + white core (drawn crisp, post-bloom)
@@ -318,15 +323,15 @@ function frame() {                                     // 60fps interpolated ren
   const beat = 1 + 0.3 * Math.sin(performance.now() / 170);
   curSt.cursors.forEach((c, t) => {
     if (!curSt.alive[t]) return;
-    if (doomA > 0.25 && t === (aiDoom ? aiDoom[0] : 0)) return;  // the black hole IS that team's cursor
+    if (doomA > 0.25 && t === (aiDoom ? aiDoom[0] : MYT)) return;  // the black hole IS that team's cursor
     const col = RGB[t % RGB.length];
     const x = c[1] + .5, y = c[0] + .5;
-    const surge = (t === 0 && curSt.pulse_active) ? 1.7 : 1;
-    const D = (t === 0 ? 7.4 : 5.6) * beat * surge;     // ring diameter, grid cells
+    const surge = (t === MYT && curSt.pulse_active) ? 1.7 : 1;
+    const D = (t === MYT ? 7.4 : 5.6) * beat * surge;   // ring diameter, grid cells
     ck = pushFx(curArr, ck, x, y, D * 1.8, 0, col, 0.14);          // halo
     ck = pushFx(curArr, ck, x, y, D, 1, col, 0.85);                // ring
     ck = pushFx(curArr, ck, x, y, D * 0.45, 1,
-                (t === 0 && curSt.pulse_active) ? YELLOW : WHITE, 0.5);  // inner ring
+                (t === MYT && curSt.pulse_active) ? YELLOW : WHITE, 0.5);  // inner ring
     ck = pushFx(curArr, ck, x, y, 1.6, 0, WHITE, 0.9);             // core dot
   });
   R.render({
@@ -352,7 +357,7 @@ function updateHUD(st) {
   const SI = { Swarm: "🐝", Spin: "🌀", Drill: "➤", Wall: "🛡", Pulse: "💥", Doom: "🕳", Maelstrom: "🌪", Atom: "⚛", Classic: "🌊" };
   sp.textContent = (SI[st.stance] || "") + " " + (st.stance ?? "—") + (st.mode ? " ·" + st.mode : "");
   sp.style.background = SC[st.stance] || "#1b2233"; sp.style.color = "#fff";
-  document.getElementById("opp").textContent = st.opponent;
+  document.getElementById("opp").textContent = st.opponent + (st.players > 1 ? ` · ${st.players}P` : "");
   const tdiv = document.getElementById("teams"); tdiv.innerHTML = "";
   st.fighters.forEach((f, t) => {
     const el = document.createElement("span"); el.className = "t";
@@ -365,11 +370,19 @@ function connect() {
   if (ws) ws.close();
   const mode = document.getElementById("mode").value;
   const opp = document.getElementById("opponent").value;
-  document.getElementById("modeLabel").textContent = mode;
-  const teams = parseInt(document.getElementById("oppcount").value) + 1;   // you + N opponents
-  curSt = null; prevPT = curPT = null; flashes = []; tLast = 0; lastTick = -1; lastMap = "";
-  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?mode=${mode}&opponent=${opp}&teams=${teams}`);
+  const room = document.getElementById("room").value.trim();
+  document.getElementById("modeLabel").textContent = mode + (room ? ` · room ${room}` : "");
+  const teams = parseInt(document.getElementById("oppcount").value) + 1;   // humans + AI share these seats
+  curSt = null; prevPT = curPT = null; flashes = []; tLast = 0; lastTick = -1; lastMap = ""; MYT = 0;
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?mode=${mode}&opponent=${opp}&teams=${teams}` +
+                     (room ? `&room=${encodeURIComponent(room)}` : ""));
   ws.onmessage = (e) => onWS(JSON.parse(e.data));      // store frame; the rAF loop interpolates + draws
+}
+// /?room=NAME deep link: prefill + auto-join (share this URL with the other player)
+{
+  const r = new URLSearchParams(location.search).get("room");
+  if (r) document.getElementById("room").value = r;
+  document.getElementById("room").addEventListener("change", connect);
 }
 
 // Mouse is OPT-IN: it only steers while a button is held, so it doesn't fight

@@ -257,77 +257,263 @@ class GameSession:
 app = FastAPI(title="liquidwar play")
 
 
-@app.websocket("/ws")
-async def ws(sock: WebSocket) -> None:
-    """Server-driven game loop + async input — steady frame rate, no round-trip jitter."""
-    await sock.accept()
-    q = sock.query_params
-    session = GameSession(
-        mode=q.get("mode", "play"),
-        opponent=q.get("opponent", "latest"),
-        teams=int(q.get("teams", "2")),
-        height=int(os.environ.get("LW_PLAY_H", "384")),     # doubled-again battlefield
-        width=int(os.environ.get("LW_PLAY_W", "576")),      # (~4x original area; ~50fps at 8000)
-        fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),
-    )
-    ctrl: dict[str, Any] = {"target": None, "dir": None, "alive": True, "reset": False,
-                            "map": None, "spin": None, "stance": 0, "drill_mode": 0, "doom_level": 1,
-                            "wall_orient": 0,   # 0 = horizontal bar, 1 = vertical bar (tap 4 to flip)
-                            "pulse_mode": 0,    # 0 wave / 1 cymatic rings / 2 cymatic star (tap 5 to cycle)
-                            "spin_mode": 0,     # 0 calm / 1 vortex / 2 frenzy (tap 2 to shift gear)
-                            "mael_mode": 0,     # 0 undertow / 1 ejecta / 2 shear (tap 7 to cycle)
-                            "swarm_mode": 0,    # 0 cloud / 1 comet (tap 1 to cycle)
-                            "atom_mode": 0}     # 0 orbital / 1 binary star (tap 8 to cycle)
+STANCES = ("Swarm", "Spin", "Drill", "Wall", "Pulse", "Doom", "Maelstrom", "Atom", "Classic")
 
-    async def receiver() -> None:
-        try:
-            while True:
-                msg = await sock.receive_json()
-                if msg.get("reset"):
-                    ctrl["reset"] = True
-                elif "map" in msg:                 # map picker -> force archetype + new game
-                    m = msg["map"]
-                    ctrl["map"] = None if m is None or m < 0 else int(m)
-                    ctrl["reset"] = True
-                elif "spin" in msg:                # Q/E -> orbit direction (Spin/Swarm stances)
-                    ctrl["spin"] = float(msg["spin"])
-                elif "stance" in msg:              # 1-5 -> select held stance; re-tap Drill(3) revs its mode
-                    s = max(0, min(8, int(msg["stance"])))
-                    if s == 2 and ctrl["stance"] == 2:
-                        ctrl["drill_mode"] = (ctrl["drill_mode"] + 1) % 3
-                    elif s == 2:
-                        ctrl["drill_mode"] = 0
-                    if s == 5 and ctrl["stance"] == 5:   # re-tap Doom charges the gravity 1x -> 2x -> 3x
-                        ctrl["doom_level"] = ctrl["doom_level"] % 3 + 1
-                    elif s == 5:
-                        ctrl["doom_level"] = 1
-                    if s == 3 and ctrl["stance"] == 3:    # re-tap Wall flips the bar horizontal <-> vertical
-                        ctrl["wall_orient"] ^= 1
-                    if s == 4 and ctrl["stance"] == 4:    # re-tap Pulse cycles wave -> rings -> star -> lattice -> nova -> tide
-                        ctrl["pulse_mode"] = (ctrl["pulse_mode"] + 1) % 6
-                    elif s == 4:
-                        ctrl["pulse_mode"] = 0
-                    if s == 1 and ctrl["stance"] == 1:    # re-tap Spin cycles vortex -> sawblade -> galaxy
-                        ctrl["spin_mode"] = (ctrl["spin_mode"] + 1) % 3
-                    elif s == 1:
-                        ctrl["spin_mode"] = 0
-                    if s == 6 and ctrl["stance"] == 6:    # re-tap Maelstrom cycles undertow -> ejecta -> shear
-                        ctrl["mael_mode"] = (ctrl["mael_mode"] + 1) % 3
-                    elif s == 6:
-                        ctrl["mael_mode"] = 0
-                    if s == 0 and ctrl["stance"] == 0:    # re-tap Swarm cycles cloud -> comet
-                        ctrl["swarm_mode"] ^= 1
-                    if s == 7 and ctrl["stance"] == 7:    # re-tap Atom cycles orbital -> binary star
-                        ctrl["atom_mode"] ^= 1
-                    ctrl["stance"] = s
-                elif "dir" in msg:                 # keyboard (arrows/WASD)
-                    ctrl["dir"] = msg["dir"]
-                elif "target" in msg:              # mouse
-                    ctrl["target"] = msg["target"]
-        except WebSocketDisconnect:
-            ctrl["alive"] = False
+PLAYER_CTRL = {"target": None, "dir": None, "reset": False,
+               "map": None, "spin": None, "stance": 0, "drill_mode": 0, "doom_level": 1,
+               "wall_orient": 0,   # 0 = horizontal bar, 1 = vertical bar (tap 4 to flip)
+               "pulse_mode": 0,    # wave/rings/star/lattice/nova/tide (tap 5 to cycle)
+               "spin_mode": 0,     # vortex/sawblade/galaxy (tap 2 to cycle)
+               "mael_mode": 0,     # undertow/ejecta/shear (tap 7 to cycle)
+               "swarm_mode": 0,    # cloud/comet (tap 1 to cycle)
+               "atom_mode": 0}     # orbital/binary (tap 8 to cycle)
 
-    async def game_loop() -> None:
+
+def _mode_name(ctrl) -> str:
+    return (("slow", "med", "fast")[ctrl["drill_mode"]] if ctrl["stance"] == 2
+            else f"{ctrl['doom_level']}x" if ctrl["stance"] == 5
+            else ("horiz", "vert")[ctrl["wall_orient"]] if ctrl["stance"] == 3
+            else ("wave", "rings", "star", "lattice", "nova", "tide")[ctrl["pulse_mode"]] if ctrl["stance"] == 4
+            else ("vortex", "sawblade", "galaxy")[ctrl["spin_mode"]] if ctrl["stance"] == 1
+            else ("undertow", "ejecta", "shear")[ctrl["mael_mode"]] if ctrl["stance"] == 6
+            else ("cloud", "comet")[ctrl["swarm_mode"]] if ctrl["stance"] == 0
+            else ("orbital", "binary")[ctrl["atom_mode"]] if ctrl["stance"] == 7 else "")
+
+
+def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n) -> int:
+    """Apply ONE human player's held stance to team ``t``'s knobs — the exact
+    block that used to be inlined for team 0, parametrized by seat so any
+    number of humans can hold stances in the same game. Returns the player's
+    cursor speed (Doom charge trades speed for pull)."""
+    stance = ctrl["stance"]                     # 0 Swarm 1 Spin 2 Drill 3 Wall 4 Pulse
+    if stance == 0:                             # Swarm: 2 forms (tap 1): cloud -> comet
+        if ctrl["swarm_mode"] == 0:             # cloud: loose, varied-radius orbits
+            _e._spin[0, t] = 0.5 * spin_sign
+            _e._burst[0, t] = 0.15              # slight loosen -> a diffuse orbiting cloud
+        else:                                   # comet: a teardrop along your MOTION
+            sgn = spin_sign if spin_sign != 0 else 1
+            # aim = recent cursor displacement (works for mouse AND
+            # keys, unlike last_dir); standing still relaxes the
+            # comet back into a blob
+            cdy = (c0_hist[-1][0] > c0_hist[0][0]) - (c0_hist[-1][0] < c0_hist[0][0])
+            cdx = (c0_hist[-1][1] > c0_hist[0][1]) - (c0_hist[-1][1] < c0_hist[0][1])
+            _e._drill[0, 0, 0] = 0.85 * cdy     # dense head pierces along the motion
+            _e._drill[0, 0, 1] = 0.85 * cdx     #   (the drill machinery, velocity-aimed)
+            _e._spin[0, t] = 0.35 * sgn         # slight twist gives the tail life
+            _e._burst[0, t] = -0.25             # packed head, trailing wake
+    elif stance == 1:                           # Spin: 3 forms (tap 2): vortex -> sawblade -> galaxy
+        sm = ctrl["spin_mode"]
+        sgn = spin_sign if spin_sign != 0 else 1
+        if sm == 0:                             # vortex: the classic compact fast spin
+            _e._spin[0, t] = 1.7 * spin_sign
+            _e._burst[0, t] = -0.4
+        elif sm == 1:                           # sawblade: dense disc + 8 rotating teeth
+            _e._spin[0, t] = 1.6 * sgn
+            _e._burst[0, t] = -0.45             # packed disc body
+            _e._node_m[0, t] = 8.0              # 8 angular clusters = the teeth
+            _e._node_w[0, t] = 0.4 * sgn        # the tooth pattern SWEEPS with the spin
+        else:                                   # galaxy: wide slow swirl with winding spiral arms
+            _e._spin[0, t] = 1.1 * sgn
+            _e._burst[0, t] = 0.35              # spread out -> a broad disc
+            _e._node_m[0, t] = 3.0              # 3 arms
+            _e._node_k[0, t] = 0.25 * sgn       # arms WIND with radius (logarithmic-spiral look)
+            _e._node_w[0, t] = -0.05 * sgn      # slow majestic pattern rotation
+    elif stance == 2:                           # Drill: 3 modes (slow/med/fast) — grind vs advance
+        m = ctrl["drill_mode"]                  # 0 slow / 1 med / 2 fast (tap 3 to rev)
+        DSPIN = (0.3, 0.7, 1.5); DSURGE = (1.0, 2.0, 4.0); DADV = (1.0, 0.62, 0.34)
+        sgn = spin_sign if spin_sign != 0 else 1   # the bit always spins
+        _e._spin[0, t] = DSPIN[m] * sgn         # faster spin -> harder grind, but looser + slower
+        _e._drill[0, 0, 0] = float(last_dir[0]) * DADV[m]  # |drill| = advance speed
+        _e._drill[0, 0, 1] = float(last_dir[1]) * DADV[m]
+        if DSURGE[m] > 1.0:                     # the spinning front grinds (chews) harder
+            _e._surge[0, t] = DSURGE[m]
+    elif stance == 3:                           # Wall: a concentrated bar, horizontal or vertical (tap 4 to flip)
+        if ctrl["wall_orient"] == 0:            # horizontal bar = vertical facing
+            _e._wall[0, 0, 0] = 1.0; _e._wall[0, 0, 1] = 0.0
+        else:                                   # vertical bar = horizontal facing
+            _e._wall[0, 0, 0] = 0.0; _e._wall[0, 0, 1] = 1.0
+        _e._burst[0, t] = -0.9                  # strong inward pull -> a dense solid COLUMN, not a picket line
+    elif stance == 4:                           # Pulse: 3 modes (tap 5 to cycle)
+        pm = ctrl["pulse_mode"]
+        # Q/E swirl works DURING Pulse (was never set -> the spin
+        # keys silently did nothing while pulsing)
+        _e._spin[0, t] = 0.9 * spin_sign
+        if pm == 0:                             # wave: traveling rings + damage crests (the original)
+            ring = math.sin(n * 0.33)
+            _e._burst[0, t] = 1.0 if ring > 0 else -0.6
+            if ring > 0.5:
+                _e._surge[0, t] = 4.0           # surge on each ring's crest
+        elif pm == 1:                           # rings: cymatic STANDING rings (Chladni circular mode)
+            _e._node_l[0, t] = 12.0             # nodal wavelength — concentric resonance bands (was 14: tighter)
+            _e._node_v[0, t] = 0.05             # breathe 2.5x the old fixed 0.02 — visibly pumping
+            _e._surge[0, t] = 3.0               # (was 2.0) the resonance hits harder
+        elif pm == 2:                           # star: cymatic nodal-diameter mode — a 6-petal figure
+            _e._node_l[0, t] = 16.0
+            _e._node_m[0, t] = 6.0
+            # petal sweep you can actually see (was 0.01 drift);
+            # direction follows Q/E like the sawblade's
+            _e._node_w[0, t] = 0.05 * (spin_sign if spin_sign != 0 else 1)
+            _e._node_v[0, t] = 0.05             # rings pump under the petals
+            _e._surge[0, t] = 3.0               # (was 2.0)
+        elif pm == 3:                           # lattice: SUPERPOSED Chladni modes — breathing rings x sweeping petals
+            sgn = spin_sign if spin_sign != 0 else 1
+            _e._node_l[0, t] = 16.0             # radial rings...
+            _e._node_m[0, t] = 8.0              # ...crossed with 8 petals
+            _e._node_k[0, t] = 0.15 * sgn       # petals wind with radius
+            _e._node_w[0, t] = 0.03 * sgn       # whole figure slowly sweeps
+            _e._node_v[0, t] = 0.05
+            _e._surge[0, t] = 2.5
+        elif pm == 4:                           # nova: charge (deep gather) then DETONATE
+            ph = n % 144                        # ~2.3s cycle at 60Hz
+            if ph < 108:                        # implosion: pack tight, menace builds
+                _e._burst[0, t] = -0.9
+                _e._spin[0, t] = 0.6 * (spin_sign if spin_sign != 0 else 1)
+            else:                               # detonation: shockwave + heavy surge
+                _e._burst[0, t] = 1.0
+                _e._surge[0, t] = 5.0
+        else:                                   # tide: rolling DIRECTIONAL fronts (aimed by last_dir, like Wall)
+            _e._tide[0, 0, 0] = float(last_dir[0])
+            _e._tide[0, 0, 1] = float(last_dir[1])
+            _e._surge[0, t] = 2.5               # the marching crests hit hard
+    elif stance == 5:                           # Doom: violent black-hole implosion
+        sgn = spin_sign if spin_sign != 0 else 1
+        lvl = ctrl["doom_level"]                # 1x/2x/3x charge (tap 6)
+        # The ARMY is the visual cue: it forms a spinning ACCRETION
+        # DISK — `_ring` holds an open orbit radius (the black hole's
+        # dark centre), the swirl spins it, both growing with charge.
+        # The client's lensing/amber-disk shader sits in the hole.
+        _e._spin[0, t] = (1.2, 1.8, 2.4)[lvl - 1] * sgn
+        # tidal surge scales with charge (was a flat 6x at every level)
+        _e._surge[0, t] = (4.0, 5.0, 6.0)[lvl - 1]
+        _e._doom_pos[0, t] = _e.cursor_pos[0, t].float()         # gravity well at YOUR cursor;
+        _mass = float(_e.team_oh[0, t].sum())                     # pull ∝ YOUR mass (real black hole)
+        # Disk target radius is MASS-SCALED: fighters pack one-per-cell,
+        # so a fixed small radius just saturates back into a solid blob.
+        # Solve pi*(r_out^2 - r_in^2) = mass for the band centred on the
+        # target with its INNER edge at the rendered horizon (r_in,
+        # matching the client's 4.4+2.3*lvl graphic) -> the hole stays
+        # open and the whole army becomes the spinning accretion disk.
+        _r_in = (6.7, 9.0, 11.3)[lvl - 1]
+        _ring_val = 0.5 * (_r_in + (_r_in ** 2 + _mass / 3.14159) ** 0.5)
+        _e._ring[0, t] = _ring_val
+        _e._ring_ecc[0, t] = 1.0                # full oblate -> the edge-on Gargantua blade
+        _frac = _mass / max(1.0, _e.fighters_per_team)
+        _e._doom_str[0, t] = lvl * 32.0 * _frac ** 1.5  # super-linear in mass: gentler pull peels the loosely-bound periphery off the enemy, not the whole army (x1/x2/x3 charge, tap 6)
+        # FINITE reach (was the full map diagonal, which made Doom
+        # inescapable -> an auto-win): ~2.2x the disk radius, so a
+        # dispersed or kiting enemy escapes the pull and Doom is a
+        # committed finisher, not a vacuum.
+        _e._doom_range[0, t] = max(70.0, 2.2 * _ring_val)
+        # horizon ~ the disk's inner mass edge, not the whole blob
+        # radius — and it SHRINKS with the army (floor = the rendered
+        # hole r_in, was a generous 14): a whittled army's event
+        # horizon stops being a 14-cell kill zone.
+        _e._doom_horizon[0, t] = max(_r_in, 0.9 * (_mass / 3.14159) ** 0.5)
+        # capture rate scales with YOUR mass (was a flat 0.12): a
+        # losing army can no longer hold Doom as an unkillable last
+        # stand — the devour dies with the disk, so the bigger blob
+        # finally gets to consume it.
+        _e._doom_cap[0, t] = 0.12 * _frac ** 0.5
+    elif stance == 6:                           # Maelstrom: a whirlpool CURRENT (cross-team vorticity)
+        sgn = spin_sign if spin_sign != 0 else 1
+        mm = ctrl["mael_mode"]                  # 0 undertow / 1 ejecta / 2 shear (tap 7)
+        # Your army IS the whirlpool body: the ORIGINAL big loose
+        # form — a fast wide orbiting shell, burst pushing the mass
+        # out into a broad swirling storm-cloud (no ring, no packed
+        # disk; nothing like Doom's silhouette).
+        _e._spin[0, t] = 2.0 * sgn
+        _e._burst[0, t] = 0.6
+        # The CURRENT — Doom's radial devour rotated 90°: enemies
+        # near the well are swept TANGENTIALLY off their gradient
+        # and entrained into orbit through your storm-cloud; no
+        # capture, attrition by ordinary contact combat. Strength
+        # scales with YOUR mass — a whittled army stirs a weak eddy.
+        _mass = float(_e.team_oh[0, t].sum())
+        _frac = _mass / max(1.0, _e.fighters_per_team)
+        _e._vortex_pos[0, t] = _e.cursor_pos[0, t].float()
+        _e._vortex_sign[0, t] = float(sgn)      # current direction follows Q/E
+        # Server-tunable dial (cf. _doom_str). Nerfed from 30/2.0x
+        # after play: with the flat falloff it yanked units off the
+        # enemy blob from across the arena. Now 22 + 1.5x-blob reach
+        # + a SQUARED falloff in the engine = a local current you
+        # can see coming and skirt, still lethal to wade through.
+        _e._vortex_str[0, t] = 22.0 * _frac ** 0.5
+        _e._vortex_range[0, t] = max(60.0, 1.5 * (_mass / 3.14159) ** 0.5)
+        # radial component per mode: undertow spirals them inward to
+        # the rim, ejecta flings entrained enemies outward (scatters
+        # a formation off its cursor), shear is pure deflection
+        _e._vortex_rad[0, t] = (0.30, -0.45, 0.0)[mm]
+    elif stance == 7:                           # Atom: 2 forms (tap 8): orbital -> binary star
+        sgn = spin_sign if spin_sign != 0 else 1
+        if ctrl["atom_mode"] == 0:              # figure-8 electron orbitals
+            _e._spin[0, t] = 1.8 * sgn          # orbital speed
+            _e._burst[0, t] = 0.4               # a little room so the two lobes form
+            _e._fig8[0, t] = 1.0                # flip orbit across the cursor -> figure-8 loops
+        else:                                   # binary star: two discs orbiting their barycenter
+            _e._spin[0, t] = 1.6 * sgn
+            _e._burst[0, t] = 0.45
+            _e._fig8[0, t] = 2.0                # engine: rotating-axis, co-rotating lobes
+    # stance == 8 (Classic) sets NOTHING: every knob stays at the
+    # per-tick zero above, so the army just flows down the gradient
+    # and packs around the cursor — the original Liquid War blob.
+    # (Human-only: the policy's action space stays at 8 stances so
+    # existing checkpoints keep loading.)
+    # stance == 8 (Classic) sets NOTHING: every knob stays at the per-tick
+    # zero, so the army just flows down the gradient — the original blob.
+    _base_cs = max(1, round(_e.W / 96))
+    return max(1, _base_cs // ctrl["doom_level"]) if ctrl["stance"] == 5 else _base_cs
+
+
+class Player:
+    """One human seat in a room: socket + held-control state."""
+
+    def __init__(self, sock: WebSocket, team: int) -> None:
+        self.sock = sock
+        self.team = team
+        self.ctrl: dict[str, Any] = dict(PLAYER_CTRL)
+        self.spin_sign = 1
+        self.last_dir = [0, 1]
+        self.c0_hist = [[0, 0], [0, 0]]
+
+
+class Room:
+    """One live game shared by 1..T human players (the rest are AI seats).
+
+    LAN play: every client opens ``/?room=<name>`` — the first one creates the
+    room (their mode/opponent/teams params win), later ones take the next free
+    seat. A leaver's seat hands back to the AI mid-game. The room runs ONE
+    game loop and broadcasts each frame to every seat (with per-seat HUD
+    fields layered on)."""
+
+    def __init__(self, key: str, mode: str, opponent: str, teams: int) -> None:
+        self.key = key
+        self.session = GameSession(
+            mode=mode, opponent=opponent, teams=teams,
+            height=int(os.environ.get("LW_PLAY_H", "384")),
+            width=int(os.environ.get("LW_PLAY_W", "576")),
+            fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),
+        )
+        self.players: dict[int, Player] = {}
+        self.task: asyncio.Task | None = None
+        self.closed = False
+        self.map_choice: int | None = None
+        self.reset_flag = False
+
+    def join(self, sock: WebSocket) -> Player | None:
+        free = [t for t in range(self.session.engine.T) if t not in self.players]
+        if not free:
+            return None
+        p = Player(sock, free[0])
+        self.players[p.team] = p
+        return p
+
+    def leave(self, team: int) -> None:
+        self.players.pop(team, None)        # the seat reverts to AI control
+        if not self.players:
+            self.closed = True
+
+    async def run(self) -> None:
+        session = self.session
         dt = 1.0 / TICK_HZ
         hold = 0                                       # ticks to linger on a finished game
         fps = TICK_HZ                                  # achieved frame rate (EMA)
@@ -335,242 +521,76 @@ async def ws(sock: WebSocket) -> None:
         logged = False                                 # one telemetry line per finished game
         loop = asyncio.get_event_loop()
         n = 0
-        spin_sign = 1                                    # Q/E orbit direction (Spin/Swarm stances): +1/-1/0
-        last_dir = [0, 1]                                # heading the Drill/Wall point at; default right
-        c0_hist = [[0, 0], [0, 0]]                       # recent player-cursor positions (comet aim)
-        next_dl = loop.time()                            # absolute frame deadline (drift-corrected)
-        STANCES = ("Swarm", "Spin", "Drill", "Wall", "Pulse", "Doom", "Maelstrom", "Atom", "Classic")  # index = ctrl["stance"]
-        while ctrl["alive"]:
+        next_dl = loop.time()                          # absolute frame deadline (drift-corrected)
+
+        def clear_knobs(_e) -> None:
+            _e._surge.fill_(1.0)   # neutral damage mult (in-place: graph input)
+            _e._doom_str.zero_(); _e._doom_horizon.zero_(); _e._doom_cap.zero_(); _e._vortex_str.zero_()
+            _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_()
+            _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_()
+            _e._node_k.zero_(); _e._node_w.zero_(); _e._node_v.zero_(); _e._tide.zero_()
+
+        while not self.closed:
             t0 = loop.time()                                  # frame start, for steady pacing
-            if ctrl["spin"] is not None:                      # Q/E -> orbit direction (Spin/Swarm stances)
-                spin_sign = ctrl["spin"]; ctrl["spin"] = None
-            if ctrl["reset"]:
-                session.engine._map_choice = ctrl["map"]   # apply the picked map (None=random)
-                session.reset(); ctrl["reset"] = False; hold = 0; logged = False
-                _e = session.engine                                # clear all stance knobs per game
-                _e._surge.fill_(1.0)   # neutral damage mult (in-place: graph input)
-                _e._doom_str.zero_(); _e._doom_horizon.zero_(); _e._doom_cap.zero_(); _e._vortex_str.zero_()
-                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_(); _e._node_v.zero_(); _e._tide.zero_()
+            players = list(self.players.values())
+            for p in players:
+                if p.ctrl["spin"] is not None:                # Q/E -> orbit direction
+                    p.spin_sign = p.ctrl["spin"]; p.ctrl["spin"] = None
+                if p.ctrl["map"] is not None:
+                    self.map_choice = p.ctrl["map"] if p.ctrl["map"] >= 0 else None
+                    p.ctrl["map"] = None
+                if p.ctrl["reset"]:
+                    self.reset_flag = True; p.ctrl["reset"] = False
+            if self.reset_flag:
+                session.engine._map_choice = self.map_choice   # picked map (None=random)
+                session.reset(); self.reset_flag = False; hold = 0; logged = False
+                clear_knobs(session.engine)
             elif session.done:
                 hold += 1
                 if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
-                    session.engine._map_choice = ctrl["map"]   # keep the picked map across games
+                    session.engine._map_choice = self.map_choice
                     session.reset(); hold = 0; logged = False
-                    _e = session.engine
-                    _e._surge.fill_(1.0)   # neutral damage mult (in-place: graph input)
-                    _e._doom_str.zero_(); _e._doom_horizon.zero_(); _e._doom_cap.zero_(); _e._vortex_str.zero_()
-                    _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_(); _e._node_v.zero_(); _e._tide.zero_()
+                    clear_knobs(session.engine)
             else:
-                if ctrl["dir"] and (ctrl["dir"][0] or ctrl["dir"][1]):
-                    last_dir = ctrl["dir"]                  # heading the Drill/Wall point at
                 _e = session.engine
-                _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_(); _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_(); _e._node_k.zero_(); _e._node_w.zero_(); _e._node_v.zero_(); _e._tide.zero_()
-                _e._surge.fill_(1.0)   # neutral damage mult (in-place: graph input)
-                _e._doom_str.zero_(); _e._doom_horizon.zero_(); _e._doom_cap.zero_(); _e._vortex_str.zero_()
-                stance = ctrl["stance"]                     # 0 Swarm 1 Spin 2 Drill 3 Wall 4 Pulse
-                if stance == 0:                             # Swarm: 2 forms (tap 1): cloud -> comet
-                    if ctrl["swarm_mode"] == 0:             # cloud: loose, varied-radius orbits
-                        _e._spin[0, 0] = 0.5 * spin_sign
-                        _e._burst[0, 0] = 0.15              # slight loosen -> a diffuse orbiting cloud
-                    else:                                   # comet: a teardrop along your MOTION
-                        sgn = spin_sign if spin_sign != 0 else 1
-                        # aim = recent cursor displacement (works for mouse AND
-                        # keys, unlike last_dir); standing still relaxes the
-                        # comet back into a blob
-                        cdy = (c0_hist[-1][0] > c0_hist[0][0]) - (c0_hist[-1][0] < c0_hist[0][0])
-                        cdx = (c0_hist[-1][1] > c0_hist[0][1]) - (c0_hist[-1][1] < c0_hist[0][1])
-                        _e._drill[0, 0, 0] = 0.85 * cdy     # dense head pierces along the motion
-                        _e._drill[0, 0, 1] = 0.85 * cdx     #   (the drill machinery, velocity-aimed)
-                        _e._spin[0, 0] = 0.35 * sgn         # slight twist gives the tail life
-                        _e._burst[0, 0] = -0.25             # packed head, trailing wake
-                elif stance == 1:                           # Spin: 3 forms (tap 2): vortex -> sawblade -> galaxy
-                    sm = ctrl["spin_mode"]
-                    sgn = spin_sign if spin_sign != 0 else 1
-                    if sm == 0:                             # vortex: the classic compact fast spin
-                        _e._spin[0, 0] = 1.7 * spin_sign
-                        _e._burst[0, 0] = -0.4
-                    elif sm == 1:                           # sawblade: dense disc + 8 rotating teeth
-                        _e._spin[0, 0] = 1.6 * sgn
-                        _e._burst[0, 0] = -0.45             # packed disc body
-                        _e._node_m[0, 0] = 8.0              # 8 angular clusters = the teeth
-                        _e._node_w[0, 0] = 0.4 * sgn        # the tooth pattern SWEEPS with the spin
-                    else:                                   # galaxy: wide slow swirl with winding spiral arms
-                        _e._spin[0, 0] = 1.1 * sgn
-                        _e._burst[0, 0] = 0.35              # spread out -> a broad disc
-                        _e._node_m[0, 0] = 3.0              # 3 arms
-                        _e._node_k[0, 0] = 0.25 * sgn       # arms WIND with radius (logarithmic-spiral look)
-                        _e._node_w[0, 0] = -0.05 * sgn      # slow majestic pattern rotation
-                elif stance == 2:                           # Drill: 3 modes (slow/med/fast) — grind vs advance
-                    m = ctrl["drill_mode"]                  # 0 slow / 1 med / 2 fast (tap 3 to rev)
-                    DSPIN = (0.3, 0.7, 1.5); DSURGE = (1.0, 2.0, 4.0); DADV = (1.0, 0.62, 0.34)
-                    sgn = spin_sign if spin_sign != 0 else 1   # the bit always spins
-                    _e._spin[0, 0] = DSPIN[m] * sgn         # faster spin -> harder grind, but looser + slower
-                    _e._drill[0, 0, 0] = float(last_dir[0]) * DADV[m]  # |drill| = advance speed
-                    _e._drill[0, 0, 1] = float(last_dir[1]) * DADV[m]
-                    if DSURGE[m] > 1.0:                     # the spinning front grinds (chews) harder
-                        _e._surge[0, 0] = DSURGE[m]
-                elif stance == 3:                           # Wall: a concentrated bar, horizontal or vertical (tap 4 to flip)
-                    if ctrl["wall_orient"] == 0:            # horizontal bar = vertical facing
-                        _e._wall[0, 0, 0] = 1.0; _e._wall[0, 0, 1] = 0.0
-                    else:                                   # vertical bar = horizontal facing
-                        _e._wall[0, 0, 0] = 0.0; _e._wall[0, 0, 1] = 1.0
-                    _e._burst[0, 0] = -0.9                  # strong inward pull -> a dense solid COLUMN, not a picket line
-                elif stance == 4:                           # Pulse: 3 modes (tap 5 to cycle)
-                    pm = ctrl["pulse_mode"]
-                    # Q/E swirl works DURING Pulse (was never set -> the spin
-                    # keys silently did nothing while pulsing)
-                    _e._spin[0, 0] = 0.9 * spin_sign
-                    if pm == 0:                             # wave: traveling rings + damage crests (the original)
-                        ring = math.sin(n * 0.33)
-                        _e._burst[0, 0] = 1.0 if ring > 0 else -0.6
-                        if ring > 0.5:
-                            _e._surge[0, 0] = 4.0           # surge on each ring's crest
-                    elif pm == 1:                           # rings: cymatic STANDING rings (Chladni circular mode)
-                        _e._node_l[0, 0] = 12.0             # nodal wavelength — concentric resonance bands (was 14: tighter)
-                        _e._node_v[0, 0] = 0.05             # breathe 2.5x the old fixed 0.02 — visibly pumping
-                        _e._surge[0, 0] = 3.0               # (was 2.0) the resonance hits harder
-                    elif pm == 2:                           # star: cymatic nodal-diameter mode — a 6-petal figure
-                        _e._node_l[0, 0] = 16.0
-                        _e._node_m[0, 0] = 6.0
-                        # petal sweep you can actually see (was 0.01 drift);
-                        # direction follows Q/E like the sawblade's
-                        _e._node_w[0, 0] = 0.05 * (spin_sign if spin_sign != 0 else 1)
-                        _e._node_v[0, 0] = 0.05             # rings pump under the petals
-                        _e._surge[0, 0] = 3.0               # (was 2.0)
-                    elif pm == 3:                           # lattice: SUPERPOSED Chladni modes — breathing rings x sweeping petals
-                        sgn = spin_sign if spin_sign != 0 else 1
-                        _e._node_l[0, 0] = 16.0             # radial rings...
-                        _e._node_m[0, 0] = 8.0              # ...crossed with 8 petals
-                        _e._node_k[0, 0] = 0.15 * sgn       # petals wind with radius
-                        _e._node_w[0, 0] = 0.03 * sgn       # whole figure slowly sweeps
-                        _e._node_v[0, 0] = 0.05
-                        _e._surge[0, 0] = 2.5
-                    elif pm == 4:                           # nova: charge (deep gather) then DETONATE
-                        ph = n % 144                        # ~2.3s cycle at 60Hz
-                        if ph < 108:                        # implosion: pack tight, menace builds
-                            _e._burst[0, 0] = -0.9
-                            _e._spin[0, 0] = 0.6 * (spin_sign if spin_sign != 0 else 1)
-                        else:                               # detonation: shockwave + heavy surge
-                            _e._burst[0, 0] = 1.0
-                            _e._surge[0, 0] = 5.0
-                    else:                                   # tide: rolling DIRECTIONAL fronts (aimed by last_dir, like Wall)
-                        _e._tide[0, 0, 0] = float(last_dir[0])
-                        _e._tide[0, 0, 1] = float(last_dir[1])
-                        _e._surge[0, 0] = 2.5               # the marching crests hit hard
-                elif stance == 5:                           # Doom: violent black-hole implosion
-                    sgn = spin_sign if spin_sign != 0 else 1
-                    lvl = ctrl["doom_level"]                # 1x/2x/3x charge (tap 6)
-                    # The ARMY is the visual cue: it forms a spinning ACCRETION
-                    # DISK — `_ring` holds an open orbit radius (the black hole's
-                    # dark centre), the swirl spins it, both growing with charge.
-                    # The client's lensing/amber-disk shader sits in the hole.
-                    _e._spin[0, 0] = (1.2, 1.8, 2.4)[lvl - 1] * sgn
-                    # tidal surge scales with charge (was a flat 6x at every level)
-                    _e._surge[0, 0] = (4.0, 5.0, 6.0)[lvl - 1]
-                    _e._doom_pos[0, 0] = _e.cursor_pos[0, 0].float()         # gravity well at YOUR cursor;
-                    _mass = float(_e.team_oh[0, 0].sum())                     # pull ∝ YOUR mass (real black hole)
-                    # Disk target radius is MASS-SCALED: fighters pack one-per-cell,
-                    # so a fixed small radius just saturates back into a solid blob.
-                    # Solve pi*(r_out^2 - r_in^2) = mass for the band centred on the
-                    # target with its INNER edge at the rendered horizon (r_in,
-                    # matching the client's 4.4+2.3*lvl graphic) -> the hole stays
-                    # open and the whole army becomes the spinning accretion disk.
-                    _r_in = (6.7, 9.0, 11.3)[lvl - 1]
-                    _ring_val = 0.5 * (_r_in + (_r_in ** 2 + _mass / 3.14159) ** 0.5)
-                    _e._ring[0, 0] = _ring_val
-                    _e._ring_ecc[0, 0] = 1.0                # full oblate -> the edge-on Gargantua blade
-                    _frac = _mass / max(1.0, _e.fighters_per_team)
-                    _e._doom_str[0, 0] = lvl * 32.0 * _frac ** 1.5  # super-linear in mass: gentler pull peels the loosely-bound periphery off the enemy, not the whole army (x1/x2/x3 charge, tap 6)
-                    # FINITE reach (was the full map diagonal, which made Doom
-                    # inescapable -> an auto-win): ~2.2x the disk radius, so a
-                    # dispersed or kiting enemy escapes the pull and Doom is a
-                    # committed finisher, not a vacuum.
-                    _e._doom_range[0, 0] = max(70.0, 2.2 * _ring_val)
-                    # horizon ~ the disk's inner mass edge, not the whole blob
-                    # radius — and it SHRINKS with the army (floor = the rendered
-                    # hole r_in, was a generous 14): a whittled army's event
-                    # horizon stops being a 14-cell kill zone.
-                    _e._doom_horizon[0, 0] = max(_r_in, 0.9 * (_mass / 3.14159) ** 0.5)
-                    # capture rate scales with YOUR mass (was a flat 0.12): a
-                    # losing army can no longer hold Doom as an unkillable last
-                    # stand — the devour dies with the disk, so the bigger blob
-                    # finally gets to consume it.
-                    _e._doom_cap[0, 0] = 0.12 * _frac ** 0.5
-                elif stance == 6:                           # Maelstrom: a whirlpool CURRENT (cross-team vorticity)
-                    sgn = spin_sign if spin_sign != 0 else 1
-                    mm = ctrl["mael_mode"]                  # 0 undertow / 1 ejecta / 2 shear (tap 7)
-                    # Your army IS the whirlpool body: the ORIGINAL big loose
-                    # form — a fast wide orbiting shell, burst pushing the mass
-                    # out into a broad swirling storm-cloud (no ring, no packed
-                    # disk; nothing like Doom's silhouette).
-                    _e._spin[0, 0] = 2.0 * sgn
-                    _e._burst[0, 0] = 0.6
-                    # The CURRENT — Doom's radial devour rotated 90°: enemies
-                    # near the well are swept TANGENTIALLY off their gradient
-                    # and entrained into orbit through your storm-cloud; no
-                    # capture, attrition by ordinary contact combat. Strength
-                    # scales with YOUR mass — a whittled army stirs a weak eddy.
-                    _mass = float(_e.team_oh[0, 0].sum())
-                    _frac = _mass / max(1.0, _e.fighters_per_team)
-                    _e._vortex_pos[0, 0] = _e.cursor_pos[0, 0].float()
-                    _e._vortex_sign[0, 0] = float(sgn)      # current direction follows Q/E
-                    # Server-tunable dial (cf. _doom_str). Nerfed from 30/2.0x
-                    # after play: with the flat falloff it yanked units off the
-                    # enemy blob from across the arena. Now 22 + 1.5x-blob reach
-                    # + a SQUARED falloff in the engine = a local current you
-                    # can see coming and skirt, still lethal to wade through.
-                    _e._vortex_str[0, 0] = 22.0 * _frac ** 0.5
-                    _e._vortex_range[0, 0] = max(60.0, 1.5 * (_mass / 3.14159) ** 0.5)
-                    # radial component per mode: undertow spirals them inward to
-                    # the rim, ejecta flings entrained enemies outward (scatters
-                    # a formation off its cursor), shear is pure deflection
-                    _e._vortex_rad[0, 0] = (0.30, -0.45, 0.0)[mm]
-                elif stance == 7:                           # Atom: 2 forms (tap 8): orbital -> binary star
-                    sgn = spin_sign if spin_sign != 0 else 1
-                    if ctrl["atom_mode"] == 0:              # figure-8 electron orbitals
-                        _e._spin[0, 0] = 1.8 * sgn          # orbital speed
-                        _e._burst[0, 0] = 0.4               # a little room so the two lobes form
-                        _e._fig8[0, 0] = 1.0                # flip orbit across the cursor -> figure-8 loops
-                    else:                                   # binary star: two discs orbiting their barycenter
-                        _e._spin[0, 0] = 1.6 * sgn
-                        _e._burst[0, 0] = 0.45
-                        _e._fig8[0, 0] = 2.0                # engine: rotating-axis, co-rotating lobes
-                # stance == 8 (Classic) sets NOTHING: every knob stays at the
-                # per-tick zero above, so the army just flows down the gradient
-                # and packs around the cursor — the original Liquid War blob.
-                # (Human-only: the policy's action space stays at 8 stances so
-                # existing checkpoints keep loading.)
-                # Doom charge trades speed for pull: at level L the cursor moves at 1/L
-                # cells-per-tick — every tick, so it's a smooth slow glide, not a stutter —
-                # making a 3x well sluggish to reposition.
-                _base_cs = max(1, round(_e.W / 96))
-                _e.cursor_speed = (max(1, _base_cs // ctrl["doom_level"])
-                                   if ctrl["stance"] == 5 else _base_cs)
-                session.step(ctrl["target"], ctrl["dir"])
+                clear_knobs(_e)
+                base_cs = max(1, round(_e.W / 96))
+                speeds = [base_cs] * _e.T
+                humans = {}
+                for p in players:
+                    if p.ctrl["dir"] and (p.ctrl["dir"][0] or p.ctrl["dir"][1]):
+                        p.last_dir = p.ctrl["dir"]            # heading the Drill/Wall point at
+                    speeds[p.team] = _apply_player_stance(
+                        _e, p.team, p.ctrl, p.spin_sign, p.last_dir, p.c0_hist, n)
+                    humans[p.team] = (p.ctrl["target"], p.ctrl["dir"])
+                _e._cursor_speed_t = speeds                   # per-seat (Doom slows ITS holder only)
+                session.step(humans)
             st = session.state(); st["fps"] = round(fps, 1)
-            c0_hist.append(list(st["cursors"][0])); del c0_hist[:-7]   # ~6-tick window smooths the comet aim
-            st["stance"] = STANCES[ctrl["stance"]]      # held tactical state
-            st["mode"] = (("slow", "med", "fast")[ctrl["drill_mode"]] if ctrl["stance"] == 2
-                          else f"{ctrl['doom_level']}x" if ctrl["stance"] == 5
-                          else ("horiz", "vert")[ctrl["wall_orient"]] if ctrl["stance"] == 3
-                          else ("wave", "rings", "star", "lattice", "nova", "tide")[ctrl["pulse_mode"]] if ctrl["stance"] == 4
-                          else ("vortex", "sawblade", "galaxy")[ctrl["spin_mode"]] if ctrl["stance"] == 1
-                          else ("undertow", "ejecta", "shear")[ctrl["mael_mode"]] if ctrl["stance"] == 6
-                          else ("cloud", "comet")[ctrl["swarm_mode"]] if ctrl["stance"] == 0
-                          else ("orbital", "binary")[ctrl["atom_mode"]] if ctrl["stance"] == 7 else "")
-            st["spin_dir"] = spin_sign
+            st["players"] = len(players)
+            for p in players:
+                p.c0_hist.append(list(st["cursors"][p.team])); del p.c0_hist[:-7]   # comet aim window
             if session.done and not logged:
                 w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])
-                print(f"[telemetry] GAME END map={st['map']} tick={st['tick']} winner=team{w} "
+                print(f"[telemetry] GAME END room={self.key} map={st['map']} tick={st['tick']} winner=team{w} "
                       f"counts={st['fighters']} spread={st['spread']} fps={fps:.1f}", flush=True)
                 logged = True
             elif not session.done and st["tick"] and st["tick"] % 150 == 0:
                 print(f"[telemetry] tick={st['tick']} fps={fps:.1f} flood={st['flood_pct']}% "
                       f"spread={st['spread']} counts={st['fighters']}", flush=True)
-            try:
-                await sock.send_json(st)
-            except Exception:
-                break
+            # one shared frame; per-seat HUD fields layered on top
+            sends = []
+            for p in players:
+                msg = dict(st)
+                msg["you"] = p.team
+                msg["stance"] = STANCES[p.ctrl["stance"]]
+                msg["mode"] = _mode_name(p.ctrl)
+                msg["spin_dir"] = p.spin_sign
+                sends.append(p.sock.send_json(msg))
+            if sends:
+                results = await asyncio.gather(*sends, return_exceptions=True)
+                for p, r in zip(players, results):
+                    if isinstance(r, Exception):
+                        self.leave(p.team)
             t_work = loop.time()
             next_dl += dt                                # advance the absolute deadline
             sleep = next_dl - loop.time()
@@ -581,11 +601,87 @@ async def ws(sock: WebSocket) -> None:
             if prev is not None and now > prev:        # measure actual loop period
                 fps = 0.9 * fps + 0.1 / (now - prev)
             if n % 120 == 0:
-                print(f"[perf] work={(t_work - t0) * 1000:.1f}ms period={(now - t0) * 1000:.1f}ms fps={fps:.0f}", flush=True)
+                print(f"[perf] room={self.key} players={len(players)} "
+                      f"work={(t_work - t0) * 1000:.1f}ms period={(now - t0) * 1000:.1f}ms fps={fps:.0f}", flush=True)
             prev = now
-            n += 1                                     # advance the pulse clock (was missing -> Pulse stuck on)
+            n += 1                                     # advance the pulse clock
 
-    await asyncio.gather(receiver(), game_loop())
+
+ROOMS: dict[str, Room] = {}
+
+
+@app.websocket("/ws")
+async def ws(sock: WebSocket) -> None:
+    """Room-based play: ``room=<name>`` shares one game between players (LAN
+    multiplayer — open the same room name on another machine to join as the
+    next team); no room param = a private solo room. One server-driven game
+    loop per room; per-socket receivers feed each seat's held controls."""
+    await sock.accept()
+    q = sock.query_params
+    key = q.get("room") or f"~solo-{id(sock)}"
+    room = ROOMS.get(key)
+    if room is None or room.closed:
+        room = Room(key, mode=q.get("mode", "play"),
+                    opponent=q.get("opponent", "latest"),
+                    teams=int(q.get("teams", "2")))
+        ROOMS[key] = room
+    player = room.join(sock)
+    if player is None:                                  # room full
+        await sock.close()
+        return
+    if room.task is None:
+        room.task = asyncio.create_task(room.run())
+    ctrl = player.ctrl
+    try:
+        while True:
+            msg = await sock.receive_json()
+            if msg.get("reset"):
+                ctrl["reset"] = True
+            elif "map" in msg:                 # map picker -> force archetype + new game
+                m = msg["map"]
+                ctrl["map"] = -1 if m is None else int(m)
+                ctrl["reset"] = True
+            elif "spin" in msg:                # Q/E -> orbit direction (Spin/Swarm stances)
+                ctrl["spin"] = float(msg["spin"])
+            elif "stance" in msg:              # number row -> held stance; re-tap cycles its mode
+                s = max(0, min(8, int(msg["stance"])))
+                if s == 2 and ctrl["stance"] == 2:
+                    ctrl["drill_mode"] = (ctrl["drill_mode"] + 1) % 3
+                elif s == 2:
+                    ctrl["drill_mode"] = 0
+                if s == 5 and ctrl["stance"] == 5:   # re-tap Doom charges the gravity 1x -> 2x -> 3x
+                    ctrl["doom_level"] = ctrl["doom_level"] % 3 + 1
+                elif s == 5:
+                    ctrl["doom_level"] = 1
+                if s == 3 and ctrl["stance"] == 3:    # re-tap Wall flips the bar horizontal <-> vertical
+                    ctrl["wall_orient"] ^= 1
+                if s == 4 and ctrl["stance"] == 4:    # re-tap Pulse cycles its 6 modes
+                    ctrl["pulse_mode"] = (ctrl["pulse_mode"] + 1) % 6
+                elif s == 4:
+                    ctrl["pulse_mode"] = 0
+                if s == 1 and ctrl["stance"] == 1:    # re-tap Spin cycles vortex -> sawblade -> galaxy
+                    ctrl["spin_mode"] = (ctrl["spin_mode"] + 1) % 3
+                elif s == 1:
+                    ctrl["spin_mode"] = 0
+                if s == 6 and ctrl["stance"] == 6:    # re-tap Maelstrom cycles undertow -> ejecta -> shear
+                    ctrl["mael_mode"] = (ctrl["mael_mode"] + 1) % 3
+                elif s == 6:
+                    ctrl["mael_mode"] = 0
+                if s == 0 and ctrl["stance"] == 0:    # re-tap Swarm cycles cloud -> comet
+                    ctrl["swarm_mode"] ^= 1
+                if s == 7 and ctrl["stance"] == 7:    # re-tap Atom cycles orbital -> binary star
+                    ctrl["atom_mode"] ^= 1
+                ctrl["stance"] = s
+            elif "dir" in msg:                 # keyboard (arrows/WASD)
+                ctrl["dir"] = msg["dir"]
+            elif "target" in msg:              # mouse
+                ctrl["target"] = msg["target"]
+    except WebSocketDisconnect:
+        pass
+    finally:
+        room.leave(player.team)
+        if room.closed:
+            ROOMS.pop(key, None)
 
 
 @app.get("/healthz")
