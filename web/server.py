@@ -148,6 +148,50 @@ class GameSession:
         return dydx, stance
 
     @torch.no_grad()
+    def _mouse_dir(self, t: int, target) -> list[int]:
+        """Wall-aware mouse homing. The old greedy sign(target-cursor) pinned
+        the cursor on any concave barrier; instead, flood a distance field
+        from the CLICK (the same pooled octile relax as the army gradient,
+        amortized ~64 sweeps/tick so a click costs a few transient ms) and
+        step the cursor downhill — it routes around walls like a fighter.
+        The field is static once converged (walls don't move), so a held
+        target costs nothing at steady state."""
+        e = self.engine
+        ty = max(1, min(e.H - 2, int(target[0])))
+        tx = max(1, min(e.W - 2, int(target[1])))
+        clicks = getattr(self, "_clicks", None)
+        if clicks is None:
+            clicks = self._clicks = {}
+        st = clicks.get(t)
+        if st is None or st["tgt"] != (ty, tx):
+            f = torch.full((1, 1, e.H, e.W), 1e9, device=e.walls.device)
+            f[0, 0, ty, tx] = 0.0
+            st = clicks[t] = {"tgt": (ty, tx), "f": f, "left": 2 * (e.H + e.W)}
+        cy, cx = e.cursor_pos[0, t].tolist()
+        if st["left"] > 0:
+            mp = torch.nn.functional.max_pool2d
+            wall = e.walls[0].unsqueeze(0).unsqueeze(0)
+            f = st["f"]
+            for _ in range(min(64, st["left"])):
+                ng = -f
+                orth = torch.maximum(mp(ng, (1, 3), stride=1, padding=(0, 1)),
+                                     mp(ng, (3, 1), stride=1, padding=(1, 0)))
+                diag = mp(ng, 3, stride=1, padding=1)
+                f = torch.minimum(f, torch.minimum(10.0 - orth, 14.0 - diag))
+                f = torch.where(wall, torch.full_like(f, 1e9), f)
+            st["f"] = f
+            st["left"] -= min(64, st["left"])
+            # once the flood has reached the cursor, a little polish then stop
+            if float(st["f"][0, 0, cy, cx]) < 1e8:
+                st["left"] = min(st["left"], 128)
+        fg = st["f"][0, 0]
+        if float(fg[cy, cx]) >= 1e8:                 # flood not here yet: greedy meanwhile
+            return [max(-1, min(1, ty - cy)), max(-1, min(1, tx - cx))]
+        patch = fg[cy - 1:cy + 2, cx - 1:cx + 2]     # cursor lives in 1..H-2, safe
+        k = int(patch.argmin())
+        return [k // 3 - 1, k % 3 - 1]
+
+    @torch.no_grad()
     def step(self, humans: dict[int, tuple] | None = None) -> None:
         """Advance one tick. ``humans`` maps each occupied seat (team index)
         to its player's ``(mouse_target, key_dir)``; every other seat is
@@ -170,11 +214,11 @@ class GameSession:
                     dydx[0, t, 0] = max(-1, min(1, hdir[0]))
                     dydx[0, t, 1] = max(-1, min(1, hdir[1]))
                 elif target is not None:
-                    # Mouse: cursor homes toward the pointed-at cell.
-                    cy, cx = self.engine.cursor_pos[0, t].tolist()
-                    ty, tx = target
-                    dydx[0, t, 0] = max(-1, min(1, ty - cy))
-                    dydx[0, t, 1] = max(-1, min(1, tx - cx))
+                    # Mouse: wall-aware homing — flood-field downhill (see
+                    # _mouse_dir), so clicks across a barrier route around it.
+                    d = self._mouse_dir(t, target)
+                    dydx[0, t, 0] = d[0]
+                    dydx[0, t, 1] = d[1]
                 else:
                     # No input: a human seat stays put — never let the AI
                     # drive a player's cursor.
