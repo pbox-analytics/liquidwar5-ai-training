@@ -106,6 +106,12 @@ class LiquidWarEngine:
 
     def reset(self, walls: torch.Tensor | None = None) -> dict:
         """Initialise all ``B`` games; returns the public state dict."""
+        # NEVER free a captured graph's memory pool with replays in flight: a
+        # mid-game reset (map switch) lands ~16ms after a replay was enqueued,
+        # and dropping self._graph while its kernels still run had them writing
+        # freed pool memory -> CUDA illegal access poisoning the whole context.
+        if getattr(self, "_graph", None) is not None:
+            torch.cuda.synchronize()
         B, H, W, T, N = self.B, self.H, self.W, self.T, self.N
         dev = self.device
 
