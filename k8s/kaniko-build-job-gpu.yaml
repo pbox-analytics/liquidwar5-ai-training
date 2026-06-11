@@ -38,7 +38,7 @@ spec:
           image: alpine/git:latest
           env:
             - name: TRAINING_REF
-              value: "fbe593b"   # sticky stances + 25-action policy
+              value: "475d507"   # sticky stances + 25-action policy
           command: ["/bin/sh", "-c"]
           args:
             - |
