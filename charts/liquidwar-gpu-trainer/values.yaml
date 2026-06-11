@@ -59,6 +59,11 @@ config:
   steps: 128
   updates: 5000
   lr: "0.0003"
+  # 0.003, not the 0.01 default: the entropy bonus was tuned for the 8-action
+  # head — at 25 actions it pinned the joint entropy at ~5.3/5.42 (near
+  # uniform) for 1100+ updates and the eval win-rate whipsawed 0<->1. Smaller
+  # bonus lets the policy actually commit.
+  entCoef: "0.003"
   wells: true             # cast the REAL cross-team Doom/Maelstrom in training
   # Fixed run dir (relative to /opt/training, lands on the NFS mount): first
   # boot starts fresh in place, every restart after resumes policy+optimizer.
