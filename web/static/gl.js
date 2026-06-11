@@ -35,6 +35,7 @@ uniform float uF, uCurve, uTail, uSize, uAlpha, uTime, uTeams;
 uniform vec4 uHole;                 // Doom: x, y, horizon radius, strength — the UNITS are the accretion fire
 uniform float uHoleSpin;
 uniform vec3 uColors[6];
+uniform vec2 uCurs[6];              // per-team cursor (x,y) — the army's "heart"
 out vec2 vUV;                       // capsule-local coords (grid units)
 out vec2 vHL;                       // (halfLen, halfWidth)
 out vec4 vColor;                    // premultiplied
@@ -54,6 +55,22 @@ void main() {
   // quantization and turning swirls read as curves.
   vec2 vel = (C - A) * 0.5;
   float vl = min(length(vel), 8.0);                    // teleport guard (new game / conversion warp)
+  // --- LIFE IN THE STILL MASS: three animations that only emerge as a mote
+  // comes to rest (gated by 1-speed), so flow keeps its streaks and a parked
+  // army reads as a living, simmering organism instead of frozen pixels.
+  float still = 1.0 - smoothstep(0.25, 1.5, vl);
+  float dnp = clamp(aDens / 22.0, 0.0, 1.0);
+  // 1. HEARTBEAT: a pulse radiates out from the team's cursor through the
+  //    packed body — both a brightness wave (used below) and a subtle radial
+  //    breathing displacement, strongest in the dense core.
+  vec2 heart = uCurs[int(aTeam + 0.5)];
+  float hd = max(distance(pos, heart), 1e-3);
+  float beat = sin(hd * 0.30 - uTime * 3.2);
+  pos += ((pos - heart) / hd) * (0.22 * still * dnp * beat);
+  // 2. MICRO-CONVECTION: parked motes simmer on tiny personal orbits.
+  float mfreq = 0.8 + 2.2 * aRnd.y;
+  pos += still * 0.20 * vec2(sin(uTime * mfreq + aRnd.w * 6.2832),
+                             cos(uTime * mfreq * 1.3 + aRnd.z * 6.2832));
   vec2 dir = vl > 1e-4 ? normalize(vel) : vec2(1.0, 0.0);
   vec2 perp = vec2(-dir.y, dir.x);
   float dn = clamp(aDens / 22.0, 0.0, 1.0);            // normalized local density
@@ -72,7 +89,12 @@ void main() {
   float sparkle = step(0.88, aRnd.x);
   float bright = (0.95 + 0.4 * aRnd.y) * mix(1.0, tw, 0.25 + 0.55 * dn);
   bright *= mix(1.0, 0.78, smoothstep(0.5, 1.0, dn));
+  bright *= 1.0 + 0.18 * still * dn * beat;            // the heartbeat GLOWS as it travels
   vec3 colr = mix(base, vec3(1.0), 0.45 * sparkle) * (bright + 0.8 * sparkle * max(tw - 0.9, 0.0));
+  // 3. LAVA DRIFT: slow warm patches wander through the resting body — a
+  //    low-frequency spatial wave nudging colour temperature (subtle).
+  float lava = 0.5 + 0.5 * sin(pos.x * 0.045 + pos.y * 0.06 + uTime * 0.45);
+  colr *= mix(vec3(1.0), vec3(1.10, 0.97, 0.87), 0.35 * still * lava);
   // Doom: motes near the horizon ARE the accretion disk — they heat toward
   // amber-white, doppler-beamed (the approaching side burns brighter).
   if (uHole.w > 0.001) {
@@ -453,6 +475,11 @@ function create(canvas, teamColors) {
     const mh = o.hole || { x: 0, y: 0, r: 1, a: 0, spin: 1 };
     gl.uniform4f(U.mote.uHole, mh.x, mh.y, mh.r, mh.a);
     gl.uniform1f(U.mote.uHoleSpin, mh.spin);
+    const curs = new Float32Array(12);
+    if (o.cursors) for (let t = 0; t < Math.min(6, o.cursors.length); t++) {
+      curs[t * 2] = o.cursors[t][1] + 0.5; curs[t * 2 + 1] = o.cursors[t][0] + 0.5;  // (y,x) -> (x,y)
+    }
+    gl.uniform2fv(U.mote.uCurs, curs);
     gl.uniform3fv(U.mote.uColors, COLORS);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);  // premult over: dense army stays team colour
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, nMotes);

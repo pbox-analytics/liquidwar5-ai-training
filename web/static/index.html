@@ -354,7 +354,7 @@ function frame() {                                     // 60fps interpolated ren
     trailVis: (trails ? 0.55 : 0.0) + 0.3 * doomA,   // infall paths burn brighter
     fx: fxArr, fxCount: k,
     cursorFx: curArr, cursorFxCount: ck,
-    hole, whirl,
+    hole, whirl, cursors: curSt.cursors,
   });
   cv.style.boxShadow = curSt.pulse_active ? "0 0 18px 2px rgba(253,224,71,.35)" : "";
 }
