@@ -68,6 +68,14 @@ spec:
             - "--ent-coef"
             - {{ . | quote }}
             {{- end }}
+            {{- with .Values.config.warmStart }}
+            - "--warm-start"
+            - {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.bigEvery }}
+            - "--big-every"
+            - {{ . | quote }}
+            {{- end }}
             {{- if .Values.config.wells }}
             - "--wells"
             {{- end }}

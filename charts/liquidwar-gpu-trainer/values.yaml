@@ -14,7 +14,7 @@ image:
   # registries.yaml trusts (the in-cluster svc DNS x509-fails on kubelet pull;
   # same lesson as the cpu-worker chart).
   repository: pandoras-box.local:5000/pbox/liquidwar-gpu-trainer
-  tag: "0.9.2-amd64"
+  tag: "0.10.0-amd64"
   pullPolicy: IfNotPresent
 
 # Exactly one trainer (single shared policy; self-play). Do not scale UP.
@@ -69,7 +69,12 @@ config:
   wells: true             # cast the REAL cross-team Doom/Maelstrom in training
   # Fixed run dir (relative to /opt/training, lands on the NFS mount): first
   # boot starts fresh in place, every restart after resumes policy+optimizer.
-  resume: "results/rl/wells-090"
+  resume: "results/rl/wells-100"
+  # fresh run on the CONSOLIDATED physics (digestion-limited Doom, counter-
+  # currents, all stance modes) + map-size curriculum; motor skills carry over
+  # from wells-090 via warm start (same 25-action architecture)
+  warmStart: "results/rl/wells-090/latest.pt"
+  bigEvery: "5"
   # Kafka metrics (optional). Empty = no publishing.
   bootstrapServers: ""
   schemaRegistry: ""
