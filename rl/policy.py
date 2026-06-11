@@ -327,7 +327,7 @@ def apply_stances(engine, action, dydx, team_start=0, human_teams=None):
         engine._doom_pos[:, cols] = cpos[:, cols]
         engine._doom_str[:, cols] = (doom_lvl * 24.0 * frac ** 1.5)[:, cols]
         engine._doom_range[:, cols] = (2.2 * ring).clamp(min=70.0)[:, cols]
-        engine._doom_horizon[:, cols] = ((0.9 * blob_r).clamp(min=6.7) * d_on)[:, cols]
+        engine._doom_horizon[:, cols] = (ring_rin * 1.25 * d_on)[:, cols]   # the rendered hole, not blob-scaled (no snowball)
         engine._doom_cap[:, cols] = (0.09 * frac.sqrt() * d_on)[:, cols]
         engine._vortex_pos[:, cols] = cpos[:, cols]
         engine._vortex_str[:, cols] = (22.0 * frac.sqrt() * mael_on)[:, cols]

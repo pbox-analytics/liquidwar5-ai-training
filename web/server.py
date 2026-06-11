@@ -449,11 +449,11 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n) -> int:
         # dispersed or kiting enemy escapes the pull and Doom is a
         # committed finisher, not a vacuum.
         _e._doom_range[0, t] = max(70.0, 2.2 * _ring_val)
-        # horizon ~ the disk's inner mass edge, not the whole blob
-        # radius — and it SHRINKS with the army (floor = the rendered
-        # hole r_in, was a generous 14): a whittled army's event
-        # horizon stops being a 14-cell kill zone.
-        _e._doom_horizon[0, t] = max(_r_in, 0.9 * (_mass / 3.14159) ** 0.5)
+        # horizon = the RENDERED hole (fixed per charge level), no longer
+        # blob-scaled: tying it to mass made every conversion grow the kill
+        # zone — the snowball at the heart of "doom tears through
+        # everything". What you see is what devours.
+        _e._doom_horizon[0, t] = _r_in * 1.25
         # capture rate scales with YOUR mass (was a flat 0.12): a
         # losing army can no longer hold Doom as an unkillable last
         # stand — the devour dies with the disk, so the bigger blob

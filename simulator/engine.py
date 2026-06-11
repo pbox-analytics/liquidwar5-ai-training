@@ -437,6 +437,16 @@ class LiquidWarEngine:
                 grab = ((dy * dy + dx * dx) <= R_h * R_h) & (self.fteam != t)
                 grab = grab & (torch.rand(self.B, self.N, device=self.device)
                                < self._doom_cap[:, t:t + 1] * cap_shield)  # devour GRADUALLY — a drain you can fight
+                # DIGESTION LIMIT: a well can only swallow so fast. Without
+                # this, a blob overlapping the horizon converted hundreds per
+                # tick and every conversion grew the wielder -> the snowball
+                # that tore through every stance. Cap expected conversions to
+                # ~6 + 0.1% of the wielder's mass per tick (probabilistic
+                # thinning — vectorized, graph-safe).
+                k_digest = 6.0 + 0.001 * self.active_fighters[:, t:t + 1].float()
+                g_cnt = grab.float().sum(1, keepdim=True).clamp(min=1.0)
+                grab = grab & (torch.rand(self.B, self.N, device=self.device)
+                               < (k_digest / g_cnt).clamp(max=1.0))
                 self.fteam = torch.where(grab, torch.full_like(self.fteam, t), self.fteam)
                 self.fhealth = torch.where(grab, torch.full_like(self.fhealth, NEW_HEALTH), self.fhealth)
         self._rebuild_views()
