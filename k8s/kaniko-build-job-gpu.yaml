@@ -16,7 +16,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: liquidwar-gpu-trainer-build-0004
+  name: liquidwar-gpu-trainer-build-0005
   namespace: liquidwar
   labels:
     app.kubernetes.io/name: liquidwar-gpu-trainer
@@ -38,7 +38,7 @@ spec:
           image: alpine/git:latest
           env:
             - name: TRAINING_REF
-              value: "f53d1ee"   # flat 25-action policy (all stance modes trainable)
+              value: "fbe593b"   # sticky stances + 25-action policy
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -55,7 +55,7 @@ spec:
           args:
             - "--context=dir:///workspace"
             - "--dockerfile=docker/Dockerfile.gpu-trainer"
-            - "--destination=registry.homer-ai.svc.cluster.local:5000/pbox/liquidwar-gpu-trainer:0.9.0-amd64"
+            - "--destination=registry.homer-ai.svc.cluster.local:5000/pbox/liquidwar-gpu-trainer:0.9.1-amd64"
             - "--skip-tls-verify"
             - "--single-snapshot"
             - "--use-new-run"
