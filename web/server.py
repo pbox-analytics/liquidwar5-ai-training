@@ -184,6 +184,13 @@ class GameSession:
             # once the flood has reached the cursor, a little polish then stop
             if float(st["f"][0, 0, cy, cx]) < 1e8:
                 st["left"] = min(st["left"], 128)
+        # ARRIVE, don't orbit: the cursor steps cursor_speed (~6) cells/tick,
+        # so near the click it overshoots back and forth forever (the jitter).
+        # Cap this seat's speed at the remaining Chebyshev distance — it
+        # decelerates and lands exactly on the clicked cell.
+        spd = getattr(e, "_cursor_speed_t", None)
+        if spd is not None:
+            spd[t] = max(0, min(spd[t], max(abs(ty - cy), abs(tx - cx))))
         fg = st["f"][0, 0]
         if float(fg[cy, cx]) >= 1e8:                 # flood not here yet: greedy meanwhile
             return [max(-1, min(1, ty - cy)), max(-1, min(1, tx - cx))]
