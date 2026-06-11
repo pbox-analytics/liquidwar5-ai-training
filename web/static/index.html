@@ -90,6 +90,7 @@
     <label>trail <input type="range" id="vTrail" min="0" max="1" step="0.05" value="0.25"><span id="vTrailN">0.25</span></label>
     <label>opacity <input type="range" id="vAlpha" min="0.2" max="1" step="0.04" value="0.85"><span id="vAlphaN">0.85</span></label>
     <label>glow <input type="range" id="vGlow" min="0" max="2" step="0.05" value="0.9"><span id="vGlowN">0.9</span></label>
+    <label>life <input type="range" id="vLife" min="0" max="1.5" step="0.05" value="1.0"><span id="vLifeN">1.0</span></label>
   </div>
   <div class="muted" style="text-align:center; line-height:1.8;">
     <b>↑ ↓ ← → / WASD</b> steer (or hold mouse) &nbsp;·&nbsp;
@@ -155,9 +156,10 @@ let doomA = 0, doomR = 5, doomLvl = 1;                 // black-hole strength/ra
 let whirlA = 0;                                        // maelstrom whirlpool strength (animated)
 let lastFrameT = 0;
 // Live visual dials (wired to the on-screen sliders) — tune the look without redeploying.
-let pTail = 0.45, pCurve = 0.55, pWidth = 1.0, pTrail = 0.25, pAlpha = 0.85, pGlow = 0.9;
+let pTail = 0.45, pCurve = 0.55, pWidth = 1.0, pTrail = 0.25, pAlpha = 0.85, pGlow = 0.9, pLife = 1.0;
 [["vStreak", v => pTail = v], ["vCurve", v => pCurve = v], ["vWidth", v => pWidth = v],
- ["vTrail", v => pTrail = v], ["vAlpha", v => pAlpha = v], ["vGlow", v => pGlow = v]].forEach(([id, set]) => {
+ ["vTrail", v => pTrail = v], ["vAlpha", v => pAlpha = v], ["vGlow", v => pGlow = v],
+ ["vLife", v => pLife = v]].forEach(([id, set]) => {
   const el = document.getElementById(id), lbl = document.getElementById(id + "N");
   el.oninput = () => { set(parseFloat(el.value)); lbl.textContent = parseFloat(el.value).toFixed(2); };
 });
@@ -173,6 +175,10 @@ function b64bytes(b64) {
 // into curPos (fighters move <=6 cells/tick, so 1 byte each) — about half the
 // bytes of the old base64 stream and no atob/JSON parse on the hot path.
 let curPos = null, pendingGrid = null;
+// organic layer: per-team combat-flush events + cursor speeds + heartbeat rates
+let flushSt = Array(6).fill(null);          // {x, y, t0, amp}
+let cursSpd = new Float32Array(6);
+let prevCursorsHud = null, prevHudT = 0;
 function processGrid(g) {              // walls mask (cheap ~5Hz re-upload) + contact sparks
   const mask = new Uint8Array(g.length);
   for (let i = 0; i < g.length; i++) if (g[i] === -2) mask[i] = 255;
@@ -207,7 +213,20 @@ function onFrame(buf) {                                 // a fresh binary frame 
   // converted in combat. Cap spawns/frame — conversions can be hundreds.
   if (prevPT && prevPT.length === curPT.length) {
     let conv = 0;
-    for (let i = 0; i < pn; i++) if (prevPT[i] !== curPT[i] && curPT[i] < TEAMS) conv++;
+    const lostN = new Float32Array(6), lostX = new Float32Array(6), lostY = new Float32Array(6);
+    for (let i = 0; i < pn; i++) if (prevPT[i] !== curPT[i] && curPT[i] < TEAMS) {
+      conv++;
+      const lt = prevPT[i];                       // the team that BLED this mote
+      if (lt < 6) { lostN[lt]++; lostX[lt] += curPos[2*i+1]; lostY[lt] += curPos[2*i]; }
+    }
+    // combat flush: heavy bleeding spawns/reinforces a red shockwave from the wound
+    for (let t = 0; t < TEAMS; t++) {
+      if (lostN[t] >= 10) {
+        const fx = lostX[t] / lostN[t] + 0.5, fy = lostY[t] / lostN[t] + 0.5;
+        const amp = Math.min(1, lostN[t] / 90);
+        if (!flushSt[t] || amp > flushSt[t].amp * 0.7) flushSt[t] = { x: fx, y: fy, t0: performance.now(), amp };
+      }
+    }
     const prob = conv > MAXFLASH ? MAXFLASH / conv : 1;
     let spawned = 0;
     for (let i = 0; i < pn && spawned < MAXFLASH; i++) {
@@ -231,6 +250,17 @@ function onHud(st) {                                    // the JSON channel: HUD
   if (st.tick < lastTick || st.map !== lastMap) { flashes = []; particles = []; }   // new game
   lastTick = st.tick; lastMap = st.map;
   if (pendingGrid && pendingGrid.length === W * H) { processGrid(pendingGrid); pendingGrid = null; }
+  // cursor speeds (cells/s, smoothed) drive the bow-wave wake
+  const nowH = performance.now();
+  if (prevCursorsHud && prevHudT) {
+    const dtH = Math.max(8, nowH - prevHudT) / 1000;
+    for (let t = 0; t < Math.min(6, st.cursors.length); t++) {
+      const p = prevCursorsHud[t], c = st.cursors[t];
+      const v = p ? Math.hypot(c[0] - p[0], c[1] - p[1]) / dtH : 0;
+      cursSpd[t] = 0.8 * cursSpd[t] + 0.2 * Math.min(v, 80);
+    }
+  }
+  prevCursorsHud = st.cursors.map(c => c.slice()); prevHudT = nowH;
   updateHUD(st);
 }
 
@@ -347,8 +377,29 @@ function frame() {                                     // 60fps interpolated ren
                 (t === MYT && curSt.pulse_active) ? YELLOW : WHITE, 0.5);  // inner ring
     ck = pushFx(curArr, ck, x, y, 1.6, 0, WHITE, 0.9);             // core dot
   });
+  // heartbeat follows the held stance: calm blob -> slow pulse, Pulse/nova ->
+  // racing, Doom -> the wave travels INWARD (negative rate)
+  const BEATS = { Swarm: 2.4, Spin: 3.2, Drill: 3.6, Wall: 1.6, Pulse: 4.4, Doom: -3.0,
+                  Maelstrom: 3.8, Atom: 3.0, Classic: 2.0 };
+  const beats = new Float32Array([2.6, 2.6, 2.6, 2.6, 2.6, 2.6]);
+  let myBeat = BEATS[curSt.stance] ?? 2.6;
+  if (curSt.stance === "Pulse" && curSt.mode === "nova") myBeat = 6.0;
+  beats[MYT] = myBeat;
+  if (curSt.ai_doom) beats[curSt.ai_doom[0]] = -3.0;
+  if (curSt.ai_mael) beats[curSt.ai_mael[0]] = 3.8;
+  const flushArr = new Float32Array(24);
+  for (let t = 0; t < 6; t++) {
+    const fl = flushSt[t];
+    if (!fl) continue;
+    const age = (performance.now() - fl.t0) / 1000;
+    const amp = fl.amp * Math.exp(-age * 1.5);
+    if (amp < 0.02 || age * 45 > 110) { flushSt[t] = null; continue; }
+    flushArr[t * 4] = fl.x; flushArr[t * 4 + 1] = fl.y;
+    flushArr[t * 4 + 2] = age; flushArr[t * 4 + 3] = amp;
+  }
   R.render({
     f, time, teams: TEAMS,
+    beats, flush: flushArr, cursSpd, life: pLife,
     tail: pTail, curve: pCurve, size: pWidth, alpha: pAlpha, bloom: pGlow,
     trailFade: trails ? (0.04 + (1 - pTrail) * 0.26) : 0.5,
     trailVis: (trails ? 0.55 : 0.0) + 0.3 * doomA,   // infall paths burn brighter
