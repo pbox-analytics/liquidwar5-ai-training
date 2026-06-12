@@ -58,6 +58,13 @@
                        border-radius: 12px; }
     #touchbar button small { font-size: 9px; color: #8b93a7; }
     #touchbar button.active { background: #2a3550; border-color: #5b79c7; }
+    #loadoutBar button { flex: 1 1 0; min-width: 0; font-size: 24px; }
+    #loadoutBar button small { font-size: 10px; white-space: nowrap; overflow: hidden; max-width: 100%; }
+    #shLoadout button { font-size: 18px; padding: 8px 10px; border-radius: 10px; position: relative; }
+    #shLoadout button.picked { background: #2a3550; border-color: #5b79c7; }
+    #shLoadout button .slot { position: absolute; top: -6px; right: -6px; background: #5b79c7;
+                              color: #fff; border-radius: 50%; width: 17px; height: 17px;
+                              font-size: 11px; line-height: 17px; }
     body { padding-bottom: 84px; }   /* room for the action bar */
     #sheetScrim { position: fixed; inset: 0; background: #000a; z-index: 9; }
     #sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
@@ -121,21 +128,15 @@
   </div>
   <canvas id="c" width="110" height="80"></canvas>
   <div id="touchbar">
-    <button data-st="0">🐝<small>Swarm</small></button>
-    <button data-st="1">🌀<small>Spin</small></button>
-    <button data-st="2">➤<small>Drill</small></button>
-    <button data-st="3">🛡<small>Wall</small></button>
-    <button data-st="4">💥<small>Pulse</small></button>
-    <button data-st="5">🕳<small>Doom</small></button>
-    <button data-st="6">🌪<small>Mael</small></button>
-    <button data-st="7">⚛<small>Atom</small></button>
-    <button data-st="8">🌊<small>Classic</small></button>
+    <span id="loadoutBar" style="display:flex;flex:1;gap:6px"></span>
     <button id="tSpin">↻<small>Spin dir</small></button>
-    <button id="tNew">🔄<small>New game</small></button>
-    <button id="tGear">⚙️<small>Settings</small></button>
+    <button id="tNew">🔄<small>New</small></button>
+    <button id="tGear">⚙️<small>More</small></button>
   </div>
   <div id="sheetScrim"></div>
   <div id="sheet">
+    <h3>Loadout — pick 3 stances for your kit</h3>
+    <div class="row" id="shLoadout"></div>
     <h3>Match</h3><div class="row" id="shMatch"></div>
     <h3>Multiplayer</h3><div class="row" id="shRoom"></div>
     <h3>App</h3><div class="row"><a href="liquidwar.apk" style="color:#7ea2ff">📦 Install the Android app</a></div>
@@ -482,9 +483,12 @@ function updateHUD(st) {
   const SI = { Swarm: "🐝", Spin: "🌀", Drill: "➤", Wall: "🛡", Pulse: "💥", Doom: "🕳", Maelstrom: "🌪", Atom: "⚛", Classic: "🌊" };
   sp.textContent = (SI[st.stance] || "") + " " + (st.stance ?? "—") + (st.mode ? " ·" + st.mode : "");
   sp.style.background = SC[st.stance] || "#1b2233"; sp.style.color = "#fff";
-  const SORDER = ["Swarm", "Spin", "Drill", "Wall", "Pulse", "Doom", "Maelstrom", "Atom", "Classic"];
-  document.querySelectorAll("#touchbar [data-st]").forEach(b =>
-    b.classList.toggle("active", SORDER[+b.dataset.st] === st.stance));
+  document.querySelectorAll("#loadoutBar [data-st]").forEach(b => {
+    const on = S_NAME[+b.dataset.st] === st.stance;
+    b.classList.toggle("active", on);
+    b.querySelector("small").textContent =
+      on && st.mode ? `${S_NAME[+b.dataset.st]} · ${st.mode}` : S_NAME[+b.dataset.st];
+  });
   document.getElementById("opp").textContent = st.opponent + (st.players > 1 ? ` · ${st.players}P` : "");
   const tdiv = document.getElementById("teams"); tdiv.innerHTML = "";
   st.fighters.forEach((f, t) => {
@@ -566,9 +570,41 @@ const touchEnd = (e) => {
 cv.addEventListener("touchend", touchEnd, { passive: false });
 cv.addEventListener("touchcancel", touchEnd, { passive: false });
 // touch stance bar: tap = hold stance, re-tap = cycle its mode (same as keys)
-document.querySelectorAll("#touchbar [data-st]").forEach(b => {
-  b.onclick = () => ws && ws.readyState === 1 && ws.send(JSON.stringify({ stance: parseInt(b.dataset.st) }));
-});
+// ---- LOADOUT: a 3-stance kit (deck-building lite). The bar shows YOUR three
+// as big confident buttons; the picker in the sheet swaps stances in/out
+// (oldest-out when full). Persisted per device.
+const S_EMOJI = ["🐝", "🌀", "➤", "🛡", "💥", "🕳", "🌪", "⚛", "🌊"];
+const S_NAME = ["Swarm", "Spin", "Drill", "Wall", "Pulse", "Doom", "Maelstrom", "Atom", "Classic"];
+let loadout = JSON.parse(localStorage.getItem("lw-loadout") || "[0,4,5]").slice(0, 3);
+function sendStance(i) { ws && ws.readyState === 1 && ws.send(JSON.stringify({ stance: i })); }
+function renderLoadout() {
+  const bar = document.getElementById("loadoutBar");
+  bar.innerHTML = "";
+  for (const st of loadout) {
+    const b = document.createElement("button");
+    b.dataset.st = st;
+    b.innerHTML = `${S_EMOJI[st]}<small>${S_NAME[st]}</small>`;
+    b.onclick = () => sendStance(st);
+    bar.appendChild(b);
+  }
+  const pick = document.getElementById("shLoadout");
+  pick.innerHTML = "";
+  S_NAME.forEach((nm, i) => {
+    const b = document.createElement("button");
+    const slot = loadout.indexOf(i);
+    b.className = slot >= 0 ? "picked" : "";
+    b.innerHTML = `${S_EMOJI[i]} ${nm}` + (slot >= 0 ? `<span class="slot">${slot + 1}</span>` : "");
+    b.onclick = () => {
+      const at = loadout.indexOf(i);
+      if (at >= 0) { if (loadout.length > 1) loadout.splice(at, 1); }
+      else { loadout.push(i); if (loadout.length > 3) loadout.shift(); }
+      localStorage.setItem("lw-loadout", JSON.stringify(loadout));
+      renderLoadout();
+    };
+    pick.appendChild(b);
+  });
+}
+renderLoadout();
 document.getElementById("tSpin").onclick = () => { spin = spin === 1 ? -1 : spin === -1 ? 0 : 1; sendSpin(); };
 document.getElementById("tNew").onclick = () => ws && ws.readyState === 1 && ws.send(JSON.stringify({ reset: true }));
 // settings sheet: the existing controls MOVE here on touch devices, so every
