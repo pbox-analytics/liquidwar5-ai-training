@@ -260,6 +260,7 @@ let curPos = null, pendingGrid = null;
 // organic layer: per-team combat-flush events + cursor speeds + heartbeat rates
 let flushSt = Array(6).fill(null);          // {x, y, t0, amp}
 let convEMA = 0;                            // combat intensity (drives the score)
+let flowEMA = 0;                            // your swarm's motion (drives the flow sound)
 let cursSpd = new Float32Array(6);
 let prevCursorsHud = null, prevHudT = 0;
 function processGrid(g) {              // walls mask (cheap ~5Hz re-upload) + contact sparks
@@ -285,7 +286,15 @@ function onFrame(buf) {                                 // a fresh binary frame 
   } else {                                              // delta: int8, accumulate
     if (!curPos || curPos.length !== pn * 2) return;    // lost sync — wait for a keyframe
     const d = new Int8Array(buf, off, pn * 2); off += pn * 2;
+    let mv = 0, mn = 0;
     for (let i = 0; i < pn * 2; i++) curPos[i] += d[i];
+    if (curPT && curPT.length === pn) {                 // YOUR swarm's aggregate motion -> the flow sound
+      for (let i = 0; i < pn; i++) if (curPT[i] === MYT) {
+        mv += Math.abs(d[2 * i]) + Math.abs(d[2 * i + 1]); mn++;
+      }
+      flowEMA = 0.85 * flowEMA + 0.15 * Math.min(1, (mv / Math.max(1, mn)) / 1.6);
+      LWAUDIO.setFlow(flowEMA);
+    }
   }
   const now = performance.now();
   if (tLast) dtServer = 0.85 * dtServer + 0.15 * (now - tLast);

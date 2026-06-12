@@ -56,7 +56,7 @@ const LWAUDIO = (() => {
     musicBus.connect(master); musicBus.connect(verb);
     sfxBus = ctx.createGain(); sfxBus.gain.value = sfxVol;
     sfxBus.connect(master); sfxBus.connect(verb);
-    startSub(); startDoom(); startMael();
+    startSub(); startDoom(); startMael(); startFlow();
   }
 
   // --- organ voice: additive harmonics with cathedral attack ---
@@ -193,6 +193,33 @@ const LWAUDIO = (() => {
     src.connect(bp).connect(ng).connect(musicBus); src.start(t);
   }
 
+  // FLOW: the sound of the swarm itself moving — a looping noise bed whose
+  // loudness AND brightness track the army's real aggregate speed (fed per
+  // frame from the delta decode). Still army = silence; a full-flood charge
+  // rushes like water over stone.
+  let flowG = null, flowLP = null, flowV = 0;
+  function startFlow() {
+    const len = ctx.sampleRate * 2, buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    let last = 0;
+    for (let i = 0; i < len; i++) {            // pink-ish: integrate white a touch
+      last = 0.92 * last + 0.35 * (Math.random() * 2 - 1);
+      d[i] = last;
+    }
+    const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true;
+    flowLP = ctx.createBiquadFilter(); flowLP.type = "lowpass"; flowLP.frequency.value = 400;
+    flowG = ctx.createGain(); flowG.gain.value = 0;
+    src.connect(flowLP).connect(flowG).connect(sfxBus);
+    src.start();
+  }
+  function setFlow(v) {                        // v 0..1: per-mote avg speed, smoothed
+    if (!ctx || !enabled || !flowG) { flowV = v; return; }
+    flowV = v;
+    const now = ctx.currentTime;
+    flowG.gain.setTargetAtTime(0.14 * Math.pow(v, 1.4), now, 0.25);
+    flowLP.frequency.setTargetAtTime(280 + 1400 * v, now, 0.3);
+  }
+
   // ---- SFX ----
   function thud(strength) {                     // a front bleeding: tectonic hit
     const t = ctx.currentTime;
@@ -287,6 +314,6 @@ const LWAUDIO = (() => {
     if (musicBus) musicBus.gain.value = m;
     if (sfxBus) sfxBus.gain.value = sx;
   }
-  return { update, thud, blip, stanceTap, setEnabled, setVolumes,
+  return { update, thud, blip, stanceTap, setFlow, setEnabled, setVolumes,
            get enabled() { return enabled; } };
 })();
