@@ -38,7 +38,7 @@ spec:
           image: alpine/git:latest
           env:
             - name: TRAINING_REF
-              value: "4387622"   # wells-110: dead-air fix + stance-head reset + pool eval + parity tax
+              value: "d6f2029"   # wells-110 + heading inertia (train/play parity)
           command: ["/bin/sh", "-c"]
           args:
             - |
