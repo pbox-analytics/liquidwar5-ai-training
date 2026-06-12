@@ -34,6 +34,12 @@
   canvas { background: #05070c; border: 1px solid #232a3a; border-radius: 8px;
            max-width: 95vw; height: auto; cursor: crosshair; }
   .muted { color: #6b7280; }
+  #stage { position: relative; }
+  #banner { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+            pointer-events: none; font-size: clamp(38px, 9vw, 96px); font-weight: 800;
+            letter-spacing: .12em; text-shadow: 0 0 24px #000, 0 0 60px currentColor; z-index: 4; }
+  #netveil { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+             background: #0b0e14cc; z-index: 8; font-size: 18px; color: #9aa4b2; }
   canvas { touch-action: none; }   /* the finger steers — no scroll/zoom stealing */
   #touchbar, #sheet, #sheetScrim { display: none; }
   /* ---- APP LAYOUT (touch devices): battlefield-first, thumb-zone controls,
@@ -123,14 +129,20 @@
            title="LAN play: open the same room name on another machine to join as the next team"
            style="background:#1b2233;color:#cdd6f4;border:1px solid #2a3550;border-radius:8px;padding:6px 10px">
     <button id="invite" title="Copy a join link for another player on your network">🔗 invite</button>
+    <button id="sound" title="Procedural score + battle sound (S)">🔇</button>
     <button id="reset">New game</button>
     <button id="fs" title="Fullscreen (F)">⛶</button>
   </div>
-  <canvas id="c" width="110" height="80"></canvas>
+  <div id="stage">
+    <canvas id="c" width="110" height="80"></canvas>
+    <div id="banner"></div>
+    <div id="netveil">⟳ reconnecting…</div>
+  </div>
   <div id="touchbar">
     <span id="loadoutBar" style="display:flex;flex:1;gap:6px"></span>
     <button id="tSpin">↻<small>Spin dir</small></button>
     <button id="tNew">🔄<small>New</small></button>
+    <button id="tSound">🔇<small>Sound</small></button>
     <button id="tGear">⚙️<small>More</small></button>
   </div>
   <div id="sheetScrim"></div>
@@ -140,6 +152,13 @@
     <h3>Match</h3><div class="row" id="shMatch"></div>
     <h3>Multiplayer</h3><div class="row" id="shRoom"></div>
     <h3>App</h3><div class="row"><a href="liquidwar.apk" style="color:#7ea2ff">📦 Install the Android app</a></div>
+    <h3>Sound</h3>
+    <div class="row" id="soundRow" style="width:100%">
+      <label style="display:flex;align-items:center;gap:8px;width:100%;font-size:13px;color:#9aa4b2">music
+        <input type="range" id="vMusic" min="0" max="1" step="0.05" value="0.5" style="flex:1"></label>
+      <label style="display:flex;align-items:center;gap:8px;width:100%;font-size:13px;color:#9aa4b2">effects
+        <input type="range" id="vSfx" min="0" max="1" step="0.05" value="0.7" style="flex:1"></label>
+    </div>
     <h3>Visuals</h3><div class="row" id="visuals2"></div>
     <div class="row"><button id="sheetClose" style="flex:1">Done</button></div>
   </div>
@@ -170,6 +189,7 @@
 // install prompt over HTTPS — behind plain http this is inert but harmless.
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 </script>
+<script src="audio.js"></script>
 <script src="gl.js"></script>
 <script>
 const COLORS = ["#2f7bff","#ff3a2e","#4ade80","#fbbf24","#c084fc","#fb923c"]; // team 0 = you (vivid blue) / team 1 = warm red
@@ -239,6 +259,7 @@ function b64bytes(b64) {
 let curPos = null, pendingGrid = null;
 // organic layer: per-team combat-flush events + cursor speeds + heartbeat rates
 let flushSt = Array(6).fill(null);          // {x, y, t0, amp}
+let convEMA = 0;                            // combat intensity (drives the score)
 let cursSpd = new Float32Array(6);
 let prevCursorsHud = null, prevHudT = 0;
 function processGrid(g) {              // walls mask (cheap ~5Hz re-upload) + contact sparks
@@ -287,8 +308,11 @@ function onFrame(buf) {                                 // a fresh binary frame 
         const fx = lostX[t] / lostN[t] + 0.5, fy = lostY[t] / lostN[t] + 0.5;
         const amp = Math.min(1, lostN[t] / 90);
         if (!flushSt[t] || amp > flushSt[t].amp * 0.7) flushSt[t] = { x: fx, y: fy, t0: performance.now(), amp };
+        LWAUDIO.thud(Math.min(1, lostN[t] / 100) * (t === MYT ? 1 : 0.55));   // your wounds hit harder
       }
     }
+    if (conv > 0 && conv < 10) LWAUDIO.blip();      // skirmish crackle
+    convEMA = 0.92 * convEMA + 0.08 * conv;
     const prob = conv > MAXFLASH ? MAXFLASH / conv : 1;
     let spawned = 0;
     for (let i = 0; i < pn && spawned < MAXFLASH; i++) {
@@ -459,6 +483,24 @@ function frame() {                                     // 60fps interpolated ren
     flushArr[t * 4] = fl.x; flushArr[t * 4 + 1] = fl.y;
     flushArr[t * 4 + 2] = age; flushArr[t * 4 + 3] = amp;
   }
+  // the score listens to the battle
+  const myF = curSt.fighters ? curSt.fighters[MYT] : 0;
+  const totF = curSt.fighters ? curSt.fighters.reduce((a, b) => a + b, 0) : 1;
+  const won = curSt.fighters && curSt.fighters.indexOf(Math.max(...curSt.fighters)) === MYT;
+  LWAUDIO.update({
+    intensity: Math.min(1, convEMA / 90),
+    losing: Math.max(0, 0.5 - myF / Math.max(1, totF)) * 2,
+    doom: (curSt.stance === "Doom" || curSt.ai_doom) ? 1 : 0,
+    mael: (curSt.stance === "Maelstrom" || curSt.ai_mael) ? 1 : 0,
+    done: !!curSt.done, won,
+  });
+  // end-of-game banner: VICTORY in your colour, DEFEAT in ash
+  const bn = document.getElementById("banner");
+  if (curSt.done) {
+    bn.style.display = "flex";
+    bn.textContent = won ? "VICTORY" : "DEFEAT";
+    bn.style.color = won ? COLORS[MYT % COLORS.length] : "#6b7280";
+  } else bn.style.display = "none";
   R.render({
     f, time, teams: TEAMS,
     beats, flush: flushArr, cursSpd, life: pLife,
@@ -502,8 +544,9 @@ function updateHUD(st) {
   });
 }
 
+let reconnectDelay = 800;
 function connect() {
-  if (ws) ws.close();
+  if (ws) { ws._intentional = true; ws.onclose = null; ws.close(); }
   const mode = document.getElementById("mode").value;
   const opp = document.getElementById("opponent").value;
   const room = document.getElementById("room").value.trim();
@@ -517,6 +560,13 @@ function connect() {
   ws.binaryType = "arraybuffer";
   curPos = null; pendingGrid = null;
   ws.onmessage = (e) => (e.data instanceof ArrayBuffer ? onFrame(e.data) : onHud(JSON.parse(e.data)));
+  ws.onopen = () => { reconnectDelay = 800; document.getElementById("netveil").style.display = "none"; };
+  ws.onclose = () => {                      // phones sleep, wifi blips: come back on our own
+    if (ws !== null && ws._intentional) return;
+    document.getElementById("netveil").style.display = "flex";
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(5000, reconnectDelay * 1.7);
+  };
 }
 // Opponent roster: archived generations from /checkpoints (newest first) —
 // pick an older one to feel how far training has come.
@@ -576,7 +626,28 @@ cv.addEventListener("touchcancel", touchEnd, { passive: false });
 const S_EMOJI = ["🐝", "🌀", "➤", "🛡", "💥", "🕳", "🌪", "⚛", "🌊"];
 const S_NAME = ["Swarm", "Spin", "Drill", "Wall", "Pulse", "Doom", "Maelstrom", "Atom", "Classic"];
 let loadout = JSON.parse(localStorage.getItem("lw-loadout") || "[0,4,5]").slice(0, 3);
-function sendStance(i) { ws && ws.readyState === 1 && ws.send(JSON.stringify({ stance: i })); }
+function sendStance(i) {
+  ws && ws.readyState === 1 && ws.send(JSON.stringify({ stance: i }));
+  LWAUDIO.stanceTap(i);
+}
+// ---- sound: one toggle, two sliders, everything else is the engine reacting
+function setSound(v) {
+  LWAUDIO.setEnabled(v);
+  localStorage.setItem("lw-sound", v ? "1" : "0");
+  for (const id of ["sound", "tSound"]) {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = (v ? "🔊" : "🔇") + (id === "tSound" ? "<small>Sound</small>" : "");
+  }
+}
+document.getElementById("sound").onclick = () => setSound(!LWAUDIO.enabled);
+document.getElementById("tSound").onclick = () => setSound(!LWAUDIO.enabled);
+const volSync = () => LWAUDIO.setVolumes(parseFloat(document.getElementById("vMusic").value),
+                                         parseFloat(document.getElementById("vSfx").value));
+document.getElementById("vMusic").oninput = volSync;
+document.getElementById("vSfx").oninput = volSync;
+// sound prefs restore on the first user gesture (browser autoplay policy)
+if (localStorage.getItem("lw-sound") === "1")
+  window.addEventListener("pointerdown", () => setSound(true), { once: true });
 function renderLoadout() {
   const bar = document.getElementById("loadoutBar");
   bar.innerHTML = "";
@@ -641,9 +712,10 @@ function sendDir() {
 }
 window.addEventListener("keydown", (e) => {
   if (e.key >= "1" && e.key <= "9") {             // number row selects a held STANCE (0..8)
-    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ stance: parseInt(e.key) - 1 }));
+    sendStance(parseInt(e.key) - 1);
     return;
   }
+  if (e.key === "s" || e.key === "S") { setSound(!LWAUDIO.enabled); return; }   // sound toggle
   if (e.key === "t" || e.key === "T") { trails = !trails; return; }   // toggle motion trails
   if (e.key === "f" || e.key === "F") { toggleFullscreen(); return; }  // big-screen mode
   if (e.key === "q" || e.key === "Q") { spin = spin === -1 ? 0 : -1; sendSpin(); return; }  // orbit CCW / off
