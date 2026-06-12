@@ -102,9 +102,16 @@ class GameSession:
         self.engine._tide = torch.zeros(1, teams, 2, device=DEVICE)  # directional traveling-wave heading (Pulse tide mode)
         self.engine._surge = torch.ones(1, teams, device=DEVICE)  # per-team damage mult; IN-PLACE writes only (graph input)
         self.engine._wells_enabled = True            # play casts real cross-team wells (slots in engine.reset)
-        # CUDA-graph capture/replay of the engine tick (the play loop is
-        # launch-overhead-bound at B=1). Kill switch: LW_CUDA_GRAPH=0.
-        self.engine._cuda_graph = os.environ.get("LW_CUDA_GRAPH", "1") != "0"
+        # CUDA graphs are OPT-IN for play now (LW_CUDA_GRAPH=1): with rooms
+        # churning constantly (auto-reconnect, phones sleeping, multiple
+        # devices) the capture/teardown lifecycle keeps re-poisoning the CUDA
+        # context through a race we have not fully pinned — three narrowing
+        # fixes (reset sync, teardown sync, eager small rooms) each helped but
+        # big-room churn still hits it. Eager keeps ~most of the perf work
+        # (sync-free hot path, pooled gradient, CPU cursors, policy cache);
+        # stability beats the last few fps until the race is reproduced and
+        # killed offline.
+        self.engine._cuda_graph = os.environ.get("LW_CUDA_GRAPH", "0") == "1"
         self.engine.reset()
         self.policy: CursorPolicy | None = None
         self.ckpt_name = opponent
