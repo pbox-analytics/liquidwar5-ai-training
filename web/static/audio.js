@@ -234,6 +234,7 @@ const LWAUDIO = (() => {
 
   // ---- SFX ----
   function thud(strength) {                     // a front bleeding: tectonic hit
+    if (!ctx || !enabled) return;
     const t = ctx.currentTime;
     if (t - lastThud < 0.18) return;
     lastThud = t;
@@ -246,6 +247,7 @@ const LWAUDIO = (() => {
     o.connect(g).connect(sfxBus); o.start(t); o.stop(t + 0.8);
   }
   function blip() {                             // skirmish crackle
+    if (!ctx || !enabled) return;
     const t = ctx.currentTime;
     if (t - lastBlip < 0.09) return;
     lastBlip = t;
@@ -379,5 +381,6 @@ const LWAUDIO = (() => {
     if (sfxBus) sfxBus.gain.value = sx;
   }
   return { update, thud, blip, stanceTap, setFlow, setEnabled, setVolumes,
-           get enabled() { return enabled; } };
+           get enabled() { return enabled; },
+           get debug() { return { state: ctx && ctx.state, beat: gridBeat, music: musicBus && musicBus.gain.value }; } };
 })();
