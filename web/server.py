@@ -217,6 +217,37 @@ class GameSession:
                 self._ai_hold_t = n
             else:
                 stance = self._ai_hold
+        # ANTI-CAMP ESCORT: the small-map lineage pins its cursor into the
+        # play board's corner (measured 93% corner occupancy at 384x576 —
+        # far out of training distribution, the move argmax degenerates to a
+        # constant heading). If an AI seat sits in a corner box for more than
+        # LW_AI_CAMP_BUDGET ticks, the heuristic coach steers that seat for
+        # LW_AI_CAMP_ESCORT ticks (toward the fight, like a player would),
+        # then the policy gets the wheel back. 0 disables.
+        camp_budget = int(os.environ.get("LW_AI_CAMP_BUDGET", "120"))
+        escort_len = int(os.environ.get("LW_AI_CAMP_ESCORT", "900"))
+        if camp_budget > 0:
+            if getattr(self, "_camp_run", None) is None or len(self._camp_run) != T:
+                self._camp_run = [0] * T
+                self._camp_escort = [0] * T
+            cur = e.cursor_pos[0].tolist()
+            hdydx = None
+            for t in range(T):
+                cy, cx = cur[t]
+                in_corner = (min(cy, e.H - 1 - cy) < 0.12 * e.H
+                             and min(cx, e.W - 1 - cx) < 0.12 * e.W)
+                if self._camp_escort[t] > 0:                  # coach has the wheel
+                    self._camp_escort[t] -= 2                 # (inference every 2nd tick)
+                    if hdydx is None:
+                        hdydx = _heuristic_dydx(e)
+                    dydx[0, t] = hdydx[0, t]
+                elif in_corner:
+                    self._camp_run[t] += 2
+                    if self._camp_run[t] >= camp_budget:
+                        self._camp_run[t] = 0
+                        self._camp_escort[t] = escort_len
+                else:
+                    self._camp_run[t] = 0
         if not full_head:                                 # old 5/8-stance policy.pt
             stance = self._legacy[stance]
             if budget > 0 and any(c > 0 for c in cool):   # no logits to mask: override

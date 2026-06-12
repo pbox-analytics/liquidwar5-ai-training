@@ -488,3 +488,13 @@ outages were co-tenant CPU starvation (host load 48). Landed:
   _move_fighters launch diet (5610 of 6761 launches/tick), grid RLE + team
   diffs (~32 -> ~16 Mbit/s), engine-pool path back to CUDA graphs, batched
   same-geometry rooms.
+
+### 18b. Anti-camp escort (2026-06-12)
+
+The small-map lineage pins its cursor into the play board's corner (measured
+93% occupancy of the corner CELL at 384x576 — OOD scale, the move argmax
+degenerates to a constant heading; the curriculum that should have fixed it
+trained on dead air, §19). Guard: `LW_AI_CAMP_BUDGET` (120 ticks in a 12%
+corner box) hands the seat to the heuristic coach for `LW_AI_CAMP_ESCORT`
+(900 ticks), then the policy resumes. Measured corner time 0.93 -> 0.23.
+Stances stay policy-chosen (the Doom governor composes on top). 0 disables.
