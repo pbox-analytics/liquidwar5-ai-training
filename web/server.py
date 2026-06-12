@@ -712,6 +712,7 @@ class Player:
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=1)
         self.dead = False
         self.task: asyncio.Task | None = None
+        self._sent_bn = -1                  # last binary frame number sent
 
     def offer(self, frame) -> None:
         """Queue a frame, evicting a stale unsent one (latest wins)."""
@@ -725,8 +726,16 @@ class Player:
     async def sender(self) -> None:
         try:
             while True:
-                blob, hud = await self.queue.get()
-                await self.sock.send_bytes(blob)
+                blob, bn, hud = await self.queue.get()
+                # a FROZEN engine (countdown, result hold) serves the same
+                # cached blob every iteration — sending it 63x/s was a
+                # 21 MB/s/client storm of identical bytes. Dedup by frame
+                # number; the HUD JSON (countdown digits etc.) still flows.
+                # A fresh joiner starts at -1, so they always get the
+                # current frame even mid-freeze.
+                if bn != self._sent_bn:
+                    await self.sock.send_bytes(blob)
+                    self._sent_bn = bn
                 await self.sock.send_json(hud)
         except Exception:
             self.dead = True
@@ -1008,6 +1017,9 @@ class Room:
                         and not getattr(_e, "_cuda_graph", False)):
                     _e._fixed_sweeps = _e.cursor_speed + 4
             blob = session.frame_blob()
+            if blob is not getattr(self, "_last_sent_blob", None):
+                self._last_sent_blob = blob
+                self._blob_n = getattr(self, "_blob_n", 0) + 1
             st = session.state(); st["fps"] = round(fps, 1)
             st["players"] = len(players)
             st["seats"] = sorted(self.players)            # which teams are humans (lobby chips)
@@ -1073,7 +1085,7 @@ class Room:
                 msg["stance"] = STANCES[p.ctrl["stance"]]
                 msg["mode"] = _mode_name(p.ctrl)
                 msg["spin_dir"] = p.spin_sign
-                p.offer((blob, msg))
+                p.offer((blob, self._blob_n, msg))
             t_work = loop.time()
             next_dl += dt                                # advance the absolute deadline
             sleep = next_dl - loop.time()

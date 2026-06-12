@@ -73,6 +73,11 @@ def parse_args():
     p.add_argument("--ckpt-dir", default="results/rl")
     p.add_argument("--ckpt-every", type=int, default=50,
                    help="Save a numbered checkpoint + eval best.pt every N updates")
+    p.add_argument("--eval-max-ticks", type=int, default=360,
+                   help="Tick cap per gate-eval game; undecided games award the "
+                        "fighter-count leader, so the cap bounds the eval pool's "
+                        "wall-clock without losing the ranking (raise it on a "
+                        "fast GPU for slower, more definitive gates)")
     p.add_argument("--save-every", type=int, default=10,
                    help="Refresh latest.pt/optim.pt/meta.json every N updates (cheap crash insurance)")
     p.add_argument("--resume", default="",
@@ -272,7 +277,7 @@ def main():
             # opponent couldn't see the Doom collapse coming.
             wr, pool = win_rate_pool(policy, games=32, teams=2, height=args.height,
                                      width=args.width, fighters=args.fighters,
-                                     device=device)
+                                     device=device, max_ticks=args.eval_max_ticks)
             per_opp = "  ".join(f"{k}={v:.3f}" for k, v in pool.items())
             print(f"  [eval] win-rate pool 1v1: {per_opp}  mean={wr:.3f}  "
                   f"(best {best_winrate:.3f})", flush=True)
