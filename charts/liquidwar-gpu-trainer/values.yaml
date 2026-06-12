@@ -24,7 +24,7 @@ image:
 # action space, trained with --wells and --resume into a fixed NFS run dir so
 # pod restarts continue in place. wells-080 (8-action) was superseded ~150
 # updates in; its dir stays on the NFS for the record.
-replicaCount: 1
+replicaCount: 0
 
 # Pin to pbox (pandoras-box): its PRO 6000 (96 GB) is now advertised to k8s
 # (nvidia-device-plugin affinity allowlist gained rtx_pro_6000) and the card is
