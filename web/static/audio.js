@@ -176,6 +176,56 @@ const LWAUDIO = (() => {
     o.connect(g); o2.connect(g); g.connect(musicBus);
     o.start(); o2.start(); trem.start();
     doomDrone = g;
+    // ENEMY DOOM, audible: 36.7Hz is silent on phone speakers. The approach
+    // layer is a beating 110Hz pair + a dark saw, opening and LOUDENING with
+    // proximity, its heartbeat tremolo ACCELERATING 0.8 -> 3.5Hz as the hole
+    // nears your cursor — fear you can hear with your eyes shut.
+    const e1 = ctx.createOscillator(); e1.frequency.value = 110;
+    const e2 = ctx.createOscillator(); e2.frequency.value = 110.7;
+    const e3 = ctx.createOscillator(); e3.type = "sawtooth"; e3.frequency.value = 73.4;
+    enemyLP = ctx.createBiquadFilter(); enemyLP.type = "lowpass"; enemyLP.frequency.value = 200;
+    enemyG = ctx.createGain(); enemyG.gain.value = 0;
+    enemyTrem = ctx.createOscillator(); enemyTrem.frequency.value = 0.8;
+    const etg = ctx.createGain(); etg.gain.value = 0.05;
+    enemyTrem.connect(etg).connect(enemyG.gain);
+    e1.connect(enemyLP); e2.connect(enemyLP); e3.connect(enemyLP);
+    enemyLP.connect(enemyG).connect(musicBus);
+    e1.start(); e2.start(); e3.start(); enemyTrem.start();
+    // THE CLASH: holding the correct counter (Maelstrom into enemy Doom) is a
+    // tritone shimmer through a wobbling band — audible strain that HOLDS
+    const c1 = ctx.createOscillator(); c1.type = "sawtooth"; c1.frequency.value = f(6, 220);
+    const c2 = ctx.createOscillator(); c2.type = "sawtooth"; c2.frequency.value = f(6, 220) * 1.006;
+    const cbp = ctx.createBiquadFilter(); cbp.type = "bandpass"; cbp.frequency.value = 1100; cbp.Q.value = 6;
+    const cwob = ctx.createOscillator(); cwob.frequency.value = 0.9;
+    const cwg = ctx.createGain(); cwg.gain.value = 350;
+    cwob.connect(cwg).connect(cbp.frequency);
+    clashG = ctx.createGain(); clashG.gain.value = 0;
+    c1.connect(cbp); c2.connect(cbp); cbp.connect(clashG).connect(musicBus);
+    c1.start(); c2.start(); cwob.start();
+  }
+  let enemyG = null, enemyLP = null, enemyTrem = null, clashG = null;
+  let novaRiser = null;
+  function novaCharge(on) {                    // the riser teaches the detonation by ear
+    const now = ctx.currentTime;
+    if (on && !novaRiser) {
+      const o = ctx.createOscillator(); o.type = "sawtooth";
+      o.frequency.setValueAtTime(f(12, 220), now);
+      o.frequency.linearRampToValueAtTime(f(24, 220), now + 1.8);
+      const lp = ctx.createBiquadFilter(); lp.type = "lowpass";
+      lp.frequency.setValueAtTime(600, now);
+      lp.frequency.linearRampToValueAtTime(4000, now + 1.8);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, now);
+      g.gain.linearRampToValueAtTime(0.09, now + 1.6);
+      o.connect(lp).connect(g).connect(sfxBus);
+      o.start(now);
+      novaRiser = { o, g };
+    } else if (!on && novaRiser) {
+      novaRiser.g.gain.setTargetAtTime(0, now, 0.02);     // cut...
+      novaRiser.o.stop(now + 0.3);
+      novaRiser = null;
+      taiko(1.0, 0.7); thud(1.0); duck(0.6);              // ...and DETONATE
+    }
   }
 
   function startMael() {                       // swirling band-passed wash
@@ -202,7 +252,9 @@ const LWAUDIO = (() => {
     g.gain.setValueAtTime(0, t);
     g.gain.linearRampToValueAtTime(amp, t + 0.02);
     g.gain.setTargetAtTime(0, t + 0.03, 0.5);
-    o.connect(g); g.connect(musicBus); g.connect(echoIn);
+    const pan = ctx.createStereoPanner();
+    pan.pan.value = (Math.random() * 1.4 - 0.7);         // bioluminescence is wide
+    o.connect(g); g.connect(pan).connect(musicBus); g.connect(echoIn);
     o.start(t); o.stop(t + 4);
   }
 
@@ -389,7 +441,9 @@ const LWAUDIO = (() => {
     g.gain.setValueAtTime(0, when);
     g.gain.linearRampToValueAtTime(gain, when + 0.01);
     g.gain.setTargetAtTime(0, when + 0.025, 0.055);
-    o.connect(bp).connect(g).connect(musicBus);
+    const pan = ctx.createStereoPanner();                // alternating 16ths sit L/R
+    pan.pan.value = (gridStep & 1) ? 0.25 : -0.25;
+    o.connect(bp).connect(g).connect(pan).connect(musicBus);
     o.start(when); o.stop(when + 0.4);
   }
   function lead(semi, when, dur, gain) {       // the theme: bowed, breathing
@@ -456,8 +510,17 @@ const LWAUDIO = (() => {
       sparkTimer = 1.2 + Math.random() * 3.5 + 4 * drive;
     }
     sub.g.gain.setTargetAtTime(0.13 + 0.11 * sig.intensity, now, 1.5);
-    doomDrone.gain.setTargetAtTime(sig.doom ? 0.20 : 0, now, sig.doom ? 1.2 : 0.6);
+    // YOUR doom: the sub drone scales with charge level; ENEMY doom: the
+    // audible approach layer + accelerating heartbeat; the counter CLASHES
+    const lvl = sig.doomLvl || 0;
+    doomDrone.gain.setTargetAtTime(lvl ? [0.14, 0.19, 0.24][lvl - 1] : (sig.doom ? 0.12 : 0), now, 1.0);
+    const prox = sig.doomProx || 0;
+    enemyG.gain.setTargetAtTime(prox > 0.02 ? 0.05 + 0.13 * prox : 0, now, 0.5);
+    enemyLP.frequency.setTargetAtTime(200 + 700 * prox, now, 0.5);
+    enemyTrem.frequency.setTargetAtTime(0.8 + 2.7 * prox, now, 0.4);
+    clashG.gain.setTargetAtTime(0.06 * Math.min(sig.mael ? 1 : 0, prox > 0.1 ? 1 : 0) * Math.max(prox, 0.4), now, 0.4);
     maelWash.gain.setTargetAtTime(sig.mael ? 0.12 : 0, now, 0.8);
+    novaCharge(sig.nova === "charge");
     if (s.done && !wasDone) resolveEnd(s.outcome || (s.won ? "win" : "lose"));
     wasDone = s.done;
   }

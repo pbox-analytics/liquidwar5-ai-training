@@ -142,6 +142,7 @@
       <option value="play">Play (you = team 0)</option>
       <option value="spectate">Spectate (AI vs AI)</option>
     </select>
+    <span id="record" class="muted" style="font-size:12px"></span>
     <select id="opponent" title="Latest auto-upgrades as training improves; archive entries are frozen generations">
       <option value="latest">Latest checkpoint</option>
       <option value="heuristic">Heuristic AI</option>
@@ -161,6 +162,8 @@
       <option value="4">Map: Rooms</option>
       <option value="5">Map: Corners</option>
     </select>
+    <input id="pname" placeholder="your name" maxlength="12" size="9"
+           style="background:#1b2233;color:#cdd6f4;border:1px solid #2a3550;border-radius:8px;padding:6px 10px">
     <input id="room" placeholder="room (blank = solo)" size="12"
            title="LAN play: open the same room name on another machine to join as the next team"
            style="background:#1b2233;color:#cdd6f4;border:1px solid #2a3550;border-radius:8px;padding:6px 10px">
@@ -195,6 +198,8 @@
     <div class="row" id="shLoadout"></div>
     <h3>Match</h3><div class="row" id="shMatch"></div>
     <h3>Multiplayer</h3><div class="row" id="shRoom"></div>
+    <div class="row" id="shRooms"></div>
+    <h3>Gauntlet</h3><div class="row" id="shGauntlet"></div>
     <h3>App</h3><div class="row"><a href="liquidwar.apk" style="color:#7ea2ff">📦 Install the Android app</a></div>
     <h3>Sound</h3>
     <div class="row" id="soundRow" style="width:100%">
@@ -234,7 +239,7 @@
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 </script>
 <div id="toast"></div>
-<script src="audio.js?v=1781241440"></script>
+<script src="audio.js?v=1781241963"></script>
 <script src="gl.js?v=1781241440"></script>
 <script>
 const COLORS = ["#2f7bff","#ff3a2e","#4ade80","#fbbf24","#c084fc","#fb923c"]; // team 0 = you (vivid blue) / team 1 = warm red
@@ -309,6 +314,16 @@ let flowEMA = 0;                            // your swarm's motion (drives the f
 // match stats for the result card
 let mDealt = 0, mTaken = 0, mBite = 0, mPeak = 0;
 let toastT = null;
+let currentOpp = "latest", winStreak = 0, rosterList = [];
+function soloRecord(delta) {                 // family-vs-the-machine ledger
+  const key = "lw-record-" + currentOpp;
+  const r = JSON.parse(localStorage.getItem(key) || '{"w":0,"l":0}');
+  if (delta > 0) r.w++; else if (delta < 0) r.l++;
+  localStorage.setItem(key, JSON.stringify(r));
+  const el = document.getElementById("record");
+  el.textContent = r.w + r.l ? `${r.w}–${r.l} vs this AI` : "";
+  return r;
+}
 function toast(msg, ms = 3200) {
   const el = document.getElementById("toast");
   el.textContent = msg; el.style.display = "block";
@@ -611,7 +626,18 @@ function frame() {                                     // 60fps interpolated ren
     outcome: !curSt.done ? null
       : (curSt.winner ?? -1) === MYT ? "win"
       : (curSt.seats || []).includes(curSt.winner) ? "human" : "lose",
+    // ENEMY DOOM PROXIMITY: the heartbeat speeds up as the hole approaches —
+    // the most audible threat cue available (36.7Hz alone is silent on phones)
+    doomProx: curSt.ai_doom
+      ? Math.max(0, 1 - Math.hypot(curSt.ai_doom[1] - curSt.cursors[MYT][0],
+                                   curSt.ai_doom[2] - curSt.cursors[MYT][1]) / 160)
+      : 0,
+    doomLvl: curSt.stance === "Doom" ? (parseInt(curSt.mode) || 1) : 0,
+    // nova phase from the shared tick clock (charge 108 ticks, then the boom)
+    nova: curSt.stance === "Pulse" && curSt.mode === "nova"
+      ? (curSt.tick % 144 < 108 ? "charge" : "boom") : null,
   });
+  if (curSt.ai_doom) hint("doom", "⚠ Enemy DOOM! Hold 🌪 Maelstrom to shield your army — 🛡 Wall braces it.");
   // THE POST-MATCH MOMENT: result card with the story of the match,
   // edge-triggered entrance, fireworks from the winner's cursor
   const bn = document.getElementById("banner");
@@ -620,7 +646,13 @@ function frame() {                                     // 60fps interpolated ren
     const youWon = w === MYT;
     const humanWon = !youWon && (curSt.seats || []).includes(w);
     const names = ["BLUE", "RED", "GREEN", "YELLOW", "PURPLE", "ORANGE"];
-    const head = youWon ? "VICTORY" : humanWon ? `${names[w]} WINS` : "DEFEAT";
+    if (youWon) winStreak++; else winStreak = 0;
+    let head = youWon ? "VICTORY" : humanWon ? `${(curSt.names && curSt.names[w]) || names[w]} WINS` : "DEFEAT";
+    if (youWon && winStreak >= 3) head = `VICTORY — ${winStreak} IN A ROW 🔥`;
+    if ((curSt.players || 1) === 1) {
+      soloRecord(youWon ? 1 : -1);
+      if (youWon) markGauntlet(currentOpp);
+    }
     const col = youWon || humanWon ? COLORS[w % COLORS.length] : "#6b7280";
     const mins = Math.floor(curSt.tick / 60 / 60), secs = Math.floor(curSt.tick / 60) % 60;
     bn.style.display = "flex"; bn.style.pointerEvents = "none"; bn.style.color = col;
@@ -631,6 +663,10 @@ function frame() {                                     // 60fps interpolated ren
       `Converted ${mDealt.toLocaleString()} · Lost ${mTaken.toLocaleString()}<br>` +
       (mBite > 20 ? `Biggest bite: ${mBite} motes<br>` : "") +
       `Peak control: ${Math.round(mPeak * 100)}%<br>` +
+      ((curSt.players || 1) > 1 && curSt.wins
+        ? Object.entries(curSt.wins).map(([t, n]) =>
+            `${(curSt.names && curSt.names[t]) || ((curSt.seats || []).includes(+t) ? "P" + (+t + 1) : "AI")} ${n}`
+          ).join(" — ") + "<br>" : "") +
       `<button onclick="ws&&ws.send(JSON.stringify({reset:true}))">⚔ Rematch</button>` +
       `<button onclick="ws&&(ws.send(JSON.stringify({map:-1})))">🗺 New map</button>` +
       `</div>`;
@@ -716,7 +752,9 @@ function updateHUD(st) {
   st.fighters.forEach((f, t) => {
     const el = document.createElement("span"); el.className = "t";
     const human = (st.seats || []).includes(t);
-    const tag = t === MYT ? "you" : human ? "P" + ((st.seats || []).indexOf(t) + 1) : "";
+    const nm = st.names && st.names[t] ? st.names[t] : (human ? "P" + ((st.seats || []).indexOf(t) + 1) : "");
+    const wn = st.wins && st.wins[t] ? " ·" + st.wins[t] : "";
+    const tag = (t === MYT ? (nm || "you") : nm) + wn;
     el.innerHTML = `<span class="swatch" style="background:${COLORS[t%COLORS.length]};${human ? "outline:2px solid #cdd6f4;outline-offset:1px" : ""}"></span>` +
                    (tag ? `<span class="muted" style="font-size:11px">${tag}</span>` : "") +
                    `<span style="display:inline-block;min-width:4ch;text-align:right">${f}</span>`;
@@ -730,13 +768,25 @@ function connect() {
   const mode = document.getElementById("mode").value;
   const opp = document.getElementById("opponent").value;
   const room = document.getElementById("room").value.trim();
+  const pname = document.getElementById("pname").value.trim().slice(0, 12);
+  localStorage.setItem("lw-name", pname);
+  // REJOIN: remember the room across reload/PWA relaunch; share the URL state
+  if (room) {
+    history.replaceState(null, "", "?room=" + encodeURIComponent(room));
+    localStorage.setItem("lw-room", JSON.stringify({ room, t: Date.now() }));
+  } else {
+    history.replaceState(null, "", location.pathname);
+    localStorage.removeItem("lw-room");
+  }
   const sizeQ = new URLSearchParams(location.search).get("size")
               || (matchMedia("(pointer: coarse)").matches ? "small" : "full");
   document.getElementById("modeLabel").textContent = mode + (room ? ` · room ${room}` : "");
   const teams = parseInt(document.getElementById("oppcount").value) + 1;   // humans + AI share these seats
   curSt = null; prevPT = curPT = null; flashes = []; tLast = 0; lastTick = -1; lastMap = ""; MYT = 0;
+  currentOpp = opp;
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?mode=${mode}&opponent=${opp}&teams=${teams}&size=${sizeQ}` +
-                     (room ? `&room=${encodeURIComponent(room)}` : ""));
+                     (room ? `&room=${encodeURIComponent(room)}` : "") +
+                     (pname ? `&name=${encodeURIComponent(pname)}` : ""));
   ws.binaryType = "arraybuffer";
   curPos = null; pendingGrid = null;
   ws.onmessage = (e) => (e.data instanceof ArrayBuffer ? onFrame(e.data) : onHud(JSON.parse(e.data)));
@@ -751,21 +801,61 @@ function connect() {
 }
 // Opponent roster: archived generations from /checkpoints (newest first) —
 // pick an older one to feel how far training has come.
+function markGauntlet(opp) {
+  const g = JSON.parse(localStorage.getItem("lw-gauntlet") || "{}");
+  if (!g[opp]) { g[opp] = 1; localStorage.setItem("lw-gauntlet", JSON.stringify(g)); renderGauntlet(); }
+}
+function renderGauntlet() {
+  const host = document.getElementById("shGauntlet");
+  if (!host || !rosterList.length) return;
+  const g = JSON.parse(localStorage.getItem("lw-gauntlet") || "{}");
+  const ladder = [...rosterList].sort((a, b) => a.mtime - b.mtime);     // oldest first
+  ladder.push({ id: "latest", name: "Champion (live)" });
+  const beaten = ladder.filter(c => g[c.id]).length;
+  const next = ladder.find(c => !g[c.id]);
+  host.innerHTML =
+    `<div style="width:100%;font-size:13px;color:#9aa4b2">Gauntlet — <b style="color:#cdd6f4">${beaten} of ${ladder.length}</b> generations beaten</div>` +
+    `<div style="width:100%;display:flex;gap:5px;flex-wrap:wrap">` +
+    ladder.map(c => `<span title="${c.name}" style="font-size:15px">${g[c.id] ? "✅" : "⬜"}</span>`).join("") + `</div>` +
+    (next
+      ? `<button id="gauntletGo" style="width:100%">⚔ Next challenger: ${next.name.replace(/^policy-/, "gen ")}</button>`
+      : `<div style="width:100%;text-align:center;color:#4ade80;font-weight:700">YOU ARE AHEAD OF THE MACHINE — for now</div>`);
+  const go = document.getElementById("gauntletGo");
+  if (go) go.onclick = () => {
+    const sel = document.getElementById("opponent");
+    sel.value = next.id === "latest" ? "latest" : next.id;
+    document.getElementById("room").value = "";
+    connect();
+    toast("Challenger: " + next.name.replace(/^policy-/, "gen "));
+  };
+}
 fetch("checkpoints").then(r => r.json()).then(list => {
+  rosterList = list.filter(c => c.id !== "rl/best/policy.pt");
   const sel = document.getElementById("opponent");
-  for (const c of list) {
-    if (c.id === "rl/best/policy.pt") continue;       // that IS "Latest checkpoint"
+  for (const c of rosterList) {
     const o = document.createElement("option");
     o.value = c.id;
     o.textContent = c.name.replace(/^policy-/, "gen ") + " (" + new Date(c.mtime * 1000).toLocaleDateString() + ")";
     sel.appendChild(o);
   }
+  renderGauntlet();
 }).catch(() => {});
 
 // /?room=NAME deep link: prefill + auto-join (share this URL with the other player)
 {
+  document.getElementById("pname").value = localStorage.getItem("lw-name") || "";
+  document.getElementById("pname").addEventListener("change", connect);
   const r = new URLSearchParams(location.search).get("room");
   if (r) document.getElementById("room").value = r;
+  else {
+    try {
+      const saved = JSON.parse(localStorage.getItem("lw-room") || "null");
+      if (saved && Date.now() - saved.t < 2 * 3600e3) {
+        document.getElementById("room").value = saved.room;
+        if (Date.now() - saved.t < 10 * 60e3) setTimeout(() => { connect(); toast("Rejoined room " + saved.room); }, 400);
+      }
+    } catch (e) {}
+  }
   document.getElementById("room").addEventListener("change", connect);
   document.getElementById("invite").onclick = () => {
     const el = document.getElementById("room");
@@ -793,6 +883,21 @@ fetch("checkpoints").then(r => r.json()).then(list => {
       `background:${COLORS[0]};vertical-align:-2px"></span> <b style="color:${COLORS[0]}">BLUE</b>.</div>` +
       `<div>${move}</div>` +
       `<div>Touch the enemy to convert them. Take every last drop to win.</div>`;
+  }
+  if (matchMedia("(pointer: coarse)").matches && !localStorage.getItem("lw-touched")) {
+    cv.addEventListener("touchstart", () => {
+      localStorage.setItem("lw-touched", "1");
+      const gd = document.getElementById("ghostdot");
+      if (gd) gd.remove();
+    }, { once: true });
+    const gd = document.createElement("div");
+    gd.id = "ghostdot";
+    gd.style.cssText = "position:absolute;width:26px;height:26px;border-radius:50%;border:2px solid #cdd6f4;" +
+      "z-index:6;pointer-events:none;left:50%;top:55%;animation:ghost 2.6s infinite ease-in-out;opacity:.7";
+    document.getElementById("stage").appendChild(gd);
+    const st = document.createElement("style");
+    st.textContent = "@keyframes ghost{0%{transform:translate(0,0) scale(.8)}50%{transform:translate(60px,-40px) scale(1.1)}100%{transform:translate(0,0) scale(.8)}}";
+    document.head.appendChild(st);
   }
   document.getElementById("introPlay").onclick = () => {
     const first = !localStorage.getItem("lw-seen");
@@ -834,9 +939,28 @@ cv.addEventListener("touchcancel", touchEnd, { passive: false });
 const S_EMOJI = ["🐝", "🌀", "➤", "🛡", "💥", "🕳", "🌪", "⚛", "🌊"];
 const S_NAME = ["Swarm", "Spin", "Drill", "Wall", "Pulse", "Doom", "Maelstrom", "Atom", "Classic"];
 let loadout = JSON.parse(localStorage.getItem("lw-loadout") || "[0,4,5]").slice(0, 3);
+const MODE_HINTS = [
+  "🐝 Swarm — tap again: cloud → comet (a piercing teardrop along your motion)",
+  "🌀 Spin — tap again to cycle: vortex → sawblade → galaxy",
+  "➤ Drill — tap again to rev: slow grind → fast advance",
+  "🛡 Wall — tap again to flip horizontal ↔ vertical",
+  "💥 Pulse — tap again: wave → rings → star → lattice → nova → tide",
+  "🕳 Doom — tap again to charge 1x → 2x → 3x (stronger pull, slower cursor)",
+  "🌪 Maelstrom — tap again: undertow → ejecta → shear (ejecta shoves attackers off)",
+  "⚛ Atom — tap again: orbital ↔ binary star",
+  "🌊 Classic — the original: no tricks, just flow",
+];
+function hint(key, msg) {                     // teach each lesson at most twice
+  const k = "lw-hint-" + key, n = +(localStorage.getItem(k) || 0);
+  if (n >= 2) return;
+  localStorage.setItem(k, n + 1);
+  toast(msg, 4500);
+}
 function sendStance(i) {
   ws && ws.readyState === 1 && ws.send(JSON.stringify({ stance: i }));
   LWAUDIO.stanceTap(i);
+  hint("st" + i, MODE_HINTS[i]);
+  if ([0, 1, 6].includes(i)) setTimeout(() => hint("spin", "Q / E — or the ↻ button — reverses your spin"), 3000);
 }
 // ---- sound: one toggle, two sliders, everything else is the engine reacting
 function setSound(v) {
@@ -894,10 +1018,27 @@ if (COARSE) {
   const m = document.getElementById("shMatch");
   for (const id of ["mode", "opponent", "oppcount", "mapsel", "reset"]) m.appendChild(document.getElementById(id));
   const r = document.getElementById("shRoom");
-  for (const id of ["room", "invite"]) r.appendChild(document.getElementById(id));
+  for (const id of ["pname", "room", "invite"]) r.appendChild(document.getElementById(id));
   document.getElementById("visuals2").append(...document.getElementById("visuals").querySelectorAll("label"));
   const sheet = document.getElementById("sheet"), scrim = document.getElementById("sheetScrim");
-  const openSheet = (v) => { sheet.classList.toggle("open", v); scrim.classList.toggle("open", v); };
+  let roomPoll = null;
+  function refreshRooms() {
+    fetch("rooms").then(r => r.json()).then(list => {
+      const host = document.getElementById("shRooms");
+      if (!list.length) { host.innerHTML = `<span class="muted" style="font-size:13px">No games running — tap 🔗 invite to host one.</span>`; return; }
+      host.innerHTML = list.map(r =>
+        `<button data-room="${r.room}" style="width:100%;text-align:left">⚔ ${r.room} · ${r.names.join(", ")} · ${r.players}/${r.seats} · ${r.map}</button>`).join("");
+      host.querySelectorAll("[data-room]").forEach(b => b.onclick = () => {
+        document.getElementById("room").value = b.dataset.room;
+        connect(); openSheet(false);
+      });
+    }).catch(() => {});
+  }
+  const openSheet = (v) => {
+    sheet.classList.toggle("open", v); scrim.classList.toggle("open", v);
+    clearInterval(roomPoll);
+    if (v) { refreshRooms(); renderGauntlet(); roomPoll = setInterval(refreshRooms, 4000); }
+  };
   document.getElementById("tGear").onclick = () => openSheet(true);
   document.getElementById("sheetClose").onclick = () => openSheet(false);
   scrim.onclick = () => openSheet(false);

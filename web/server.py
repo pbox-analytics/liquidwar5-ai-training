@@ -586,9 +586,10 @@ class Player:
     slow WiFi link just drops stale frames instead of throttling the game for
     everyone (the queue holds at most one pending frame)."""
 
-    def __init__(self, sock: WebSocket, team: int) -> None:
+    def __init__(self, sock: WebSocket, team: int, name: str = "") -> None:
         self.sock = sock
         self.team = team
+        self.name = name
         self.ctrl: dict[str, Any] = dict(PLAYER_CTRL)
         self.spin_sign = 1
         self.last_dir = [0, 1]
@@ -649,13 +650,14 @@ class Room:
         self.reset_flag = False
         self.note = None                    # join/leave toast payload
         self.note_ttl = 0
+        self.wins: dict[int, int] = {}      # session scoreboard, by seat
         self.freeze = 0                     # countdown ticks before a round starts
 
-    def join(self, sock: WebSocket) -> Player | None:
+    def join(self, sock: WebSocket, name: str = "") -> Player | None:
         free = [t for t in range(self.session.engine.T) if t not in self.players]
         if not free:
             return None
-        p = Player(sock, free[0])
+        p = Player(sock, free[0], name)
         p.task = asyncio.create_task(p.sender())
         had_humans = bool(self.players)
         self.players[p.team] = p
@@ -767,6 +769,9 @@ class Room:
             st = session.state(); st["fps"] = round(fps, 1)
             st["players"] = len(players)
             st["seats"] = sorted(self.players)            # which teams are humans (lobby chips)
+            st["names"] = {str(t): pl.name for t, pl in self.players.items() if pl.name}
+            if self.wins:
+                st["wins"] = {str(t): n for t, n in self.wins.items()}
             if self.freeze > 0:
                 st["countdown"] = (self.freeze + int(TICK_HZ) - 1) // int(TICK_HZ)
             if getattr(self, "overtime", False) and not session.done:
@@ -795,6 +800,7 @@ class Room:
                 p.c0_hist.append(list(st["cursors"][p.team])); del p.c0_hist[:-7]   # comet aim window
             if session.done and not logged:
                 w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])
+                self.wins[w] = self.wins.get(w, 0) + 1
                 print(f"[telemetry] GAME END room={self.key} map={st['map']} tick={st['tick']} winner=team{w} "
                       f"counts={st['fighters']} spread={st['spread']} fps={fps:.1f}", flush=True)
                 logged = True
@@ -855,7 +861,7 @@ async def ws(sock: WebSocket) -> None:
                     opponent=q.get("opponent", "latest"),
                     teams=teams, size=size)
         ROOMS[key] = room
-    player = room.join(sock)
+    player = room.join(sock, (q.get("name") or "").strip()[:12])
     if player is None:                                  # room full: say so, don't ghost
         await sock.send_json({"error": "room_full", "room": key,
                               "seats": room.session.engine.T,
@@ -915,6 +921,21 @@ async def ws(sock: WebSocket) -> None:
         room.leave(player.team)
         if room.closed:
             ROOMS.pop(key, None)
+
+
+@app.get("/rooms")
+def rooms() -> list[dict[str, Any]]:
+    """Open named rooms, for the zero-typing 'Join a game' list."""
+    out = []
+    for key, r in list(ROOMS.items()):
+        if key.startswith("~solo-") or r.closed or not r.players:
+            continue
+        e = r.session.engine
+        out.append({"room": key, "players": len(r.players), "seats": e.T,
+                    "names": [p.name or f"P{p.team + 1}" for p in r.players.values()],
+                    "map": MAP_NAMES[e._last_arch] if 0 <= getattr(e, "_last_arch", -1) < len(MAP_NAMES) else "?",
+                    "tick": int(e.tick)})
+    return out
 
 
 @app.get("/checkpoints")
