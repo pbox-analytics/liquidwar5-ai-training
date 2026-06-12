@@ -625,6 +625,13 @@ class Room:
             width=288 if small else int(os.environ.get("LW_PLAY_W", "576")),
             fighters=2000 if small else int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),
         )
+        if small:
+            # small boards run EAGER (they're ~5ms/tick anyway): phone rooms
+            # churn constantly (screen sleep / tab switches), and the
+            # multi-graph capture/teardown traffic that churn generates is
+            # what kept poisoning the CUDA context in async mode. The one
+            # long-lived big-board graph has been stable all day.
+            self.session.engine._cuda_graph = False
         self.players: dict[int, Player] = {}
         self.task: asyncio.Task | None = None
         self.closed = False
