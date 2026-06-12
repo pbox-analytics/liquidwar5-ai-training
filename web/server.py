@@ -648,6 +648,24 @@ class Room:
             self.closed = True
 
     async def run(self) -> None:
+        try:
+            await self._run()
+        except Exception:
+            import traceback
+            print(f"[room {self.key}] game loop crashed:\n{traceback.format_exc()}", flush=True)
+        finally:
+            self.closed = True
+            # NEVER let a captured CUDA graph be GC'd with replays in flight:
+            # room teardown (phone sleeps, tab closes) lands ~16ms after the
+            # last replay was enqueued, and freeing the graph's pool under
+            # running kernels poisons the whole CUDA context (every later
+            # session then dies at construction). Same race as mid-game
+            # reset — this is the other door.
+            if getattr(self.session.engine, "_graph", None) is not None:
+                torch.cuda.synchronize()
+                self.session.engine._graph = None
+
+    async def _run(self) -> None:
         session = self.session
         dt = 1.0 / TICK_HZ
         hold = 0                                       # ticks to linger on a finished game
