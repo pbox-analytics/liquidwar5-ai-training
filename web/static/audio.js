@@ -103,17 +103,31 @@ const LWAUDIO = (() => {
     g.connect(musicBus);
   }
 
+  let activeGains = [];                        // every sounding pad/choir voice
+  function retire(g) {                         // graceful handover, no tail-stack
+    const now = ctx.currentTime;
+    g.gain.cancelScheduledValues(now);
+    g.gain.setValueAtTime(g.gain.value, now);
+    g.gain.setTargetAtTime(0, now, 1.1);
+  }
   function nextChord() {
+    // HANDOVER: the grid changes chords every 2 bars (~5s) but voices used to
+    // live ~20s — three or four chords rang at once and combat made the
+    // pileup audibly sour. Old voices bow out as the new chord enters.
+    activeGains.forEach(retire);
+    activeGains = [];
     chordIdx = (chordIdx + (Math.random() < 0.75 ? 1 : CHORDS.length - 1)) % CHORDS.length;
     const semis = CHORDS[chordIdx];
     voices = semis.map((s, i) => organ(f(s), i === 0 ? 0.16 : 0.10 - i * 0.015));
+    activeGains.push(...voices.map(v => v.g));
     // the chorus swells with the war: barely-there at peace, full voice in battle
     const ch = 0.035 + 0.11 * sig.intensity + 0.05 * (sig.doom ? 1 : 0);
-    choir(f(semis[0]) * 2, ch);
-    if (sig.intensity > 0.35) choir(f(semis[1]) * 2, ch * 0.7);
+    activeGains.push(choir(f(semis[0]) * 2, ch));
+    if (sig.intensity > 0.35) activeGains.push(choir(f(semis[1]) * 2, ch * 0.7));
     // losing: a minor-second tension voice bleeds in with the deficit
     if (sig.losing > 0.1) {
       tension = organ(f(semis[0] + 1) / 2, 0.07 * Math.min(1, sig.losing * 2.5), 5);
+      activeGains.push(tension.g);
     }
   }
 
@@ -223,13 +237,16 @@ const LWAUDIO = (() => {
     src.connect(flowLP).connect(flowLP2).connect(wash).connect(flowG).connect(sfxBus);
     src.start(); lfo1.start(); lfo2.start();
   }
-  function setFlow(v) {                        // v 0..1: per-mote avg speed, smoothed
+  function setFlow(v, mass = 1) {              // v: avg mote speed; mass: your army 0..1
     if (!ctx || !enabled || !flowG) { flowV = v; return; }
     flowV = v;
     const now = ctx.currentTime;
-    flowG.gain.setTargetAtTime(0.12 * Math.pow(v, 1.4), now, 0.25);   // quieter: it's texture, not voice
-    flowLP.frequency.setTargetAtTime(180 + 380 * v, now, 0.3);        // and deeper
-    flowLP2.frequency.setTargetAtTime(340 + 560 * v, now, 0.3);
+    // MENACE SCALES WITH MASS: a full flood is louder AND deeper than a
+    // scouting party moving at the same speed
+    flowG.gain.setTargetAtTime(0.12 * Math.pow(v, 1.4) * (0.3 + 0.7 * mass), now, 0.25);
+    const deep = 1.1 - 0.45 * mass;
+    flowLP.frequency.setTargetAtTime((180 + 380 * v) * deep, now, 0.3);
+    flowLP2.frequency.setTargetAtTime((340 + 560 * v) * deep, now, 0.3);
   }
 
   // ---- SFX ----
