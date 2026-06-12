@@ -227,9 +227,9 @@ const LWAUDIO = (() => {
     if (!ctx || !enabled || !flowG) { flowV = v; return; }
     flowV = v;
     const now = ctx.currentTime;
-    flowG.gain.setTargetAtTime(0.22 * Math.pow(v, 1.4), now, 0.25);
-    flowLP.frequency.setTargetAtTime(220 + 480 * v, now, 0.3);
-    flowLP2.frequency.setTargetAtTime(420 + 700 * v, now, 0.3);
+    flowG.gain.setTargetAtTime(0.12 * Math.pow(v, 1.4), now, 0.25);   // quieter: it's texture, not voice
+    flowLP.frequency.setTargetAtTime(180 + 380 * v, now, 0.3);        // and deeper
+    flowLP2.frequency.setTargetAtTime(340 + 560 * v, now, 0.3);
   }
 
   // ---- SFX ----
