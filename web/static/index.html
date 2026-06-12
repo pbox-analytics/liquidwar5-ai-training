@@ -43,20 +43,24 @@
   /* WebGL canvas renders at device pixels — no pixelated upscale anymore. */
   canvas { background: #05070c; border: 1px solid #232a3a; border-radius: 8px;
            max-width: 95vw; height: auto; cursor: crosshair; }
-  .muted { color: #6b7280; }
+  .muted { color: #8b93a7; }
+  #visuals { margin-top: 6px; font-size: 13px; display: flex; gap: 14px;
+             flex-wrap: wrap; justify-content: center; align-items: center; }
   #stage { position: relative; }
   #banner { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
             pointer-events: none; font-size: clamp(38px, 9vw, 96px); font-weight: 800;
             letter-spacing: .12em; text-shadow: 0 0 24px #000, 0 0 60px currentColor; z-index: 4; }
   #netveil { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
              background: #0b0e14cc; z-index: 8; font-size: 18px; color: #9aa4b2; }
+  #stage:has(#intro) #banner { display: none !important; }  /* attract countdown stays backstage */
   #intro { position: absolute; inset: 0; z-index: 7; background: #0b0e14e6;
            display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 26px; }
-  #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 96px; z-index: 11;
+  #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 96px; z-index: 8;
+           max-width: min(88vw, 420px); text-align: center;
            background: #11151f; border: 1px solid #2a3550; border-radius: 12px; padding: 10px 18px;
            font-size: 15px; display: none; box-shadow: 0 6px 24px #000a; }
   /* ---- LOBBY: named rooms gather here before the host starts the match ---- */
-  #lobby { position: absolute; inset: 0; z-index: 6; background: #0b0e14cc;
+  #lobby { position: absolute; inset: 0; z-index: 6; background: #0b0e14e6;
            display: none; align-items: center; justify-content: center; }
   #lobby.open { display: flex; }
   #lobbyCard { background: #11151fee; border: 1px solid #2a3550; border-radius: 16px;
@@ -76,6 +80,7 @@
   #lobbyKit button { font-size: 16px; padding: 4px 7px; border-radius: 8px; }
   #lobbyNameIn { background: #1b2233; color: #cdd6f4; border: 1px solid #2a3550;
                  border-radius: 8px; padding: 8px 10px; flex: 1; min-width: 0; }
+  body.lobby #domwrap, body.lobby #teams, body.lobby #record, body.lobby #spinPill { visibility: hidden; }
   #banner { flex-direction: column; gap: 6px; }
   #banner.show .headline { animation: bannerIn .65s cubic-bezier(.16,1,.3,1) both; }
   @keyframes bannerIn { 0% { transform: scale(1.55); filter: blur(12px); opacity: 0; letter-spacing: .34em }
@@ -103,29 +108,47 @@
            padding: calc(6px + env(safe-area-inset-top)) 8px 6px 8px; gap: 8px;
            justify-content: space-between; border-bottom: 1px solid #1b2233; }
     #hud .pill { border: 0; background: none; padding: 2px 4px; }
-    #hud select, #hud button, #hud input, #tick, #flood, #spread, #mapname { display: none; }
+    #hud select, #hud button, #hud input, #tick, #flood, #spread, #mapname, #spinPill { display: none; }
     #hud #stancePill, #hud #domwrap { display: inline-flex; }
     #hud #teams, #hud #fps { display: none; }       /* counts -> the bar; fps -> ?debug=1 */
     #domwrap { flex: 1; }
     #dombar { width: auto; flex: 1; }
     canvas { border: 0; border-radius: 0; max-width: 100vw; }
     #touchbar { display: flex; position: fixed; bottom: 0; left: 0; right: 0; z-index: 6;
-                gap: 4px; padding: 8px 6px calc(8px + env(safe-area-inset-bottom)) 6px;
+                gap: 3px; padding: 8px 6px calc(8px + env(safe-area-inset-bottom)) 6px;
                 background: #0b0e14f2; border-top: 1px solid #1b2233;
-                overflow-x: auto; justify-content: flex-start; }
+                justify-content: flex-start; }
     #touchbar button { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center;
-                       gap: 1px; font-size: 20px; padding: 6px 9px; min-width: 52px; min-height: 52px;
+                       gap: 1px; font-size: 20px; padding: 6px 4px; min-width: 44px; min-height: 52px;
                        border-radius: 12px; }
-    #touchbar button small { font-size: 9px; color: #8b93a7; }
+    #touchbar button small { font-size: 10px; color: #8b93a7; }
     #touchbar button.active { background: #2a3550; border-color: #5b79c7; }
     #loadoutBar button { flex: 1 1 0; min-width: 0; font-size: 24px; }
-    #loadoutBar button small { font-size: 10px; white-space: nowrap; overflow: hidden; max-width: 100%; }
+    #loadoutBar button small { font-size: 10px; white-space: nowrap; overflow: hidden;
+                               text-overflow: ellipsis; max-width: 100%; }
     #shLoadout button { font-size: 18px; padding: 8px 10px; border-radius: 10px; position: relative; }
     #shLoadout button.picked { background: #2a3550; border-color: #5b79c7; }
     #shLoadout button .slot { position: absolute; top: -6px; right: -6px; background: #5b79c7;
                               color: #fff; border-radius: 50%; width: 17px; height: 17px;
                               font-size: 11px; line-height: 17px; }
     body { padding-bottom: 84px; }   /* room for the action bar */
+    /* battlefield centers in the leftover height instead of hugging the HUD */
+    #stage { flex: 1 1 auto; width: 100%; display: flex; align-items: center;
+             justify-content: center; min-height: 0; }
+    /* the LOBBY escapes the short canvas strip: full-viewport card, START
+       always reachable, 44px touch targets */
+    #lobby { position: fixed; inset: 0; z-index: 8; padding: 12px; }
+    #lobbyCard { max-height: calc(100dvh - 24px - env(safe-area-inset-bottom)); }
+    #lobbyGo { position: sticky; bottom: -18px; background: #11151f;
+               padding: 10px 0; margin-bottom: 0; }
+    #lobbyColors button { width: 44px; height: 44px; }
+    #lobbyKit button { min-width: 44px; min-height: 44px; font-size: 20px; }
+    #lobbyAi button { min-width: 44px; min-height: 44px; }
+    /* the sheet scrolls — say so (handle) and keep the exit pinned */
+    #sheet::before { content: ""; display: block; width: 36px; height: 4px;
+                     border-radius: 2px; background: #2a3550; margin: 0 auto 10px; }
+    #sheet .row:last-child { position: sticky; bottom: calc(-18px - env(safe-area-inset-bottom));
+                             background: #11151f; padding: 10px 0; margin-bottom: 0; }
     #sheetScrim { position: fixed; inset: 0; background: #000a; z-index: 9; }
     #sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
              background: #11151f; border-radius: 16px 16px 0 0; padding: 14px 16px
@@ -148,7 +171,7 @@
 </style>
 </head>
 <body>
-  <h1>Liquid War <span class="muted" style="font-size:11px; font-weight:400">v0.02 gl</span> — <span id="modeLabel">play</span> vs <span id="opp" class="muted">…</span></h1>
+  <h1>Liquid War — <span id="modeLabel">play</span> vs <span id="opp" class="muted">…</span></h1>
   <div id="hud">
     <span class="pill">tick <b id="tick">0</b></span>
     <span class="pill">fps <b id="fps">—</b></span>
@@ -162,13 +185,13 @@
     <span class="pill" id="spinPill">spin ↻</span>
     <span class="pill" id="teams"></span>
     <select id="mode">
-      <option value="play">Play (you = team 0)</option>
+      <option value="play">Play (you’re Blue)</option>
       <option value="spectate">Spectate (AI vs AI)</option>
     </select>
     <span id="record" class="muted" style="font-size:12px"></span>
     <select id="opponent" title="Latest auto-upgrades as training improves; archive entries are frozen generations">
-      <option value="latest">Latest checkpoint</option>
-      <option value="heuristic">Heuristic AI</option>
+      <option value="latest">Newest AI (auto-improves)</option>
+      <option value="heuristic">Classic AI</option>
     </select>
     <select id="oppcount" title="Number of AI opponents">
       <option value="1">1 opponent</option>
@@ -187,20 +210,20 @@
     </select>
     <input id="pname" placeholder="your name" maxlength="12" size="9"
            style="background:#1b2233;color:#cdd6f4;border:1px solid #2a3550;border-radius:8px;padding:6px 10px">
-    <input id="room" placeholder="room (blank = solo)" size="12"
+    <input id="room" placeholder="room — play together" size="12"
            title="LAN play: open the same room name on another machine to join as the next team"
            style="background:#1b2233;color:#cdd6f4;border:1px solid #2a3550;border-radius:8px;padding:6px 10px">
-    <button id="invite" title="Copy a join link for another player on your network">🔗 invite</button>
-    <button id="sound" title="Procedural score + battle sound (M)">🔇</button>
+    <button id="invite" aria-label="Copy invite link" title="Copy a join link for another player on your network">🔗 invite</button>
+    <button id="sound" aria-label="Sound on/off" title="Procedural score + battle sound (M)">🔇</button>
     <button id="reset">New game</button>
-    <button id="fs" title="Fullscreen (F)">⛶</button>
+    <button id="fs" title="Fullscreen (F)" aria-label="Fullscreen"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" style="display:block"><path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9"/></svg></button>
   </div>
   <div id="stage">
     <canvas id="c" width="110" height="80"></canvas>
     <div id="banner"></div>
     <div id="otpill">⚔ OVERTIME — fronts weaken</div>
     <div id="netveil">⟳ reconnecting…</div>
-    <div id="toast"></div>
+    <div id="toast" role="status" aria-live="polite"></div>
     <div id="intro">
       <div style="font-size:clamp(38px,9vw,96px);font-weight:800;letter-spacing:.1em;
                   text-shadow:0 0 40px #2f7bff66">LIQUID WAR</div>
@@ -217,7 +240,7 @@
         <div class="lrow"><span class="llab">color</span><span id="lobbyColors" style="display:flex;gap:6px"></span></div>
         <div class="lrow"><span class="llab">kit ×3</span><span id="lobbyKit" style="display:flex;gap:5px;flex-wrap:wrap"></span></div>
         <div class="lrow" id="lobbyAiRow"><span class="llab">AI foes</span><span id="lobbyAi" style="display:flex;gap:6px"></span></div>
-        <div class="lrow" style="justify-content:center;gap:10px">
+        <div class="lrow" id="lobbyGo" style="justify-content:center;gap:10px">
           <button id="lobbyShare" style="min-height:44px">🔗 Invite</button>
           <button id="lobbyStart" style="min-height:44px;font-weight:700;background:#1d2c4f;
                   border-color:#3d59a8;min-width:44%;font-size:17px">▶ START</button>
@@ -228,10 +251,9 @@
   </div>
   <div id="touchbar">
     <span id="loadoutBar" style="display:flex;flex:1;gap:6px"></span>
-    <button id="tSpin">↻<small>Spin dir</small></button>
-    <button id="tNew">🔄<small>New</small></button>
+    <button id="tSpin">↻<small>Spin</small></button>
     <button id="tSound">🔇<small>Sound</small></button>
-    <button id="tGear">⚙️<small>More</small></button>
+    <button id="tGear" aria-label="Settings">⚙️<small>More</small></button>
   </div>
   <div id="sheetScrim"></div>
   <div id="sheet">
@@ -240,7 +262,6 @@
     <h3>Match</h3><div class="row" id="shMatch"></div>
     <h3>Multiplayer</h3><div class="row" id="shRoom"></div>
     <div class="row" id="shRooms"></div>
-    <h3>Gauntlet</h3><div class="row" id="shGauntlet"></div>
     <h3>App</h3>
     <div class="row" style="flex-direction:column;align-items:flex-start;gap:6px">
       <a href="liquidwar.apk" style="color:#7ea2ff">📦 Install the Android app (APK)</a>
@@ -256,9 +277,10 @@
         <input type="range" id="vSfx" min="0" max="1" step="0.05" value="0.7" style="flex:1"></label>
     </div>
     <h3>Visuals</h3><div class="row" id="visuals2"></div>
+    <h3>Gauntlet</h3><div class="row" id="shGauntlet"></div>
     <div class="row"><button id="sheetClose" style="flex:1">Done</button></div>
   </div>
-  <div id="visuals" class="muted" style="margin-top:6px; font-size:13px; display:flex; gap:14px; flex-wrap:wrap; justify-content:center; align-items:center;">
+  <div id="visuals" class="muted">
     <b style="color:#9aa4b2">Visuals:</b>
     <label>streak <input type="range" id="vStreak" min="0" max="1.5" step="0.05" value="0.45"><span id="vStreakN">0.45</span></label>
     <label>curve <input type="range" id="vCurve" min="0" max="1" step="0.05" value="0.55"><span id="vCurveN">0.55</span></label>
@@ -277,7 +299,7 @@
     <b>F</b> fullscreen &nbsp;·&nbsp; 🎮 gamepad: stick/d-pad move, LB/RB stance, A mode, X/B spin, Y trails, Start new game &nbsp;·&nbsp;
     <b>New game</b> / <b>Map</b> picker above &nbsp;·&nbsp;
     <a href="liquidwar.apk" class="muted">📦 Android app</a> &nbsp;·&nbsp;
-    <a href="index-2d.html" class="muted">old 2D renderer</a>
+    <a href="index-2d.html" class="muted">old 2D renderer</a> &nbsp;·&nbsp; <span class="muted" style="font-size:11px">v0.03 gl</span>
   </div>
 
 <script>
@@ -285,8 +307,8 @@
 // install prompt over HTTPS — behind plain http this is inert but harmless.
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 </script>
-<script src="audio.js?v=1781530000"></script>
-<script src="gl.js?v=1781530000"></script>
+<script src="audio.js?v=1781616000"></script>
+<script src="gl.js?v=1781615003"></script>
 <script>
 // The PALETTE is fixed; which palette entry each TEAM wears is the server's
 // call (players pick colors in the lobby) — COLORS/RGB are per-team views
@@ -322,7 +344,11 @@ let trails = true;   // motion trails (toggle: T)
 let particles = [];  // collision-spark particles {x,y,vx,vy,life,col} that fly out + fade
 const MAXP = 1600;
 let spin = 1;        // swarm orbit sign mirrored to the server (1 / -1 / 0)
-function updateSpinPill() { document.getElementById("spinPill").textContent = "spin " + (spin === 1 ? "↻" : spin === -1 ? "↺" : "·"); }
+function updateSpinPill() {
+  document.getElementById("spinPill").textContent = "spin " + (spin === 1 ? "↻" : spin === -1 ? "↺" : "·");
+  const t = document.getElementById("tSpin");           // the phone button shows the state
+  if (t) t.firstChild.nodeValue = spin === 1 ? "↻" : spin === -1 ? "↺" : "·";
+}
 function sendSpin() { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ spin })); updateSpinPill(); }
 let W = 110, H = 80, TEAMS = 4, target = null, ws = null;
 let MYT = 0;                                           // our seat (team index) — server-assigned in rooms
@@ -404,6 +430,7 @@ function toast(msg, ms = 3200) {
   toastT = setTimeout(() => el.style.display = "none", ms);
 }
 let cursSpd = new Float32Array(6);
+let lastStanceKey = "", morphT = 0;
 let prevCursorsHud = null, prevHudT = 0;
 let lastWallMask = null;
 function processGrid(g) {              // walls upload ONLY on change + contact sparks
@@ -549,6 +576,19 @@ function onHud(st) {                                    // the JSON channel: HUD
     if (st.note.ev.startsWith("join")) LWAUDIO.stanceTap(st.note.team);
   }
   if (pendingGrid && pendingGrid.length === W * H) { processGrid(pendingGrid); pendingGrid = null; }
+  // STANCE MORPH: a switch is an EVENT — particle burst + shockwave ring
+  // from your cursor (the server whips the army through a flare-and-snap)
+  if (lastStanceKey && st.stance + st.mode !== lastStanceKey && st.phase === "play" && !st.done) {
+    morphT = performance.now();
+    const mc = st.cursors[MYT];
+    for (let i = 0; i < 110 && particles.length < MAXP; i++) {
+      const a = Math.random() * 6.283, sp = 1.2 + Math.random() * 2.2;
+      particles.push({ x: mc[1] + .5, y: mc[0] + .5, vx: Math.cos(a) * sp,
+                       vy: Math.sin(a) * sp, life: 0.5 + Math.random() * 0.4,
+                       col: RGB[MYT % RGB.length] });
+    }
+  }
+  lastStanceKey = st.stance + st.mode;
   // cursor speeds (cells/s, smoothed) drive the bow-wave wake
   const nowH = performance.now();
   if (prevCursorsHud && prevHudT) {
@@ -567,14 +607,15 @@ function onHud(st) {                                    // the JSON channel: HUD
 // the army); cursors -> a second crisp batch drawn on top of the composite.
 const FXF = 8;                                           // x,y,size,shape,r,g,b,a
 const fxArr = new Float32Array((MAXP + MAXFLASH * 2) * FXF);
-const curArr = new Float32Array(8 * 4 * FXF);
+const curArr = new Float32Array(8 * 6 * FXF);
+const curBgArr = new Float32Array(8 * 2 * FXF);          // dark backdrops (over-blend pass)
 function pushFx(arr, k, x, y, size, shape, c, a) {
   const o = k * FXF;
   arr[o] = x; arr[o+1] = y; arr[o+2] = size; arr[o+3] = shape;
   arr[o+4] = c[0]; arr[o+5] = c[1]; arr[o+6] = c[2]; arr[o+7] = a;
   return k + 1;
 }
-const WHITE = [1, 1, 1], YELLOW = [0.99, 0.88, 0.28];
+const WHITE = [1, 1, 1], YELLOW = [0.99, 0.88, 0.28], BLACK = [0, 0, 0];
 
 // ---- Gamepad (couch/TV play): left stick or d-pad steers the cursor;
 // LB/RB cycle the held stance, A re-taps it (cycles its mode), X/B set spin
@@ -660,8 +701,10 @@ function frame() {                                     // 60fps interpolated ren
   const wc = maelOn ? [curSt.cursors[MYT][1], curSt.cursors[MYT][0]] : (aiMael ? [aiMael[2], aiMael[1]] : [0, 0]);
   const whirl = { x: wc[0] + .5, y: wc[1] + .5, r: 30,
                   a: whirlA, dir: maelOn ? (curSt.spin_dir || 1) : 1 };
-  // cursors: soft halo + pulsating ring + white core (drawn crisp, post-bloom)
-  let ck = 0;
+  // cursors: shadow puck + dark edge UNDER (a reverse-subtract pass dims the
+  // chaos), then halo + ring + white core on top — they were getting lost in
+  // the fight (a colored ring inside a same-colored bloomed blob is invisible)
+  let ck = 0, bk = 0;
   const beat = 1 + 0.3 * Math.sin(performance.now() / 170);
   // ROUT BEACONS: the hunt for the last 4% was never a fight, it was a search —
   // a dying army's remnant pulses so the endgame concludes
@@ -675,12 +718,27 @@ function frame() {                                     // 60fps interpolated ren
     const col = RGB[t % RGB.length];
     const x = c[1] + .5, y = c[0] + .5;
     const surge = (t === MYT && curSt.pulse_active) ? 1.7 : 1;
-    const D = (t === MYT ? 7.4 : 5.6) * beat * surge;   // ring diameter, grid cells
+    const D = (t === MYT ? 9.5 : 6.5) * beat * surge;   // ring diameter, grid cells
+    // backdrops draw in REVERSE-SUBTRACT: color = the brightness to remove
+    bk = pushFx(curBgArr, bk, x, y, D * 1.7, 0, WHITE, t === MYT ? 0.5 : 0.38);  // shadow puck
+    bk = pushFx(curBgArr, bk, x, y, D * 1.14, 1, WHITE, 0.85);     // contrast edge
     ck = pushFx(curArr, ck, x, y, D * 1.8, 0, col, 0.14);          // halo
-    ck = pushFx(curArr, ck, x, y, D, 1, col, 0.85);                // ring
+    ck = pushFx(curArr, ck, x, y, D, 1, col, 0.95);                // ring
     ck = pushFx(curArr, ck, x, y, D * 0.45, 1,
-                (t === MYT && curSt.pulse_active) ? YELLOW : WHITE, 0.5);  // inner ring
-    ck = pushFx(curArr, ck, x, y, 1.6, 0, WHITE, 0.9);             // core dot
+                (t === MYT && curSt.pulse_active) ? YELLOW : WHITE, 0.6);  // inner ring
+    ck = pushFx(curArr, ck, x, y, 2.2, 0, WHITE, 1.0);             // core dot
+    if (t === MYT) {
+      // SONAR PING: an expanding ring every ~1.8s — motion draws the eye
+      // back to your cursor even when contrast can't
+      const ph = (performance.now() % 1800) / 1800;
+      ck = pushFx(curArr, ck, x, y, D * (1 + 3 * ph), 1, WHITE,
+                  0.4 * Math.pow(1 - ph, 1.6));
+      const mAge = (performance.now() - morphT) / 600;   // stance-switch shockwave
+      if (morphT && mAge < 1) {
+        ck = pushFx(curArr, ck, x, y, 10 + 55 * mAge, 1, col, 0.8 * (1 - mAge));
+        ck = pushFx(curArr, ck, x, y, 6 + 40 * mAge, 1, WHITE, 0.5 * (1 - mAge));
+      }
+    }
   });
   // heartbeat follows the held stance: calm blob -> slow pulse, Pulse/nova ->
   // racing, Doom -> the wave travels INWARD (negative rate)
@@ -787,6 +845,7 @@ function frame() {                                     // 60fps interpolated ren
     trailVis: (trails ? 0.55 : 0.0) + 0.3 * doomA,   // infall paths burn brighter
     fx: fxArr, fxCount: k,
     cursorFx: curArr, cursorFxCount: ck,
+    cursorBg: curBgArr, cursorBgCount: bk,
     hole, whirl, cursors: curSt.cursors,
   });
   cv.style.boxShadow = curSt.pulse_active ? "0 0 18px 2px rgba(253,224,71,.35)" : "";
@@ -815,7 +874,10 @@ function updateHUD(st) {
     b.querySelector("small").textContent =
       on && st.mode ? `${S_NAME[+b.dataset.st]} · ${st.mode}` : S_NAME[+b.dataset.st];
   });
-  document.getElementById("opp").textContent = st.opponent + (st.players > 1 ? ` · ${st.players}P` : "");
+  const oppName = String(st.opponent || "…");
+  document.getElementById("opp").textContent =
+    (oppName === "latest" ? "newest AI" : oppName.replace(/^policy-/, "gen ").replace(/\.pt$/, "")) +
+    (st.players > 1 ? ` · ${st.players}P` : "");
   // dominance bar: one segment per team, your segment underlined, a notch at
   // the equal share point, a status word that needs no explanation
   const total = Math.max(1, st.fighters.reduce((a, b) => a + b, 0));
@@ -962,6 +1024,8 @@ fetch("checkpoints").then(r => r.json()).then(list => {
 
 // /?room=NAME deep link: prefill + auto-join (share this URL with the other player)
 {
+  const qn = (new URLSearchParams(location.search).get("name") || "").trim().slice(0, 12);
+  if (qn) localStorage.setItem("lw-name", qn);          // invite links can pre-seat by name
   document.getElementById("pname").value = localStorage.getItem("lw-name") || "";
   document.getElementById("pname").addEventListener("change", connect);
   const r = new URLSearchParams(location.search).get("room");
@@ -1012,7 +1076,7 @@ fetch("checkpoints").then(r => r.json()).then(list => {
     const gd = document.createElement("div");
     gd.id = "ghostdot";
     gd.style.cssText = "position:absolute;width:26px;height:26px;border-radius:50%;border:2px solid #cdd6f4;" +
-      "z-index:6;pointer-events:none;left:50%;top:55%;animation:ghost 2.6s infinite ease-in-out;opacity:.7";
+      "z-index:5;pointer-events:none;left:50%;top:55%;animation:ghost 2.6s infinite ease-in-out;opacity:.7";
     document.getElementById("stage").appendChild(gd);
     const st = document.createElement("style");
     st.textContent = "@keyframes ghost{0%{transform:translate(0,0) scale(.8)}50%{transform:translate(60px,-40px) scale(1.1)}100%{transform:translate(0,0) scale(.8)}}";
@@ -1074,6 +1138,8 @@ const MODE_HINTS = [
 ];
 const hintT = {};                             // last-shown clock, per lesson
 function hint(key, msg) {                     // teach each lesson at most twice
+  // never burn a lesson while the settings sheet covers the toast area
+  if (document.getElementById("sheet").classList.contains("open")) return;
   const k = "lw-hint-" + key, n = +(localStorage.getItem(k) || 0);
   if (n >= 2) return;
   // a 60s cooldown — per-frame callers (enemy Doom) used to burn both
@@ -1095,7 +1161,7 @@ function setSound(v) {
   localStorage.setItem("lw-sound", v ? "1" : "0");
   for (const id of ["sound", "tSound"]) {
     const el = document.getElementById(id);
-    if (el) el.innerHTML = (v ? "🔊" : "🔇") + (id === "tSound" ? "<small>Sound</small>" : "");
+    if (el) { el.innerHTML = (v ? "🔊" : "🔇") + (id === "tSound" ? "<small>Sound</small>" : ""); el.setAttribute("aria-pressed", v); }
   }
 }
 document.getElementById("sound").onclick = () => setSound(!LWAUDIO.enabled);
@@ -1147,6 +1213,8 @@ function sendLobby(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(
 function renderLobby(st) {
   const open = st.phase === "lobby";
   lobbyEl.classList.toggle("open", open);
+  document.body.classList.toggle("lobby", open);        // HUD shows lobby, not stale scores
+  document.getElementById("mapname").parentElement.style.visibility = open ? "hidden" : "";
   if (!open) { lobbySig = ""; return; }
   const sig = JSON.stringify([st.lobby, st.host, st.ai_n, MYT, loadout]);
   if (sig === lobbySig) return;
@@ -1205,7 +1273,6 @@ document.getElementById("lobbyNameIn").addEventListener("change", (e) => {
   lobbySig = "";
 });
 document.getElementById("tSpin").onclick = () => { spin = spin === 1 ? -1 : spin === -1 ? 0 : 1; sendSpin(); };
-document.getElementById("tNew").onclick = () => ws && ws.readyState === 1 && ws.send(JSON.stringify({ reset: true }));
 // settings sheet: the existing controls MOVE here on touch devices, so every
 // handler keeps working — one UI, two layouts
 const COARSE = matchMedia("(pointer: coarse)").matches;
@@ -1257,7 +1324,9 @@ function sendDir() {
 }
 window.addEventListener("keydown", (e) => {
   if (e.repeat) return;                            // every toggle is edge-triggered
-  if (e.target !== document.body && e.target !== cv && ("value" in e.target)) return;  // typing != hotkeys
+  // typing != hotkeys — but BUTTONS must not eat the game (clicking any
+  // toolbar button used to kill stances/WASD until the canvas was clicked)
+  if (e.target instanceof Element && e.target.closest("input, textarea, select")) return;
   if (e.key >= "1" && e.key <= "9") {             // number row selects a held STANCE (0..8)
     sendStance(parseInt(e.key) - 1);
     return;
@@ -1270,7 +1339,7 @@ window.addEventListener("keydown", (e) => {
   if (e.key in KEYS) { KEYS[e.key] = 1; e.preventDefault(); sendDir(); }
 });
 window.addEventListener("keyup",   (e) => {
-  if (e.target !== document.body && e.target !== cv && ("value" in e.target)) return;
+  if (e.target instanceof Element && e.target.closest("input, textarea, select")) return;
   if (e.key in KEYS) { KEYS[e.key] = 0; e.preventDefault(); sendDir(); }
 });
 document.getElementById("reset").onclick = () => ws && ws.send(JSON.stringify({reset:true}));

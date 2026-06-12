@@ -1,20 +1,28 @@
 "use strict";
 // Procedural audio for Liquid War — no samples, everything synthesized.
 //
-// MUSIC: ONE chord progression, TWO voicings, crossfaded on combat —
-//   - PEACE voice: organ pads (additive sine harmonics, 4s attacks, slow
-//     chord drift, voice-led, never jumps) — calm, spacious, and OUT of the
-//     fight: fully silent by intensity ~0.45. The organ is a sanctuary
-//     instrument, never a combat one.
-//   - WAR voice: a string section (the Pompeii voice) — detuned saw stacks
-//     per chord tone through a lowpass that opens with the battle, bow-swell
-//     attacks, octave-doubled bass, re-articulating on the half-bar so it
-//     pulses with the 104 BPM grid instead of droning
-//   - tectonic sub: a slow-swelling low triangle an octave below the root
-//   - sparkles: sparse pentatonic bell-plucks through delay (the
-//     bioluminescent layer; density falls as combat rises)
+// MUSIC: deep-space synthwave. ONE chord progression, TWO voicings,
+// crossfaded on combat — analog-electronic, still cinematic, still Phrygian:
+//   - PEACE voice: warm analog pads (detuned saw pair + sub-octave square
+//     per chord tone, 3s attacks, slow chord drift) breathing through a
+//     slow-wandering lowpass and a soft two-tap chorus — calm, spacious,
+//     and OUT of the fight: fully silent by intensity ~0.45. The pad is a
+//     sanctuary instrument, never a combat one.
+//   - WAR voice: a supersaw wall — FIVE detuned saws per chord tone through
+//     a lowpass that opens with the battle, 30ms synth attacks, octave-
+//     doubled bass, sidechain-pumped by every kick so it breathes with the
+//     112 BPM grid instead of droning
+//   - DRUM MACHINE on the grid: pitch-drop kick (four-on-the-floor at full
+//     drive), noise snare on the backbeat, 7kHz hat ticks opening to
+//     shimmered 16ths; taiko() remains the ceremonial voice (countdown,
+//     nova, cadences)
+//   - BASSLINE: an eighth-note mono saw+square pulse on the chord root,
+//     pumped with the kick — the electronic floor the orchestra never had
+//   - tectonic sub: a slow-swelling low triangle, tanh-warmed for phones
+//   - sparkles: sparse pentatonic sequencer blips through ping-pong delay
+//     (the bioluminescent layer; density falls as combat rises)
 //   - generated impulse-response reverb (procedural cathedral)
-// ADAPTIVE: combat intensity crossfades organ->strings (equal-power, ~2s),
+// ADAPTIVE: combat intensity crossfades pad->supersaw (equal-power, ~2s),
 // brightens and raises the choir, speeds the chord clock and thins the
 // sparkles; LOSING detunes a tension voice into BOTH voicings; Doom (either
 // side) adds a pulsing 36.7Hz drone; Maelstrom adds a swirling wash.
@@ -34,6 +42,8 @@ const LWAUDIO = (() => {
   let stanceBus = null, stanceSig = null, stanceCur = "", smodeCur = "";
   let sig = { intensity: 0, losing: 0, doom: 0, mael: 0 };
   let lastThud = 0, lastBlip = 0;
+  let padIn = null, warPump = null, bassPump = null;   // synthwave plumbing
+  let leadBus = null, leadLastF = 0, noiseBuf = null;  // (built in init)
 
   // PHRYGIAN drift in A (E.S. Posthumus register): the b2 — Bb against A —
   // is the dread interval, voiced in open fifths for ceremonial weight.
@@ -82,16 +92,52 @@ const LWAUDIO = (() => {
     padBus = ctx.createGain(); padBus.gain.value = 1.0;
     padBus.connect(musicBus);
     // TWO VOICINGS, ONE PROGRESSION: update() equal-power crossfades these
-    // on intensity — organ at peace, strings at war, never both at full
+    // on intensity — pad at peace, supersaw at war, never both at full
     peaceBus = ctx.createGain(); peaceBus.gain.value = 1.0;
     warBus = ctx.createGain(); warBus.gain.value = 0.0;
-    peaceBus.connect(padBus); warBus.connect(padBus);
+    peaceBus.connect(padBus);
+    // SIDECHAIN: every kick punches a pocket in the saw wall and the
+    // bassline through these (see pump()); duck() handles the rest of the bed
+    warPump = ctx.createGain(); warPump.gain.value = 1.0;
+    warBus.connect(warPump).connect(padBus);
+    bassPump = ctx.createGain(); bassPump.gain.value = 1.0;
+    bassPump.connect(musicBus);
+    // PAD CHAIN, shared by every pad voice: one slow-wandering lowpass
+    // (700-1400Hz — the analog filter drifting in its sleep) into a two-tap
+    // modulated chorus. Shared on purpose: per-voice LFOs would pile up.
+    padIn = ctx.createGain(); padIn.gain.value = 1.0;
+    const padLP = ctx.createBiquadFilter(); padLP.type = "lowpass";
+    padLP.frequency.value = 1050; padLP.Q.value = 0.6;
+    const wander = ctx.createOscillator(); wander.frequency.value = 0.08;
+    const wg = ctx.createGain(); wg.gain.value = 350;
+    wander.connect(wg).connect(padLP.frequency); wander.start();
+    padIn.connect(padLP); padLP.connect(peaceBus);       // dry leg
+    for (const [dt, rate] of [[0.012, 0.61], [0.017, 0.47]]) {
+      const dl = ctx.createDelay(0.05); dl.delayTime.value = dt;
+      const lfo = ctx.createOscillator(); lfo.frequency.value = rate;
+      const lg = ctx.createGain(); lg.gain.value = 0.003; // ±3ms shimmer
+      lfo.connect(lg).connect(dl.delayTime); lfo.start();
+      const cg = ctx.createGain(); cg.gain.value = 0.5;   // subtle, under the dry
+      padLP.connect(dl).connect(cg).connect(peaceBus);
+    }
+    // LEAD BUS: same volume law as the music, but a drier send — the theme
+    // sits forward instead of dissolving into the cathedral
+    leadBus = ctx.createGain(); leadBus.gain.value = musicVol;
+    leadBus.connect(master);
+    const lSend = ctx.createGain(); lSend.gain.value = 0.18;
+    leadBus.connect(lSend).connect(sendHP);
+    // shared noise for the kit: ONE buffer, many sources — per-hit buffers
+    // at 16th-note hat rates would churn the GC
+    noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+    const nd = noiseBuf.getChannelData(0);
+    for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
     // STANCE BUS: the per-formation signature textures (identity, not noise)
     stanceBus = ctx.createGain(); stanceBus.gain.value = 1.0;
     stanceBus.connect(musicBus);
     // shared ping-pong echo for the sparkles (one pair of delays forever —
-    // the per-pluck feedback DelayNode leaked live graph nodes for hours)
-    echoIn = ctx.createGain(); echoIn.gain.value = 1.0;
+    // the per-pluck feedback DelayNode leaked live graph nodes for hours);
+    // a touch hotter now: the blips are sequencer hits, the echo is the room
+    echoIn = ctx.createGain(); echoIn.gain.value = 1.25;
     const dA = ctx.createDelay(); dA.delayTime.value = 0.31;
     const dB = ctx.createDelay(); dB.delayTime.value = 0.43;
     const fA = ctx.createGain(); fA.gain.value = 0.3;
@@ -101,23 +147,25 @@ const LWAUDIO = (() => {
     startSub(); startDoom(); startMael(); startFlow();
   }
 
-  // --- organ voice (PEACE): additive harmonics with cathedral attack ---
-  function organ(freq, gain, attack = 4, dur = 22, noSub = false) {
+  // --- analog pad (PEACE): a detuned saw pair + one sub-octave square per
+  // chord tone, breathing through the shared wandering lowpass + chorus
+  // built in init — warm analog mass where the organ used to live, with the
+  // same cathedral patience (slow attack stays: sanctuary)
+  function pad(freq, gain, attack = 3, dur = 22, noSub = false) {
     const g = ctx.createGain(); g.gain.value = 0;
-    const lp = ctx.createBiquadFilter(); lp.type = "lowpass";
-    lp.frequency.value = 460 + 2100 * sig.intensity;   // darker at rest
-    g.connect(lp).connect(peaceBus);
+    g.connect(padIn);
     const t = ctx.currentTime;
     g.gain.linearRampToValueAtTime(gain, t + attack);
     g.gain.setTargetAtTime(0, t + dur - 7, 2.4);
     // the dedicated sub OWNS the bottom octave — the lowest chord voice
-    // dropping its 0.5x partial un-muds the floor
-    const parts = noSub ? [[1, 1], [2, 0.42], [3, 0.21], [4, 0.1]]
-                        : [[1, 1], [2, 0.42], [3, 0.21], [4, 0.1], [0.5, 0.25]];
-    const oscs = parts.map(([m, a]) => {
-      const o = ctx.createOscillator(); o.type = "sine";
+    // dropping its sub-octave square un-muds the floor
+    const parts = noSub ? [["sawtooth", 1, -7, 0.5], ["sawtooth", 1, 7, 0.5]]
+                        : [["sawtooth", 1, -7, 0.5], ["sawtooth", 1, 7, 0.5],
+                           ["square", 0.5, 0, 0.3]];
+    const oscs = parts.map(([type, m, det, a]) => {
+      const o = ctx.createOscillator(); o.type = type;
       o.frequency.value = freq * m;
-      o.detune.value = (Math.random() - 0.5) * 7;
+      o.detune.value = det + (Math.random() - 0.5) * 4;
       const og = ctx.createGain(); og.gain.value = a;
       o.connect(og).connect(g); o.start(t); o.stop(t + dur + 1);
       return o;
@@ -125,31 +173,23 @@ const LWAUDIO = (() => {
     return { g, oscs };
   }
 
-  // --- string section (WAR): per chord tone, a detuned saw stack through a
-  // lowpass that opens with the battle — bow-swell attack, shorter release
-  // than the organ, and a half-bar re-articulation so the section PULSES on
-  // the 104 BPM grid instead of droning. THIS is what plays when units
-  // fight; the organ stays home.
-  function strings(freq, gain, when, dur = 22) {
+  // --- supersaw (WAR): per chord tone, FIVE detuned saws through a lowpass
+  // that opens with the battle — 30ms synth attack, shorter release than the
+  // pad. The old half-bar re-articulation is gone: the sidechain pump (see
+  // pump()) now carves the pocket on every kick, so the wall PULSES on the
+  // 112 BPM grid instead of droning. THIS is what plays when units fight;
+  // the pad stays home.
+  function supersaw(freq, gain, when, dur = 22) {
     const t = when ?? ctx.currentTime;
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, t);
-    g.gain.linearRampToValueAtTime(gain, t + 0.12);    // bow swell, not bloom
+    g.gain.linearRampToValueAtTime(gain * 0.7, t + 0.03);  // snap, not bow swell
     g.gain.setTargetAtTime(0, t + dur - 9, 1.3);
     const lp = ctx.createBiquadFilter(); lp.type = "lowpass";
-    lp.frequency.value = 1200 + 1300 * sig.intensity;  // 1.2k-2.5k with the war
+    lp.frequency.value = 900 + 3600 * sig.intensity;   // 900-4.5k with the war
     lp.Q.value = 0.8;
-    // RE-ARTICULATION: settle toward each half-bar, swell back out on it —
-    // only setTargetAtTime events, so the curve never fights the schedule
-    const pulse = ctx.createGain();
-    pulse.gain.setValueAtTime(1, t);
-    for (let k = 1; k <= 8; k++) {                     // outlives any chord
-      const hb = t + k * SPB * 2;
-      pulse.gain.setTargetAtTime(0.55, hb - 0.38, 0.16);
-      pulse.gain.setTargetAtTime(1.0, hb, 0.05);
-    }
-    g.connect(pulse).connect(lp).connect(warBus);
-    for (const det of [-8, 0, 7]) {                    // the section, not a soloist
+    g.connect(lp).connect(warBus);
+    for (const det of [-18, -9, 0, 9, 18]) {           // the stack, not a soloist
       const o = ctx.createOscillator(); o.type = "sawtooth";
       o.frequency.value = freq;
       o.detune.value = det + (Math.random() - 0.5) * 3;
@@ -159,7 +199,7 @@ const LWAUDIO = (() => {
   }
 
   // CHOIR: a detuned saw pair through "ahh" formant bandpasses — the
-  // E.S. Posthumus chorus, rising out of the organ as battle builds.
+  // E.S. Posthumus chorus, rising out of the pad as battle builds.
   function choir(freq, gain, dur = 22) {       // (dur in seconds)
     const t = ctx.currentTime;
     const g = ctx.createGain(); g.gain.value = 0;
@@ -200,14 +240,14 @@ const LWAUDIO = (() => {
     activeGains = [];
     chordIdx = (chordIdx + (Math.random() < 0.75 ? 1 : CHORDS.length - 1)) % CHORDS.length;
     const semis = CHORDS[chordIdx];
-    // PEACE voicing: the organ, as ever
-    voices = semis.map((s, i) => organ(f(s), i === 0 ? 0.16 : 0.10 - i * 0.015, 4, 22, i === 0));
+    // PEACE voicing: the analog pad, as ever
+    voices = semis.map((s, i) => pad(f(s), i === 0 ? 0.16 : 0.10 - i * 0.015, 3, 22, i === 0));
     activeGains.push(...voices.map(v => v.g));
-    // WAR voicing of the SAME chord: strings an octave up, on the grid,
+    // WAR voicing of the SAME chord: supersaws an octave up, on the grid,
     // plus the octave-doubled bass note for the floor
     const t = when ?? ctx.currentTime;
-    activeGains.push(...semis.map((s, i) => strings(f(s) * 2, i === 0 ? 0.10 : 0.07 - i * 0.008, t)));
-    activeGains.push(strings(f(semis[0]), 0.09, t));
+    activeGains.push(...semis.map((s, i) => supersaw(f(s) * 2, i === 0 ? 0.10 : 0.07 - i * 0.008, t)));
+    activeGains.push(supersaw(f(semis[0]), 0.09, t));
     // the chorus swells with the war: barely-there at peace, full voice in battle
     const ch = 0.04 + 0.13 * sig.intensity + 0.05 * (sig.doom ? 1 : 0);
     activeGains.push(choir(f(semis[0]) * 2, ch));
@@ -215,19 +255,25 @@ const LWAUDIO = (() => {
     // losing: a minor-second tension voice bleeds into BOTH voicings
     if (sig.losing > 0.1) {
       const tg = 0.07 * Math.min(1, sig.losing * 2.5);
-      tension = organ(f(semis[0] + 1) / 2, tg, 5);
+      tension = pad(f(semis[0] + 1) / 2, tg, 5);
       activeGains.push(tension.g);
-      activeGains.push(strings(f(semis[0] + 1), tg, t));
+      activeGains.push(supersaw(f(semis[0] + 1), tg, t));
     }
   }
 
   function startSub() {
     const o = ctx.createOscillator(); o.type = "triangle"; o.frequency.value = 55;
+    // gentle tanh saturation: a whisper of odd harmonics so the sub READS
+    // on phone speakers instead of vanishing below their cones
+    const ws = ctx.createWaveShaper();
+    const curve = new Float32Array(257);
+    for (let i = 0; i < 257; i++) curve[i] = Math.tanh(1.6 * (i / 128 - 1));
+    ws.curve = curve;
     const g = ctx.createGain(); g.gain.value = 0;
     const lfo = ctx.createOscillator(); lfo.frequency.value = 0.045;
     const lg = ctx.createGain(); lg.gain.value = 0.05;
     lfo.connect(lg).connect(g.gain);
-    o.connect(g).connect(musicBus); o.start(); lfo.start();
+    o.connect(ws).connect(g).connect(musicBus); o.start(); lfo.start();
     sub = { o, g };
   }
 
@@ -454,29 +500,75 @@ const LWAUDIO = (() => {
     o2.connect(g2).connect(dest); o2.start(when); o2.stop(when + 0.4);
   }
 
-  function sparkle() {                          // bioluminescent bell-pluck
+  function sparkle() {                          // bioluminescent sequencer blip
     const semi = PENTA[(Math.random() * PENTA.length) | 0];
     const o = ctx.createOscillator(); o.type = "sine";
     o.frequency.value = f(semi, 440) * (Math.random() < 0.3 ? 2 : 1);
     const g = ctx.createGain();
     const t = ctx.currentTime, amp = 0.05 + 0.04 * Math.random();
     g.gain.setValueAtTime(0, t);
-    g.gain.linearRampToValueAtTime(amp, t + 0.02);
-    g.gain.setTargetAtTime(0, t + 0.03, 0.5);
+    g.gain.linearRampToValueAtTime(amp, t + 0.004);      // crisp: a blip, not a bloom
+    g.gain.setTargetAtTime(0, t + 0.012, 0.3);
     const pan = ctx.createStereoPanner();
     pan.pan.value = (Math.random() * 1.4 - 0.7);         // bioluminescence is wide
     o.connect(g); g.connect(pan).connect(musicBus); g.connect(echoIn);
-    o.start(t); o.stop(t + 4);
+    o.start(t); o.stop(t + 2.5);
   }
 
-  // TAIKO: ceremonial hits — a pitch-dropping low sine + a skin-noise burst.
-  // Silent at peace; the pattern wakes and quickens as the battle builds
-  // (or while a Doom well is open — dread has a drum).
+  // DRUMS. taiko() stays the ceremonial hit (countdown, nova, the win drum —
+  // external callers depend on it); the GRID now runs a synthesized kit:
+  // kick/snare/hats below, every kick pumping the whole bed.
   function duck(amount = 0.68, when = null) {  // drums get a pocket in the pads
     if (!ctx) return;
     const t = when ?? ctx.currentTime;         // honor the grid's lookahead — the
     padBus.gain.setTargetAtTime(amount, t, 0.015);   // pocket used to open ~250ms early
     padBus.gain.setTargetAtTime(1.0, t + 0.09, 0.22);
+  }
+  function pump(when) {                        // SIDECHAIN: the kick punches a
+    if (!warPump) return;                      // deeper hole in saw wall + bass
+    for (const p of [warPump, bassPump]) {
+      p.gain.setTargetAtTime(0.32, when, 0.008);
+      p.gain.setTargetAtTime(1.0, when + 0.05, 0.12);  // ~120ms recovery: the pump
+    }
+  }
+  function kick(when, vel = 1) {               // the floor: pitch-drop sine + click
+    duck(0.75, when); pump(when);              // the whole bed breathes on the kick
+    const o = ctx.createOscillator(); o.type = "sine";
+    o.frequency.setValueAtTime(150, when);
+    o.frequency.exponentialRampToValueAtTime(48, when + 0.12);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.30 * vel, when);
+    g.gain.setTargetAtTime(0, when + 0.03, 0.09);
+    o.connect(g).connect(musicBus); o.start(when); o.stop(when + 0.6);
+    const src = ctx.createBufferSource(); src.buffer = noiseBuf;  // 2ms beater click
+    const hp = ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 2500;
+    const cg = ctx.createGain();
+    cg.gain.setValueAtTime(0.12 * vel, when);
+    cg.gain.setTargetAtTime(0, when + 0.002, 0.004);
+    src.connect(hp).connect(cg).connect(musicBus); src.start(when); src.stop(when + 0.05);
+  }
+  function snare(when, vel = 1) {              // backbeat: noise burst + 180Hz body
+    const src = ctx.createBufferSource(); src.buffer = noiseBuf;
+    const bp = ctx.createBiquadFilter(); bp.type = "bandpass";
+    bp.frequency.value = 1800; bp.Q.value = 1;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.18 * vel, when);
+    g.gain.setTargetAtTime(0, when + 0.01, 0.055);
+    src.connect(bp).connect(g).connect(musicBus); src.start(when); src.stop(when + 0.35);
+    const o = ctx.createOscillator(); o.type = "triangle"; o.frequency.value = 180;
+    const og = ctx.createGain();
+    og.gain.setValueAtTime(0.09 * vel, when);
+    og.gain.setTargetAtTime(0, when + 0.005, 0.035);
+    o.connect(og).connect(musicBus); o.start(when); o.stop(when + 0.25);
+  }
+  function hat(when, vel = 1, open = false) {  // the clock: 7kHz noise ticks
+    const src = ctx.createBufferSource(); src.buffer = noiseBuf;
+    const hp = ctx.createBiquadFilter(); hp.type = "highpass"; hp.frequency.value = 7000;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime((open ? 0.08 : 0.05) * vel, when);
+    g.gain.setTargetAtTime(0, when + 0.004, open ? 0.11 : 0.014);
+    src.connect(hp).connect(g).connect(musicBus);
+    src.start(when); src.stop(when + (open ? 0.8 : 0.12));
   }
   function taiko(strength, low = 1, when = null) {
     if (!ctx || !enabled) return;              // public API: must survive pre-enable calls
@@ -507,7 +599,7 @@ const LWAUDIO = (() => {
     const now = ctx.currentTime;
     coda = now + 7;
     activeGains.forEach(retire); activeGains = [];
-    // cadences belong to the ORGAN: snap the crossfade home for the coda
+    // cadences belong to the PAD: snap the crossfade home for the coda
     // (update() holds it there while the resolution plays)
     peaceBus.gain.setTargetAtTime(1, now, 0.15);
     warBus.gain.setTargetAtTime(0, now, 0.15);
@@ -530,7 +622,7 @@ const LWAUDIO = (() => {
     taiko(1.0 * scale, 0.8);
     const cadence = [[-12, 0.18], [0, 0.14], [7, 0.10], [12, 0.08], [19, 0.06]];
     for (const [semi, gn] of cadence) {
-      const v = organ(f(semi), gn * scale, 0.4, 10, semi === -12);
+      const v = pad(f(semi), gn * scale, 0.4, 10, semi === -12);
       activeGains.push(v.g);
     }
     activeGains.push(choir(f(12) * 2, 0.16 * scale, 10));
@@ -637,11 +729,12 @@ const LWAUDIO = (() => {
   }
   // (the old stinger() is gone — resolveEnd() is the match-resolution voice)
 
-  // ---- THE GRID (the Pompeii engine, energetic cut): 104 BPM, a 16th-note
-  // lookahead clock. The ostinato GALLOPS (DUM-dumdum per beat), taiko gets a
-  // backbeat, the theme rides on top at full battle, and the harmonic rhythm
-  // doubles at climax. At rest only the drone + sparkles remain.
-  const BPM = 104, SPB = 60 / BPM, STEP = SPB / 4;      // 16th-note steps
+  // ---- THE GRID (the synthwave engine): 112 BPM, a 16th-note lookahead
+  // clock. The ostinato GALLOPS (DUM-dumdum per beat) as an arp pluck, the
+  // kit drives four-on-the-floor, the bassline pulses eighths, the theme
+  // rides on top at full battle, and the harmonic rhythm doubles at climax.
+  // At rest only the drone + sparkles remain.
+  const BPM = 112, SPB = 60 / BPM, STEP = SPB / 4;      // 16th-note steps
   let gridStep = 0, nextNote = 0, melPos = 0, melNext = 0;
   // pitch per BEAT over a 2-bar (8-beat) cycle: root bar, the b2 bar
   const OSTP = [0, 0, 12, 0, 1, 1, 13, 1];
@@ -650,35 +743,68 @@ const LWAUDIO = (() => {
                  [12, 2], [15, 1], [13, 1], [12, 3], [8, 1],
                  [10, 2], [7, 2], [8, 3], [-99, 1]];
 
-  function spicc(semi, when, gain) {           // ostinato voice: struck string
-    const o = ctx.createOscillator(); o.type = "sawtooth";
+  function pluck(semi, when, gain, subOct = false) {   // ostinato: arp pluck
+    const o = ctx.createOscillator(); o.type = "square";
     o.frequency.value = f(semi, 220);
-    const bp = ctx.createBiquadFilter(); bp.type = "bandpass";
-    bp.frequency.value = 950; bp.Q.value = 1.4;
+    // the snap lives in the FILTER: resonant lowpass biting 2000->300 in 80ms
+    const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.Q.value = 8;
+    lp.frequency.setValueAtTime(2000, when);
+    lp.frequency.exponentialRampToValueAtTime(300, when + 0.08);
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, when);
-    g.gain.linearRampToValueAtTime(gain, when + 0.01);
-    g.gain.setTargetAtTime(0, when + 0.025, 0.055);
+    g.gain.linearRampToValueAtTime(gain, when + 0.005);
+    g.gain.setTargetAtTime(0, when + 0.03, 0.055);
     const pan = ctx.createStereoPanner();                // alternating 16ths sit L/R
     pan.pan.value = (gridStep & 1) ? 0.25 : -0.25;
-    o.connect(bp).connect(g).connect(pan).connect(musicBus);
+    o.connect(lp); lp.connect(g).connect(pan).connect(musicBus);
     o.start(when); o.stop(when + 0.4);
+    if (!subOct) return;                       // full drive: a sub-octave saw
+    const o2 = ctx.createOscillator(); o2.type = "sawtooth";  // under the pluck,
+    o2.frequency.value = f(semi, 220) / 2;                    // half gain, same
+    const og = ctx.createGain(); og.gain.value = 0.5;         // filter envelope
+    o2.connect(og).connect(lp); o2.start(when); o2.stop(when + 0.4);
   }
-  function lead(semi, when, dur, gain) {       // the theme: bowed, breathing
-    if (semi === -99) return;
+  function bass(semi, when, drive) {           // the eighth-note mono pulse:
+    let fr = f(semi, 110);                     // chord root, folded into 55-110Hz
+    while (fr >= 110) fr /= 2;
+    while (fr < 55) fr *= 2;
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, when);
-    g.gain.linearRampToValueAtTime(gain, when + 0.15);
+    g.gain.linearRampToValueAtTime(0.10, when + 0.006);
+    g.gain.setTargetAtTime(0, when + 0.16, 0.045);
+    // two cascaded biquads: the 24dB-feel ladder the saw+square growl wants
+    const lp1 = ctx.createBiquadFilter(); lp1.type = "lowpass";
+    const lp2 = ctx.createBiquadFilter(); lp2.type = "lowpass";
+    lp1.frequency.value = lp2.frequency.value = 300 + 500 * drive;
+    g.connect(lp1).connect(lp2).connect(bassPump);       // pumped with the kick
+    for (const [type, a] of [["sawtooth", 1], ["square", 0.5]]) {
+      const o = ctx.createOscillator(); o.type = type; o.frequency.value = fr;
+      const og = ctx.createGain(); og.gain.value = a;
+      o.connect(og).connect(g); o.start(when); o.stop(when + 0.5);
+    }
+  }
+  function lead(semi, when, dur, gain) {       // the theme: a mono PWM-ish lead
+    if (semi === -99) return;
+    const fr = f(semi, 440);
+    const from = leadLastF || fr; leadLastF = fr;        // mono-synth glide state
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, when);
+    g.gain.linearRampToValueAtTime(gain, when + 0.02);
     g.gain.setTargetAtTime(0, when + dur - 0.12, 0.22);
     const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 1900;
-    g.connect(lp).connect(musicBus);
-    for (const det of [-5, 4]) {
-      const o = ctx.createOscillator(); o.type = "sawtooth";
-      o.frequency.value = f(semi, 440); o.detune.value = det;
+    g.connect(lp).connect(leadBus);            // the drier bus: forward, not drowned
+    // two detuned squares beat like slow PWM; the quiet saw fills the comb
+    for (const [type, det, a] of [["square", -6, 0.5], ["square", 5, 0.5],
+                                  ["sawtooth", 0, 0.3]]) {
+      const o = ctx.createOscillator(); o.type = type;
+      o.frequency.setValueAtTime(from, when);
+      o.frequency.setTargetAtTime(fr, when, 0.06);       // ~60ms portamento
+      o.detune.value = det;
+      const og = ctx.createGain(); og.gain.value = a;
       const vib = ctx.createOscillator(); vib.frequency.value = 5.4;
       const vg = ctx.createGain(); vg.gain.value = 5;
       vib.connect(vg).connect(o.detune);
-      o.connect(g); o.start(when); o.stop(when + dur + 1);
+      o.connect(og).connect(g); o.start(when); o.stop(when + dur + 1);
       vib.start(when); vib.stop(when + dur + 1);
     }
   }
@@ -701,7 +827,12 @@ const LWAUDIO = (() => {
       stanceSig = Object.hasOwn(SIGS, st) ? SIGS[st]() : null;  // Doom/Mael/Classic build nothing
     }
     if (nextNote < now) nextNote = now + 0.05;
-    const drive = Math.max(sig.intensity, sig.doom ? 0.3 : 0);
+    // GROOVE FLOOR 0.32: the kit, bass and arp run four-on-the-floor even at
+    // peace ("upbeat sound track with a good beat") — battle still escalates
+    // everything above it (snare/16th hats/theme/double-time chords gate
+    // higher), and the pad->supersaw crossfade keeps tracking RAW intensity
+    // so calm still *sounds* calm, just never beatless.
+    const drive = Math.max(sig.intensity, sig.doom ? 0.3 : 0, 0.32);
     while (nextNote < now + 0.25) {            // standard WebAudio lookahead
       const st16 = gridStep % 32;              // 2-bar cycle in 16ths
       const beat = (st16 / 4) | 0, sub16 = st16 % 4;
@@ -714,15 +845,28 @@ const LWAUDIO = (() => {
       // the GALLOP: hit on 1, and-a (sub16 0, 2, 3) — rest on the e
       if (!inCoda && drive > 0.05 && sub16 !== 1) {
         const accent = sub16 === 0;
-        spicc(OSTP[beat], nextNote, (accent ? 1 : 0.62) * (0.055 + 0.105 * drive));
-        if (drive > 0.5 && accent) spicc(OSTP[beat] + 12, nextNote, 0.04 + 0.05 * drive);
+        pluck(OSTP[beat], nextNote, (accent ? 1 : 0.62) * (0.055 + 0.105 * drive), drive > 0.5);
+        if (drive > 0.5 && accent) pluck(OSTP[beat] + 12, nextNote, 0.04 + 0.05 * drive);
       }
-      // TAIKO on the grid, sample-accurate (setTimeout flammed 20-50ms on phones)
+      // THE KIT on the grid, sample-accurate (setTimeout flammed 20-50ms on
+      // phones): four-on-the-floor past drive 0.3 (beats 1+3 below), snare
+      // answering the backbeat, hats opening from offbeat 8ths to shimmered
+      // 16ths, the and-of-4 left ringing. Every kick pumps the whole bed.
       if (!inCoda && drive > 0.1) {
-        if (st16 === 0) taiko(Math.min(1, 0.5 + drive), 1, nextNote);
-        if (st16 === 16) taiko(0.6 * Math.min(1, 0.5 + drive), 1.2, nextNote);
-        if (drive > 0.35 && (st16 === 8 || st16 === 24)) taiko(0.4 * drive, 1.5, nextNote);
-        if (drive > 0.6 && st16 === 30) taiko(0.5 * drive, 1.4, nextNote);
+        const inBar = st16 % 16;
+        if (sub16 === 0 && (drive > 0.3 || inBar % 8 === 0))
+          kick(nextNote, Math.min(1, 0.6 + 0.4 * drive));
+        if (drive > 0.45 && (inBar === 4 || inBar === 12))
+          snare(nextNote, Math.min(1, 0.5 + 0.6 * drive));
+        if (inBar === 14) hat(nextNote, 1, true);             // open: the and-of-4
+        else if (drive > 0.6) hat(nextNote, 0.5 + 0.5 * Math.random()); // 16th shimmer
+        else if (sub16 === 2) hat(nextNote, 0.9);             // offbeat 8ths
+      }
+      // BASSLINE: the eighth-note mono pulse under everything — chord root,
+      // with the b2 slipping past on the last 8th of every 4th bar
+      if (!inCoda && drive > 0.25 && (sub16 === 0 || sub16 === 2)) {
+        const passing = bar % 4 === 3 && st16 % 16 === 14;
+        bass(CHORDS[chordIdx][0] + (passing ? 1 : 0), nextNote, drive);
       }
       // PULSE signature: the clock-throb rides the same grid, sample-accurate
       // (every 4th 16th; nova mode: the clock RACES at 8ths)
@@ -747,8 +891,8 @@ const LWAUDIO = (() => {
     }
     sub.g.gain.setTargetAtTime(0.13 + 0.11 * sig.intensity, now, 1.5);
     // PEACE/WAR crossfade: equal-power on intensity, smoothed (~2s settle)
-    // so it breathes — organ fully out by intensity ~0.45, strings own the
-    // battle. Forced home during the coda so cadences play on the organ.
+    // so it breathes — pad fully out by intensity ~0.45, the supersaw owns
+    // the battle. Forced home during the coda so cadences play on the pad.
     const war = now < coda ? 0 : Math.min(1, (sig.intensity || 0) / 0.45);
     peaceBus.gain.setTargetAtTime(Math.cos(war * Math.PI / 2), now, 0.5);
     warBus.gain.setTargetAtTime(Math.sin(war * Math.PI / 2), now, 0.5);
@@ -798,6 +942,7 @@ const LWAUDIO = (() => {
     musicVol = m; sfxVol = sx;
     if (!ctx) return;
     musicBus.gain.setTargetAtTime(m, ctx.currentTime, 0.04);
+    leadBus.gain.setTargetAtTime(m, ctx.currentTime, 0.04);  // lead follows the music
     sfxBus.gain.setTargetAtTime(sx, ctx.currentTime, 0.04);
   }
   return { update, thud, blip, stanceTap, setFlow, taiko, setEnabled, setVolumes,

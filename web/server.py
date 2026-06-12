@@ -529,11 +529,16 @@ def _mode_name(ctrl) -> str:
             else ("orbital", "binary")[ctrl["atom_mode"]] if ctrl["stance"] == 7 else "")
 
 
-def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n) -> int:
+def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n,
+                         morph: int = 0) -> int:
     """Apply ONE human player's held stance to team ``t``'s knobs — the exact
     block that used to be inlined for team 0, parametrized by seat so any
     number of humans can hold stances in the same game. Returns the player's
-    cursor speed (Doom charge trades speed for pull)."""
+    cursor speed (Doom charge trades speed for pull).
+
+    ``morph`` > 0 = ticks remaining in the stance-SWITCH transient: the army
+    flares open then SNAPS into the new form with an over-revved spin — the
+    switch reads as a burst of energy instead of a soft fade."""
     stance = ctrl["stance"]                     # 0 Swarm 1 Spin 2 Drill 3 Wall 4 Pulse
     if stance == 0:                             # Swarm: 2 forms (tap 1): cloud -> comet
         if ctrl["swarm_mode"] == 0:             # cloud: loose, varied-radius orbits
@@ -715,6 +720,22 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n) -> int:
     # existing checkpoints keep loading.)
     # stance == 8 (Classic) sets NOTHING: every knob stays at the per-tick
     # zero, so the army just flows down the gradient — the original blob.
+    # MORPH TRANSIENT (16 ticks): flare OUT for the first half, whip-spin and
+    # SNAP IN for the second — the formation change is an event you can see
+    # (and the client fires a shockwave + the score answers it).
+    if morph > 0:
+        ph = morph / 16.0                                   # 1 -> 0 across the switch
+        _e._spin[0, t] = float(_e._spin[0, t]) * (1.0 + 1.4 * ph) + 0.6 * ph * (spin_sign or 1)
+        flare = 0.9 * ph if ph > 0.5 else -0.8 * (1.0 - ph)
+        _e._burst[0, t] = max(-1.0, min(1.2, float(_e._burst[0, t]) + flare))
+    # FOLLOW-LUNGE: a moving cursor makes the army CHASE — burst tightens
+    # with cursor displacement, so the swarm lunges after your hand instead
+    # of drifting behind it (settles the instant you stop).
+    _cdy = c0_hist[-1][0] - c0_hist[0][0]
+    _cdx = c0_hist[-1][1] - c0_hist[0][1]
+    _lunge = min(1.0, (abs(_cdy) + abs(_cdx)) / 12.0)
+    if _lunge > 0.05:
+        _e._burst[0, t] = max(-1.0, float(_e._burst[0, t]) - 0.35 * _lunge)
     _base_cs = max(1, round(_e.W / 96))
     # EVERY Doom charge pays a mobility tax now (1x included — it was all
     # upside: full speed + pull + free devour, and the AI camps it). The well
@@ -736,6 +757,8 @@ class Player:
         self.name = name
         self.color = team % 6               # palette index (0..5) — lobby-pickable
         self.loadout: list[int] = []        # the 3-stance kit, for the lobby card
+        self.morph = 0                      # ticks left in the stance-switch transient
+        self.prev_key = None                # last (stance, modes) snapshot
         self.ctrl: dict[str, Any] = dict(PLAYER_CTRL)
         self.spin_sign = 1
         self.last_dir = [0, 1]
@@ -1029,8 +1052,19 @@ class Room:
                 for p in players:
                     if p.ctrl["dir"] and (p.ctrl["dir"][0] or p.ctrl["dir"][1]):
                         p.last_dir = p.ctrl["dir"]            # heading the Drill/Wall point at
+                    # stance OR mode change kicks the 16-tick morph transient
+                    key = (p.ctrl["stance"], p.ctrl["drill_mode"], p.ctrl["doom_level"],
+                           p.ctrl["wall_orient"], p.ctrl["pulse_mode"], p.ctrl["spin_mode"],
+                           p.ctrl["mael_mode"], p.ctrl["swarm_mode"], p.ctrl["atom_mode"])
+                    if key != p.prev_key:
+                        if p.prev_key is not None:
+                            p.morph = 16
+                        p.prev_key = key
                     speeds[p.team] = _apply_player_stance(
-                        _e, p.team, p.ctrl, p.spin_sign, p.last_dir, p.c0_hist, n)
+                        _e, p.team, p.ctrl, p.spin_sign, p.last_dir, p.c0_hist, n,
+                        morph=p.morph)
+                    if p.morph > 0:
+                        p.morph -= 1
                     humans[p.team] = (p.ctrl["target"], p.ctrl["dir"])
                 _e._cursor_speed_t = speeds                   # per-seat (Doom slows ITS holder only)
                 # OVERTIME SURGE: equal-mass conversion combat can trench-war

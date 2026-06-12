@@ -92,7 +92,11 @@ void main() {
   float rim = (1.0 - smoothstep(0.12, 0.45, dnp)) * step(0.02, dnp);
   float cil = still * rim * uLife;
   if (cil > 0.01) {
-    dir = normalize(mix(dir, outw, cil));
+    // SAFE normalize: dir ~= -outw at cil ~0.5 mixes to ~zero — normalize(0)
+    // is NaN, and one NaN vertex paints white on drivers that store NaN as 255
+    vec2 m = mix(dir, outw, cil);
+    float ml = length(m);
+    if (ml > 1e-4) dir = m / ml;
     perp = vec2(-dir.y, dir.x);
     halfL += cil * 0.9 * (0.45 + 0.55 * sin(uTime * (2.0 + 3.0 * aRnd.z) + aRnd.w * 6.2832));
   }
@@ -289,6 +293,9 @@ void main() {
   }
   col = 1.0 - exp(-col * 1.8);                              // soft filmic clip (no harsh saturate)
   col *= 1.0 - 0.30 * smoothstep(0.55, 1.05, dC);           // final vignette
+  // NaN scrub: a poisoned uniform/sample must fail BLACK for one frame, not
+  // lock the canvas white (RGBA8 stores NaN as 255 on some drivers)
+  if (isnan(col.x + col.y + col.z)) col = vec3(0.0);
   o = vec4(col, 1.0);
 }`;
 
@@ -469,7 +476,7 @@ function create(canvas, teamColors) {
     gl.enableVertexAttribArray(6); gl.vertexAttribPointer(6, 4, gl.UNSIGNED_BYTE, true, 4, 0); gl.vertexAttribDivisor(6, 1);
   }
 
-  function drawFx(points, count, targetW, targetH) {
+  function drawFx(points, count, targetW, targetH, over) {
     if (!count) return;
     gl.useProgram(progs.fx);
     gl.uniform2f(U.fx.uGrid, gridW, gridH);
@@ -480,8 +487,14 @@ function create(canvas, teamColors) {
     gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 1, gl.FLOAT, false, FXF * 4, 8);  gl.vertexAttribDivisor(1, 0);
     gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 1, gl.FLOAT, false, FXF * 4, 12); gl.vertexAttribDivisor(2, 0);
     gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 4, gl.FLOAT, false, FXF * 4, 16); gl.vertexAttribDivisor(3, 0);
-    gl.blendFunc(gl.ONE, gl.ONE);                 // additive: they're hot
+    // additive for the hot stuff; REVERSE-SUBTRACT for darkeners (the cursor
+    // shadow pucks): dst - src clamps at black — a true shadow with no alpha
+    // semantics, robust where premult-over onto the alpha:false backbuffer
+    // white-screened (SwiftShader). Pass color = the GRAY LEVEL to subtract.
+    if (over) gl.blendEquation(gl.FUNC_REVERSE_SUBTRACT);
+    gl.blendFunc(gl.ONE, gl.ONE);
     gl.drawArrays(gl.POINTS, 0, count);
+    if (over) gl.blendEquation(gl.FUNC_ADD);
     for (const l of [0, 1, 2, 3]) gl.disableVertexAttribArray(l);
   }
 
@@ -568,17 +581,20 @@ function create(canvas, teamColors) {
     gl.uniform2f(U.comp.uRes, vw, vh);
     gl.uniform2f(U.comp.uGrid, gridW, gridH);
     gl.uniform1f(U.comp.uBloomK, o.bloom); gl.uniform1f(U.comp.uTrailK, o.trailVis);
+    const fin = (v) => Number.isFinite(v) ? v : 0;   // one NaN uniform whites EVERY pixel
     const hole = o.hole || { x: 0, y: 0, r: 1, a: 0, spin: 1 };
-    gl.uniform4f(U.comp.uHole, hole.x, hole.y, hole.r, hole.a);
-    gl.uniform2f(U.comp.uHoleT, o.time, hole.spin);
+    gl.uniform4f(U.comp.uHole, fin(hole.x), fin(hole.y), fin(hole.r) || 1, fin(hole.a));
+    gl.uniform2f(U.comp.uHoleT, fin(o.time), fin(hole.spin) || 1);
     const wh = o.whirl || { x: 0, y: 0, r: 1, a: 0, dir: 1 };
-    gl.uniform4f(U.comp.uWhirl, wh.x, wh.y, wh.r, wh.a);
-    gl.uniform1f(U.comp.uWhirlDir, wh.dir);
+    gl.uniform4f(U.comp.uWhirl, fin(wh.x), fin(wh.y), fin(wh.r) || 1, fin(wh.a));
+    gl.uniform1f(U.comp.uWhirlDir, fin(wh.dir) || 1);
     fullscreen();
     gl.activeTexture(gl.TEXTURE0);
 
-    // 5 — cursors on top (crisp, not bloomed)
+    // 5 — cursors on top (crisp, not bloomed): first the dark backdrops
+    // (over-blend, so they DIM the chaos beneath), then the bright marks
     gl.enable(gl.BLEND);
+    if (o.cursorBg) drawFx(o.cursorBg, o.cursorBgCount, vw, vh, true);
     drawFx(o.cursorFx, o.cursorFxCount, vw, vh);
   }
 
