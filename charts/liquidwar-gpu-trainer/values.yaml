@@ -14,7 +14,7 @@ image:
   # registries.yaml trusts (the in-cluster svc DNS x509-fails on kubelet pull;
   # same lesson as the cpu-worker chart).
   repository: pandoras-box.local:5000/pbox/liquidwar-gpu-trainer
-  tag: "0.10.0-amd64"
+  tag: "0.11.0-amd64"
   pullPolicy: IfNotPresent
 
 # Exactly one trainer (single shared policy; self-play). Do not scale UP.
@@ -24,7 +24,7 @@ image:
 # action space, trained with --wells and --resume into a fixed NFS run dir so
 # pod restarts continue in place. wells-080 (8-action) was superseded ~150
 # updates in; its dir stays on the NFS for the record.
-replicaCount: 0
+replicaCount: 1
 
 # Pin to pbox (pandoras-box): its PRO 6000 (96 GB) is now advertised to k8s
 # (nvidia-device-plugin affinity allowlist gained rtx_pro_6000) and the card is
@@ -69,12 +69,24 @@ config:
   wells: true             # cast the REAL cross-team Doom/Maelstrom in training
   # Fixed run dir (relative to /opt/training, lands on the NFS mount): first
   # boot starts fresh in place, every restart after resumes policy+optimizer.
-  resume: "results/rl/wells-100"
+  resume: "results/rl/wells-110"
   # fresh run on the CONSOLIDATED physics (digestion-limited Doom, counter-
   # currents, all stance modes) + map-size curriculum; motor skills carry over
   # from wells-090 via warm start (same 25-action architecture)
-  warmStart: "results/rl/wells-090/latest.pt"
+  warmStart: "results/rl/wells-100/best.pt"
   bigEvery: "5"
+  # wells-110 (2026-06-11): the dead-air + Doom-collapse fix program (dev log
+  # s19). Stance entropy is now DECISION-normalized (per stance decision, not
+  # diluted 45x by the sticky-hold mask); the collapsed stance head is reset
+  # at warm start (the Doom prior was a pre-nerf fossil — body/move/critic
+  # carry over); eps-greedy stance exploration re-seeds the mixture.
+  stanceEntCoef: "0.015"
+  stanceEps: "0.1"
+  resetStanceHead: true
+  # gate-eval tick budget: the code default (360) is sized for CPU smokes —
+  # on the PRO 6000 give games room to actually CONCLUDE so the best.pt gate
+  # measures wins, not the tick-1200 mass leader
+  evalMaxTicks: "1200"
   # Kafka metrics (optional). Empty = no publishing.
   bootstrapServers: ""
   schemaRegistry: ""

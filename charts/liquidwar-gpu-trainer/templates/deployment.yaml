@@ -76,6 +76,21 @@ spec:
             - "--big-every"
             - {{ . | quote }}
             {{- end }}
+            {{- with .Values.config.stanceEntCoef }}
+            - "--stance-ent-coef"
+            - {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.stanceEps }}
+            - "--stance-eps"
+            - {{ . | quote }}
+            {{- end }}
+            {{- if .Values.config.resetStanceHead }}
+            - "--reset-stance-head"
+            {{- end }}
+            {{- with .Values.config.evalMaxTicks }}
+            - "--eval-max-ticks"
+            - {{ . | quote }}
+            {{- end }}
             {{- if .Values.config.wells }}
             - "--wells"
             {{- end }}
