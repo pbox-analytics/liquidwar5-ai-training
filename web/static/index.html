@@ -314,6 +314,7 @@ let flowEMA = 0;                            // your swarm's motion (drives the f
 // match stats for the result card
 let mDealt = 0, mTaken = 0, mBite = 0, mPeak = 0;
 let toastT = null;
+const esc = (x) => String(x).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 let currentOpp = "latest", winStreak = 0, rosterList = [];
 function soloRecord(delta) {                 // family-vs-the-machine ledger
   const key = "lw-record-" + currentOpp;
@@ -416,7 +417,7 @@ function onHud(st) {                                    // the JSON channel: HUD
     const bn = document.getElementById("banner");
     bn.style.display = "flex"; bn.style.flexDirection = "column"; bn.style.pointerEvents = "auto";
     bn.style.color = "#9aa4b2"; bn.style.fontSize = "20px"; bn.style.letterSpacing = "0";
-    bn.innerHTML = `Room “${st.room}” is full (${st.players}/${st.seats} seats).<br>` +
+    bn.innerHTML = `Room “${esc(st.room)}” is full (${st.players}/${st.seats} seats).<br>` +
                    `<span style="font-size:15px">Ask the host to start a bigger game.</span><br>` +
                    `<button onclick="document.getElementById('room').value='';connect();` +
                    `this.parentElement.style.display='none'" style="margin-top:14px">OK — play solo</button>`;
@@ -647,7 +648,7 @@ function frame() {                                     // 60fps interpolated ren
     const humanWon = !youWon && (curSt.seats || []).includes(w);
     const names = ["BLUE", "RED", "GREEN", "YELLOW", "PURPLE", "ORANGE"];
     if (youWon) winStreak++; else winStreak = 0;
-    let head = youWon ? "VICTORY" : humanWon ? `${(curSt.names && curSt.names[w]) || names[w]} WINS` : "DEFEAT";
+    let head = youWon ? "VICTORY" : humanWon ? `${esc((curSt.names && curSt.names[w]) || names[w])} WINS` : "DEFEAT";
     if (youWon && winStreak >= 3) head = `VICTORY — ${winStreak} IN A ROW 🔥`;
     if ((curSt.players || 1) === 1) {
       soloRecord(youWon ? 1 : -1);
@@ -665,7 +666,7 @@ function frame() {                                     // 60fps interpolated ren
       `Peak control: ${Math.round(mPeak * 100)}%<br>` +
       ((curSt.players || 1) > 1 && curSt.wins
         ? Object.entries(curSt.wins).map(([t, n]) =>
-            `${(curSt.names && curSt.names[t]) || ((curSt.seats || []).includes(+t) ? "P" + (+t + 1) : "AI")} ${n}`
+            `${esc((curSt.names && curSt.names[t]) || ((curSt.seats || []).includes(+t) ? "P" + (+t + 1) : "AI"))} ${n}`
           ).join(" — ") + "<br>" : "") +
       `<button onclick="ws&&ws.send(JSON.stringify({reset:true}))">⚔ Rematch</button>` +
       `<button onclick="ws&&(ws.send(JSON.stringify({map:-1})))">🗺 New map</button>` +
@@ -752,7 +753,7 @@ function updateHUD(st) {
   st.fighters.forEach((f, t) => {
     const el = document.createElement("span"); el.className = "t";
     const human = (st.seats || []).includes(t);
-    const nm = st.names && st.names[t] ? st.names[t] : (human ? "P" + ((st.seats || []).indexOf(t) + 1) : "");
+    const nm = st.names && st.names[t] ? esc(st.names[t]) : (human ? "P" + ((st.seats || []).indexOf(t) + 1) : "");
     const wn = st.wins && st.wins[t] ? " ·" + st.wins[t] : "";
     const tag = (t === MYT ? (nm || "you") : nm) + wn;
     el.innerHTML = `<span class="swatch" style="background:${COLORS[t%COLORS.length]};${human ? "outline:2px solid #cdd6f4;outline-offset:1px" : ""}"></span>` +
@@ -1027,7 +1028,7 @@ if (COARSE) {
       const host = document.getElementById("shRooms");
       if (!list.length) { host.innerHTML = `<span class="muted" style="font-size:13px">No games running — tap 🔗 invite to host one.</span>`; return; }
       host.innerHTML = list.map(r =>
-        `<button data-room="${r.room}" style="width:100%;text-align:left">⚔ ${r.room} · ${r.names.join(", ")} · ${r.players}/${r.seats} · ${r.map}</button>`).join("");
+        `<button data-room="${esc(r.room)}" style="width:100%;text-align:left">⚔ ${esc(r.room)} · ${esc(r.names.join(", "))} · ${r.players}/${r.seats} · ${esc(r.map)}</button>`).join("");
       host.querySelectorAll("[data-room]").forEach(b => b.onclick = () => {
         document.getElementById("room").value = b.dataset.room;
         connect(); openSheet(false);
