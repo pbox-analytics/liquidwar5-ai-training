@@ -412,5 +412,5 @@ const LWAUDIO = (() => {
   }
   return { update, thud, blip, stanceTap, setFlow, setEnabled, setVolumes,
            get enabled() { return enabled; },
-           get debug() { return { state: ctx && ctx.state, beat: gridBeat, music: musicBus && musicBus.gain.value }; } };
+           get debug() { return { state: ctx && ctx.state, beat: gridStep, music: musicBus && musicBus.gain.value }; } };
 })();
