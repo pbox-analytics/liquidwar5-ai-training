@@ -852,7 +852,7 @@ class LiquidWarEngine:
         # keep their forms and the gradient still decides where the mass ends
         # up. Movement CHOICE only: ``movable`` (where a fighter MAY step) and
         # combat/conversion are untouched. ``_inertia = 0`` switches it off.
-        mom = getattr(self, "_inertia", 0.35)
+        mom = getattr(self, "_inertia", 0.12)   # 0.35 snowballed routs: brawls collapsed in ~4s
         mom_bias = self._mom_tab[self._fdir] * mom if mom else None     # (B,N,8) single gather, graph-safe
         # SWIRL: a tangential bias so units spiral INTO the cursor along curved,
         # magnetized field-lines instead of straight radial columns. The inward
@@ -1056,6 +1056,12 @@ class LiquidWarEngine:
                 bhx = self._doom_pos[:, t, 1:2] - self.fx
                 bhn = (bhy * bhy + bhx * bhx).sqrt().clamp(min=1.0)
                 falloff = (bh_R * bh_R) / (bhn * bhn + bh_R * bh_R)    # 1 at the well, ->0 far (no map-wide vacuum)
+                # optional SQUARED falloff (Maelstrom's cure): the flat curve
+                # holds pull above the ~10/cell escape gradient out to ~2R,
+                # so kiting — the DESIGNED counter — can't outrun it; squared
+                # keeps point-blank ferocity but frees a committed runner
+                if getattr(self, "_doom_fall_sq", True):
+                    falloff = falloff * falloff
                 is_en = (self.fteam != t)                              # (B,N) not the well's own team
                 in_range = (bhn < bh_R * 2.5) & (bh_str > 0)           # only nearby enemies get caught/dragged
                 pull = (bh_str * falloff * is_en.float() * well_shield).unsqueeze(-1)  # (B,N,1) shield-damped

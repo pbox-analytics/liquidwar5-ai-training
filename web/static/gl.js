@@ -215,6 +215,7 @@ uniform vec4 uHole;                 // Doom black hole: x, y (grid), horizon rad
 uniform vec2 uHoleT;                // (time, spin direction)
 uniform vec4 uWhirl;                // Maelstrom: x, y (grid), radius (cells), strength (0=off)
 uniform float uWhirlDir;            // current direction (the owner's Q/E)
+uniform float uWhirlMode;           // 0 undertow / 1 ejecta / 2 shear — three different storms
 out vec4 o;
 void main() {
   vec2 uv = gl_FragCoord.xy / uRes;
@@ -286,10 +287,26 @@ void main() {
   // rings drifting inward, slight darkening toward the eye of the storm.
   if (uWhirl.w > 0.001) {
     float wR = uWhirl.z;
-    float rip = 0.5 + 0.5 * sin(wr * 0.7 - uHoleT.x * 6.0);
     float wmask = min(uWhirl.w, 1.0) * exp(-(wr * wr) / (wR * wR * 1.3));
-    col += vec3(0.05, 0.14, 0.20) * rip * wmask;
-    col *= 1.0 - 0.18 * wmask;
+    // THE MODES READ DIFFERENTLY AT A GLANCE:
+    //  undertow — cool rings DRIFTING INWARD, dark swallowing eye
+    //  ejecta   — warm rings BLASTING OUTWARD, bright violent rim
+    //  shear    — no radial motion at all: silver spokes whipping around
+    if (uWhirlMode < 0.5) {                  // undertow
+      float rip = 0.5 + 0.5 * sin(wr * 0.7 - uHoleT.x * 6.0);
+      col += vec3(0.04, 0.13, 0.20) * rip * wmask;
+      col *= 1.0 - 0.30 * wmask;             // the eye pulls light DOWN
+    } else if (uWhirlMode < 1.5) {           // ejecta
+      float rip = 0.5 + 0.5 * sin(wr * 0.7 + uHoleT.x * 9.0);
+      col += vec3(0.22, 0.15, 0.07) * rip * wmask;
+      float rim = exp(-pow((wr - wR * 0.85) / (wR * 0.22), 2.0)) * min(uWhirl.w, 1.0);
+      col += vec3(0.35, 0.22, 0.10) * rim;   // the spray edge burns
+    } else {                                 // shear
+      float ang = atan(wd.y, wd.x);
+      float spoke = 0.5 + 0.5 * sin(ang * 7.0 - uWhirlDir * uHoleT.x * 5.0);
+      col += vec3(0.16, 0.18, 0.22) * spoke * spoke * wmask;
+      col *= 1.0 - 0.10 * wmask;
+    }
   }
   col = 1.0 - exp(-col * 1.8);                              // soft filmic clip (no harsh saturate)
   col *= 1.0 - 0.30 * smoothstep(0.55, 1.05, dC);           // final vignette
@@ -588,6 +605,7 @@ function create(canvas, teamColors) {
     const wh = o.whirl || { x: 0, y: 0, r: 1, a: 0, dir: 1 };
     gl.uniform4f(U.comp.uWhirl, fin(wh.x), fin(wh.y), fin(wh.r) || 1, fin(wh.a));
     gl.uniform1f(U.comp.uWhirlDir, fin(wh.dir) || 1);
+    gl.uniform1f(U.comp.uWhirlMode, fin(wh.mode));
     fullscreen();
     gl.activeTexture(gl.TEXTURE0);
 

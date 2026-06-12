@@ -79,8 +79,8 @@ _KNOBS = [
     (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Pulse nova (tick-phased)
     (0.0,  0.0,  2.5, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 1, 0.0,  0, 0, 0.0,  0, 1.0),  # Pulse tide
     (1.2,  0.0,  1.5, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 6.7,  1, 1, 0.0,  0, 0.7),  # Doom 1x
-    (1.8,  0.0,  1.75, 0, 0, 0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 9.0,  1, 2, 0.0,  0, 0.5),  # Doom 2x
-    (2.4,  0.0,  2.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 11.3, 1, 3, 0.0,  0, 0.35),  # Doom 3x
+    (1.8,  0.0,  1.75, 0, 0, 0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 9.0,  1, 2, 0.0,  0, 0.45),  # Doom 2x
+    (2.4,  0.0,  2.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 11.3, 1, 3, 0.0,  0, 0.3),  # Doom 3x
     (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.30, 1, 1.0),  # Maelstrom undertow
     (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, -0.7, 1, 1.0),  # Maelstrom ejecta
     (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  1, 1.0),  # Maelstrom shear
@@ -338,8 +338,9 @@ def apply_stances(engine, action, dydx, team_start=0, human_teams=None):
         cpos = engine.cursor_pos.float()
         d_on = (doom_lvl > 0).float()
         engine._doom_pos[:, cols] = cpos[:, cols]
-        engine._doom_str[:, cols] = (doom_lvl * 24.0 * frac ** 1.5)[:, cols]
-        engine._doom_range[:, cols] = (2.2 * ring).clamp(min=70.0)[:, cols]
+        dstr = torch.tensor((0.0, 24.0, 40.0, 52.0), device=dev)[doom_lvl.long()]
+        engine._doom_str[:, cols] = (dstr * frac ** 1.5)[:, cols]
+        engine._doom_range[:, cols] = (2.2 * ring).clamp(min=56.0)[:, cols]  # kiting floor (sweep)
         engine._doom_horizon[:, cols] = (ring_rin * 1.25 * d_on)[:, cols]   # the rendered hole, not blob-scaled (no snowball)
         engine._doom_cap[:, cols] = (0.09 * frac.sqrt() * d_on)[:, cols]
         engine._vortex_pos[:, cols] = cpos[:, cols]

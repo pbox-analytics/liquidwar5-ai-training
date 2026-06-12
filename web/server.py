@@ -388,7 +388,8 @@ class GameSession:
             if 16 <= a <= 18 and self._ai_doom is None:
                 self._ai_doom = [t, *e.cursor_pos[0, t].tolist(), a - 15]
             elif 19 <= a <= 21 and self._ai_mael is None:
-                self._ai_mael = [t, *e.cursor_pos[0, t].tolist()]
+                # [..., mode] — undertow/ejecta/shear render as different storms
+                self._ai_mael = [t, *e.cursor_pos[0, t].tolist(), a - 19]
 
     def reset(self) -> None:
         if self._opp_request == "latest":      # per-match rotation (see _set_opponent)
@@ -657,12 +658,14 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n,
         _e._ring[0, t] = _ring_val
         _e._ring_ecc[0, t] = 1.0                # full oblate -> the edge-on Gargantua blade
         _frac = _mass / max(1.0, _e.fighters_per_team)
-        _e._doom_str[0, t] = lvl * 24.0 * _frac ** 1.5  # (32->24, parity rebalance) super-linear in mass: peels the loosely-bound periphery, not the whole army (x1/x2/x3 charge, tap 6)
+        # ladder (24,40,52), not 24*lvl: the sweep showed flat-falloff 72 held
+        # an inescapable grip to ~2R — charge concentrates power NEAR the well
+        _e._doom_str[0, t] = (24.0, 40.0, 52.0)[lvl - 1] * _frac ** 1.5
         # FINITE reach (was the full map diagonal, which made Doom
         # inescapable -> an auto-win): ~2.2x the disk radius, so a
         # dispersed or kiting enemy escapes the pull and Doom is a
         # committed finisher, not a vacuum.
-        _e._doom_range[0, t] = max(70.0, 2.2 * _ring_val)
+        _e._doom_range[0, t] = max(56.0, 2.2 * _ring_val)   # floor 70->56: THE kiting fix (sweep-verified)
         # horizon = the RENDERED hole (fixed per charge level), no longer
         # blob-scaled: tying it to mass made every conversion grow the kill
         # zone — the snowball at the heart of "doom tears through
@@ -736,12 +739,18 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n,
     _lunge = min(1.0, (abs(_cdy) + abs(_cdx)) / 12.0)
     if _lunge > 0.05:
         _e._burst[0, t] = max(-1.0, float(_e._burst[0, t]) - 0.35 * _lunge)
+    # COHESION: travel hugging the cursor without losing the formation —
+    # loose/neutral forms get a small extra inward pull; engineered
+    # silhouettes (wall bar, maelstrom shell, atom lobes) keep their shapes
+    _b_now = float(_e._burst[0, t])
+    if -0.3 < _b_now < 0.3:
+        _e._burst[0, t] = _b_now - 0.18
     _base_cs = max(1, round(_e.W / 96))
     # EVERY Doom charge pays a mobility tax now (1x included — it was all
     # upside: full speed + pull + free devour, and the AI camps it). The well
     # is a commitment at any level; outmaneuvering it is the baseline counter.
     if ctrl["stance"] == 5:
-        return max(1, round(_base_cs * (0.7, 0.5, 0.35)[ctrl["doom_level"] - 1]))
+        return max(1, round(_base_cs * (0.7, 0.45, 0.3)[ctrl["doom_level"] - 1]))  # steeper 2x/3x tax
     return _base_cs
 
 

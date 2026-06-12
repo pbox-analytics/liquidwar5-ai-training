@@ -308,7 +308,7 @@
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 </script>
 <script src="audio.js?v=1781616000"></script>
-<script src="gl.js?v=1781615003"></script>
+<script src="gl.js?v=1781618000"></script>
 <script>
 // The PALETTE is fixed; which palette entry each TEAM wears is the server's
 // call (players pick colors in the lobby) — COLORS/RGB are per-team views
@@ -430,7 +430,8 @@ function toast(msg, ms = 3200) {
   toastT = setTimeout(() => el.style.display = "none", ms);
 }
 let cursSpd = new Float32Array(6);
-let lastStanceKey = "", morphT = 0;
+let lastStanceKey = "", morphT = 0, clashT = 0, clashAt = null;
+const curTrail = Array.from({ length: 6 }, () => []);   // per-team cursor path history
 let prevCursorsHud = null, prevHudT = 0;
 let lastWallMask = null;
 function processGrid(g) {              // walls upload ONLY on change + contact sparks
@@ -485,14 +486,27 @@ function onFrame(buf) {                                 // a fresh binary frame 
   // Conversion flashes: a mote whose team changed since last frame just got
   // converted in combat. Cap spawns/frame — conversions can be hundreds.
   if (prevPT && prevPT.length === curPT.length) {
-    let conv = 0;
+    let conv = 0, cvX = 0, cvY = 0;
     const lostN = new Float32Array(6), lostX = new Float32Array(6), lostY = new Float32Array(6);
     for (let i = 0; i < pn; i++) if (prevPT[i] !== curPT[i] && curPT[i] < TEAMS) {
-      conv++;
+      conv++; cvX += curPos[2*i+1]; cvY += curPos[2*i];
       const lt = prevPT[i];                       // the team that BLED this mote
       if (lt < 6) { lostN[lt]++; lostX[lt] += curPos[2*i+1]; lostY[lt] += curPos[2*i]; }
       if (curPT[i] === MYT) mDealt++;
       if (lt === MYT) mTaken++;
+    }
+    // THE CLASH: armies meeting out of peace is an EVENT — shockwave + drum
+    // at the point of first contact (edge-triggered off the calm EMA)
+    if (conv >= 8 && convEMA < 0.55 && performance.now() - clashT > 4000) {
+      clashT = performance.now();
+      clashAt = { x: cvX / conv + .5, y: cvY / conv + .5 };
+      LWAUDIO.taiko(0.95, 1.35);
+      for (let i = 0; i < 80 && particles.length < MAXP; i++) {
+        const a = Math.random() * 6.283, sp = 1.0 + Math.random() * 2.6;
+        particles.push({ x: clashAt.x, y: clashAt.y, vx: Math.cos(a) * sp,
+                         vy: Math.sin(a) * sp - 0.3, life: 0.5 + Math.random() * 0.5,
+                         col: WHITE });
+      }
     }
     for (let t = 0; t < TEAMS; t++) if (t !== MYT && lostN[t] > mBite) mBite = lostN[t];
     // combat flush: heavy bleeding spawns/reinforces a red shockwave from the wound
@@ -607,7 +621,7 @@ function onHud(st) {                                    // the JSON channel: HUD
 // the army); cursors -> a second crisp batch drawn on top of the composite.
 const FXF = 8;                                           // x,y,size,shape,r,g,b,a
 const fxArr = new Float32Array((MAXP + MAXFLASH * 2) * FXF);
-const curArr = new Float32Array(8 * 6 * FXF);
+const curArr = new Float32Array((8 * 6 + 6 * 16) * FXF);   // marks + comet tails
 const curBgArr = new Float32Array(8 * 2 * FXF);          // dark backdrops (over-blend pass)
 function pushFx(arr, k, x, y, size, shape, c, a) {
   const o = k * FXF;
@@ -700,7 +714,9 @@ function frame() {                                     // 60fps interpolated ren
   if (whirlA < 0.01) whirlA = 0;
   const wc = maelOn ? [curSt.cursors[MYT][1], curSt.cursors[MYT][0]] : (aiMael ? [aiMael[2], aiMael[1]] : [0, 0]);
   const whirl = { x: wc[0] + .5, y: wc[1] + .5, r: 30,
-                  a: whirlA, dir: maelOn ? (curSt.spin_dir || 1) : 1 };
+                  a: whirlA, dir: maelOn ? (curSt.spin_dir || 1) : 1,
+                  mode: maelOn ? ({ undertow: 0, ejecta: 1, shear: 2 }[curSt.mode] ?? 0)
+                               : (aiMael ? (aiMael[3] || 0) : 0) };
   // cursors: shadow puck + dark edge UNDER (a reverse-subtract pass dims the
   // chaos), then halo + ring + white core on top — they were getting lost in
   // the fight (a colored ring inside a same-colored bloomed blob is invisible)
@@ -717,6 +733,19 @@ function frame() {                                     // 60fps interpolated ren
     if (doomA > 0.25 && t === (aiDoom ? aiDoom[0] : MYT)) return;  // the black hole IS that team's cursor
     const col = RGB[t % RGB.length];
     const x = c[1] + .5, y = c[0] + .5;
+    // COMET TAIL: the cursor's recent path burns behind it — a moving order
+    // is visible at a glance (and it just looks cooler)
+    const tr = curTrail[t], nowT = performance.now();
+    const lastP = tr[tr.length - 1];
+    if (!lastP || Math.hypot(x - lastP.x, y - lastP.y) > 0.9) tr.push({ x, y, t0: nowT });
+    while (tr.length && (nowT - tr[0].t0 > 450 || tr.length > 14)) tr.shift();
+    for (const p of tr) {
+      const age = (nowT - p.t0) / 450;
+      ck = pushFx(curArr, ck, p.x, p.y, (t === MYT ? 4.6 : 3.4) * (1 - 0.65 * age), 0,
+                  col, (t === MYT ? 0.5 : 0.3) * (1 - age) * (1 - age));
+      if (t === MYT && age < 0.35)
+        ck = pushFx(curArr, ck, p.x, p.y, 1.6, 0, WHITE, 0.5 * (1 - age * 2.8));
+    }
     const surge = (t === MYT && curSt.pulse_active) ? 1.7 : 1;
     const D = (t === MYT ? 9.5 : 6.5) * beat * surge;   // ring diameter, grid cells
     // backdrops draw in REVERSE-SUBTRACT: color = the brightness to remove
@@ -740,6 +769,14 @@ function frame() {                                     // 60fps interpolated ren
       }
     }
   });
+  // CLASH shockwave: a double ring blasting out from first contact
+  if (clashAt) {
+    const cAge = (performance.now() - clashT) / 700;
+    if (cAge < 1) {
+      ck = pushFx(curArr, ck, clashAt.x, clashAt.y, 6 + 70 * cAge, 1, WHITE, 0.85 * (1 - cAge));
+      ck = pushFx(curArr, ck, clashAt.x, clashAt.y, 4 + 46 * cAge, 1, YELLOW, 0.5 * (1 - cAge));
+    } else clashAt = null;
+  }
   // heartbeat follows the held stance: calm blob -> slow pulse, Pulse/nova ->
   // racing, Doom -> the wave travels INWARD (negative rate)
   const BEATS = { Swarm: 2.4, Spin: 3.2, Drill: 3.6, Wall: 1.6, Pulse: 4.4, Doom: -3.0,
