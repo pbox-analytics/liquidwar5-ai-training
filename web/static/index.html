@@ -35,11 +35,42 @@
            max-width: 95vw; height: auto; cursor: crosshair; }
   .muted { color: #6b7280; }
   canvas { touch-action: none; }   /* the finger steers — no scroll/zoom stealing */
-  #touchbar { display: none; }
-  @media (pointer: coarse) {       /* phones/tablets: finger-sized stance buttons */
-    #touchbar { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
-    #touchbar button { font-size: 22px; padding: 10px 12px; min-width: 48px; }
-    #hud .pill, #visuals, .muted { font-size: 12px; }
+  #touchbar, #sheet, #sheetScrim { display: none; }
+  /* ---- APP LAYOUT (touch devices): battlefield-first, thumb-zone controls,
+         everything configurable in a slide-up sheet ---- */
+  @media (pointer: coarse) {
+    body { padding: 0; gap: 0; min-height: 100dvh; }
+    h1, #help, #visuals { display: none; }
+    #hud { position: sticky; top: 0; z-index: 5; width: 100%; background: #0b0e14ee;
+           padding: 6px 8px calc(6px) 8px; gap: 8px; justify-content: space-between;
+           border-bottom: 1px solid #1b2233; }
+    #hud .pill { border: 0; background: none; padding: 2px 4px; }
+    #hud select, #hud button, #hud input, #tick, #flood, #spread, #mapname { display: none; }
+    #hud #stancePill, #hud #teams, #hud #fps { display: inline-block; }
+    #teams { display: flex !important; }
+    canvas { border: 0; border-radius: 0; max-width: 100vw; }
+    #touchbar { display: flex; position: fixed; bottom: 0; left: 0; right: 0; z-index: 6;
+                gap: 4px; padding: 8px 6px calc(8px + env(safe-area-inset-bottom)) 6px;
+                background: #0b0e14f2; border-top: 1px solid #1b2233;
+                overflow-x: auto; justify-content: flex-start; }
+    #touchbar button { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center;
+                       gap: 1px; font-size: 20px; padding: 6px 9px; min-width: 52px; min-height: 52px;
+                       border-radius: 12px; }
+    #touchbar button small { font-size: 9px; color: #8b93a7; }
+    #touchbar button.active { background: #2a3550; border-color: #5b79c7; }
+    body { padding-bottom: 84px; }   /* room for the action bar */
+    #sheetScrim { position: fixed; inset: 0; background: #000a; z-index: 9; }
+    #sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+             background: #11151f; border-radius: 16px 16px 0 0; padding: 14px 16px
+             calc(18px + env(safe-area-inset-bottom)) 16px; max-height: 75dvh; overflow-y: auto;
+             box-shadow: 0 -8px 32px #000c; }
+    #sheet.open, #sheetScrim.open { display: block; }
+    #sheet h3 { margin: 6px 0 8px; font-size: 13px; color: #8b93a7; text-transform: uppercase; letter-spacing: .08em; }
+    #sheet .row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; align-items: center; }
+    #sheet select, #sheet input, #sheet button { font-size: 15px; padding: 10px 12px; border-radius: 10px; }
+    #sheet #visuals2 label { display: flex; align-items: center; gap: 8px; width: 100%;
+                            font-size: 13px; color: #9aa4b2; }
+    #sheet #visuals2 input[type=range] { flex: 1; }
   }
   /* Big-screen mode: the canvas alone goes fullscreen — chrome disappears,
      the game fills the panel (works on TVs via any browser). */
@@ -90,10 +121,25 @@
   </div>
   <canvas id="c" width="110" height="80"></canvas>
   <div id="touchbar">
-    <button data-st="0">🐝</button><button data-st="1">🌀</button><button data-st="2">➤</button>
-    <button data-st="3">🛡</button><button data-st="4">💥</button><button data-st="5">🕳</button>
-    <button data-st="6">🌪</button><button data-st="7">⚛</button><button data-st="8">🌊</button>
-    <button id="tSpin">↻</button><button id="tFs">⛶</button>
+    <button data-st="0">🐝<small>Swarm</small></button>
+    <button data-st="1">🌀<small>Spin</small></button>
+    <button data-st="2">➤<small>Drill</small></button>
+    <button data-st="3">🛡<small>Wall</small></button>
+    <button data-st="4">💥<small>Pulse</small></button>
+    <button data-st="5">🕳<small>Doom</small></button>
+    <button data-st="6">🌪<small>Mael</small></button>
+    <button data-st="7">⚛<small>Atom</small></button>
+    <button data-st="8">🌊<small>Classic</small></button>
+    <button id="tSpin">↻<small>Spin dir</small></button>
+    <button id="tNew">🔄<small>New game</small></button>
+    <button id="tGear">⚙️<small>Settings</small></button>
+  </div>
+  <div id="sheetScrim"></div>
+  <div id="sheet">
+    <h3>Match</h3><div class="row" id="shMatch"></div>
+    <h3>Multiplayer</h3><div class="row" id="shRoom"></div>
+    <h3>Visuals</h3><div class="row" id="visuals2"></div>
+    <div class="row"><button id="sheetClose" style="flex:1">Done</button></div>
   </div>
   <div id="visuals" class="muted" style="margin-top:6px; font-size:13px; display:flex; gap:14px; flex-wrap:wrap; justify-content:center; align-items:center;">
     <b style="color:#9aa4b2">Visuals:</b>
@@ -105,7 +151,7 @@
     <label>glow <input type="range" id="vGlow" min="0" max="2" step="0.05" value="0.9"><span id="vGlowN">0.9</span></label>
     <label>life <input type="range" id="vLife" min="0" max="1.5" step="0.05" value="1.0"><span id="vLifeN">1.0</span></label>
   </div>
-  <div class="muted" style="text-align:center; line-height:1.8;">
+  <div id="help" class="muted" style="text-align:center; line-height:1.8;">
     <b>↑ ↓ ← → / WASD</b> steer (or hold mouse) &nbsp;·&nbsp;
     <b>Stances</b> (hold one): <b>1</b> 🐝 Swarm <span class="muted">(tap: cloud→comet)</span> &nbsp; <b>2</b> 🌀 Spin <span class="muted">(tap to cycle: vortex→sawblade→galaxy)</span> &nbsp; <b>3</b> ➤ Drill <span class="muted">(tap to rev: slow→fast)</span> &nbsp; <b>4</b> 🛡 Wall <span class="muted">(tap to flip)</span> &nbsp; <b>5</b> 💥 Pulse <span class="muted">(tap: wave→rings→star→lattice→nova→tide)</span> &nbsp; <b>6</b> 🕳 Doom <span class="muted">(tap to charge)</span> &nbsp; <b>7</b> 🌪 Maelstrom <span class="muted">(tap to cycle: undertow→ejecta→shear)</span> &nbsp; <b>8</b> ⚛ Atom <span class="muted">(tap: orbital→binary)</span> &nbsp; <b>9</b> 🌊 Classic &nbsp;·&nbsp;
     <b>Q</b>/<b>E</b> spin direction &nbsp;·&nbsp;
@@ -434,6 +480,9 @@ function updateHUD(st) {
   const SI = { Swarm: "🐝", Spin: "🌀", Drill: "➤", Wall: "🛡", Pulse: "💥", Doom: "🕳", Maelstrom: "🌪", Atom: "⚛", Classic: "🌊" };
   sp.textContent = (SI[st.stance] || "") + " " + (st.stance ?? "—") + (st.mode ? " ·" + st.mode : "");
   sp.style.background = SC[st.stance] || "#1b2233"; sp.style.color = "#fff";
+  const SORDER = ["Swarm", "Spin", "Drill", "Wall", "Pulse", "Doom", "Maelstrom", "Atom", "Classic"];
+  document.querySelectorAll("#touchbar [data-st]").forEach(b =>
+    b.classList.toggle("active", SORDER[+b.dataset.st] === st.stance));
   document.getElementById("opp").textContent = st.opponent + (st.players > 1 ? ` · ${st.players}P` : "");
   const tdiv = document.getElementById("teams"); tdiv.innerHTML = "";
   st.fighters.forEach((f, t) => {
@@ -519,7 +568,22 @@ document.querySelectorAll("#touchbar [data-st]").forEach(b => {
   b.onclick = () => ws && ws.readyState === 1 && ws.send(JSON.stringify({ stance: parseInt(b.dataset.st) }));
 });
 document.getElementById("tSpin").onclick = () => { spin = spin === 1 ? -1 : spin === -1 ? 0 : 1; sendSpin(); };
-document.getElementById("tFs").onclick = toggleFullscreen;
+document.getElementById("tNew").onclick = () => ws && ws.readyState === 1 && ws.send(JSON.stringify({ reset: true }));
+// settings sheet: the existing controls MOVE here on touch devices, so every
+// handler keeps working — one UI, two layouts
+const COARSE = matchMedia("(pointer: coarse)").matches;
+if (COARSE) {
+  const m = document.getElementById("shMatch");
+  for (const id of ["mode", "opponent", "oppcount", "mapsel", "reset"]) m.appendChild(document.getElementById(id));
+  const r = document.getElementById("shRoom");
+  for (const id of ["room", "invite"]) r.appendChild(document.getElementById(id));
+  document.getElementById("visuals2").append(...document.getElementById("visuals").querySelectorAll("label"));
+  const sheet = document.getElementById("sheet"), scrim = document.getElementById("sheetScrim");
+  const openSheet = (v) => { sheet.classList.toggle("open", v); scrim.classList.toggle("open", v); };
+  document.getElementById("tGear").onclick = () => openSheet(true);
+  document.getElementById("sheetClose").onclick = () => openSheet(false);
+  scrim.onclick = () => openSheet(false);
+}
 window.addEventListener("mouseup", () => {
   if (mouseDown && ws && ws.readyState === 1) ws.send(JSON.stringify({ target: null }));
   mouseDown = false;
