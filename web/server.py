@@ -615,13 +615,15 @@ class Room:
     game loop and broadcasts each frame to every seat (with per-seat HUD
     fields layered on)."""
 
-    def __init__(self, key: str, mode: str, opponent: str, teams: int) -> None:
+    def __init__(self, key: str, mode: str, opponent: str, teams: int,
+                 size: str = "full") -> None:
         self.key = key
+        small = size == "small"            # phone boards: same archetypes, half scale
         self.session = GameSession(
             mode=mode, opponent=opponent, teams=teams,
-            height=int(os.environ.get("LW_PLAY_H", "384")),
-            width=int(os.environ.get("LW_PLAY_W", "576")),
-            fighters=int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),
+            height=192 if small else int(os.environ.get("LW_PLAY_H", "384")),
+            width=288 if small else int(os.environ.get("LW_PLAY_W", "576")),
+            fighters=2000 if small else int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),
         )
         self.players: dict[int, Player] = {}
         self.task: asyncio.Task | None = None
@@ -756,7 +758,8 @@ async def ws(sock: WebSocket) -> None:
     if room is None or room.closed:
         room = Room(key, mode=q.get("mode", "play"),
                     opponent=q.get("opponent", "latest"),
-                    teams=int(q.get("teams", "2")))
+                    teams=int(q.get("teams", "2")),
+                    size=q.get("size", "full"))
         ROOMS[key] = room
     player = room.join(sock)
     if player is None:                                  # room full

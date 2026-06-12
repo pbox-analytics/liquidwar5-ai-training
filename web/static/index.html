@@ -34,6 +34,13 @@
   canvas { background: #05070c; border: 1px solid #232a3a; border-radius: 8px;
            max-width: 95vw; height: auto; cursor: crosshair; }
   .muted { color: #6b7280; }
+  canvas { touch-action: none; }   /* the finger steers — no scroll/zoom stealing */
+  #touchbar { display: none; }
+  @media (pointer: coarse) {       /* phones/tablets: finger-sized stance buttons */
+    #touchbar { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+    #touchbar button { font-size: 22px; padding: 10px 12px; min-width: 48px; }
+    #hud .pill, #visuals, .muted { font-size: 12px; }
+  }
   /* Big-screen mode: the canvas alone goes fullscreen — chrome disappears,
      the game fills the panel (works on TVs via any browser). */
   canvas:fullscreen { max-width: 100vw; width: 100vw; height: 100vh;
@@ -82,6 +89,12 @@
     <button id="fs" title="Fullscreen (F)">⛶</button>
   </div>
   <canvas id="c" width="110" height="80"></canvas>
+  <div id="touchbar">
+    <button data-st="0">🐝</button><button data-st="1">🌀</button><button data-st="2">➤</button>
+    <button data-st="3">🛡</button><button data-st="4">💥</button><button data-st="5">🕳</button>
+    <button data-st="6">🌪</button><button data-st="7">⚛</button><button data-st="8">🌊</button>
+    <button id="tSpin">↻</button><button id="tFs">⛶</button>
+  </div>
   <div id="visuals" class="muted" style="margin-top:6px; font-size:13px; display:flex; gap:14px; flex-wrap:wrap; justify-content:center; align-items:center;">
     <b style="color:#9aa4b2">Visuals:</b>
     <label>streak <input type="range" id="vStreak" min="0" max="1.5" step="0.05" value="0.45"><span id="vStreakN">0.45</span></label>
@@ -439,10 +452,12 @@ function connect() {
   const mode = document.getElementById("mode").value;
   const opp = document.getElementById("opponent").value;
   const room = document.getElementById("room").value.trim();
+  const sizeQ = new URLSearchParams(location.search).get("size")
+              || (matchMedia("(pointer: coarse)").matches ? "small" : "full");
   document.getElementById("modeLabel").textContent = mode + (room ? ` · room ${room}` : "");
   const teams = parseInt(document.getElementById("oppcount").value) + 1;   // humans + AI share these seats
   curSt = null; prevPT = curPT = null; flashes = []; tLast = 0; lastTick = -1; lastMap = ""; MYT = 0;
-  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?mode=${mode}&opponent=${opp}&teams=${teams}` +
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?mode=${mode}&opponent=${opp}&teams=${teams}&size=${sizeQ}` +
                      (room ? `&room=${encodeURIComponent(room)}` : ""));
   ws.binaryType = "arraybuffer";
   curPos = null; pendingGrid = null;
@@ -488,6 +503,23 @@ function updateTarget(e) {
             Math.floor((e.clientX - r.left) * W / r.width)];
 }
 cv.addEventListener("mousedown", (e) => { mouseDown = true; updateTarget(e); });
+// TOUCH: the finger IS the move order — press/drag steers (the same wall-aware
+// flood homing as the mouse), lift stops. preventDefault keeps the page still.
+cv.addEventListener("touchstart", (e) => { e.preventDefault(); mouseDown = true; updateTarget(e.touches[0]); }, { passive: false });
+cv.addEventListener("touchmove", (e) => { e.preventDefault(); if (mouseDown) updateTarget(e.touches[0]); }, { passive: false });
+const touchEnd = (e) => {
+  e.preventDefault();
+  if (mouseDown && ws && ws.readyState === 1) ws.send(JSON.stringify({ target: null }));
+  mouseDown = false;
+};
+cv.addEventListener("touchend", touchEnd, { passive: false });
+cv.addEventListener("touchcancel", touchEnd, { passive: false });
+// touch stance bar: tap = hold stance, re-tap = cycle its mode (same as keys)
+document.querySelectorAll("#touchbar [data-st]").forEach(b => {
+  b.onclick = () => ws && ws.readyState === 1 && ws.send(JSON.stringify({ stance: parseInt(b.dataset.st) }));
+});
+document.getElementById("tSpin").onclick = () => { spin = spin === 1 ? -1 : spin === -1 ? 0 : 1; sendSpin(); };
+document.getElementById("tFs").onclick = toggleFullscreen;
 window.addEventListener("mouseup", () => {
   if (mouseDown && ws && ws.readyState === 1) ws.send(JSON.stringify({ target: null }));
   mouseDown = false;
