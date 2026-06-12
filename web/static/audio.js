@@ -101,6 +101,7 @@ const LWAUDIO = (() => {
       mix.connect(bp).connect(fg).connect(g);
     }
     g.connect(musicBus);
+    return g;
   }
 
   let activeGains = [];                        // every sounding pad/choir voice
