@@ -14,7 +14,8 @@
 // SFX: conversion thuds scaled by bleed size, tiny blips for skirmish,
 // per-stance tap notes, victory/defeat stingers.
 const LWAUDIO = (() => {
-  let ctx = null, master, musicBus, sfxBus;
+  let ctx = null, master, musicBus, sfxBus, padBus, echoIn;
+  let coda = 0;                                // >now = match resolution playing; grid muted
   let musicVol = 0.5, sfxVol = 0.7, enabled = false;
   let chordTimer = 0, sparkTimer = 0, chordIdx = 0, voices = [];
   let sub = null, doomDrone = null, maelWash = null, tension = null;
@@ -50,25 +51,48 @@ const LWAUDIO = (() => {
     master.threshold.value = -18; master.ratio.value = 6;
     master.connect(ctx.destination);
     const verb = makeVerb();
-    const verbGain = ctx.createGain(); verbGain.gain.value = 0.5;
-    verb.connect(verbGain).connect(master);
+    // FILTERED reverb send: the 34-150Hz pileup (sub + doom drone + taiko +
+    // thuds) was smearing through the 2.8s cathedral and pumping the master
+    // compressor — lows stay dry, the air gets the space
+    const sendHP = ctx.createBiquadFilter(); sendHP.type = "highpass";
+    sendHP.frequency.value = 260; sendHP.Q.value = 0.7;
+    const sendLP = ctx.createBiquadFilter(); sendLP.type = "lowpass";
+    sendLP.frequency.value = 5500;
+    sendHP.connect(sendLP).connect(verb).connect(master);
     musicBus = ctx.createGain(); musicBus.gain.value = musicVol;
-    musicBus.connect(master); musicBus.connect(verb);
+    const mSend = ctx.createGain(); mSend.gain.value = 0.5;
+    musicBus.connect(master); musicBus.connect(mSend).connect(sendHP);
     sfxBus = ctx.createGain(); sfxBus.gain.value = sfxVol;
-    sfxBus.connect(master); sfxBus.connect(verb);
+    const sSend = ctx.createGain(); sSend.gain.value = 0.25;
+    sfxBus.connect(master); sfxBus.connect(sSend).connect(sendHP);
+    // PAD BUS: organ + choir ride here so big drum moments can duck them
+    padBus = ctx.createGain(); padBus.gain.value = 1.0;
+    padBus.connect(musicBus);
+    // shared ping-pong echo for the sparkles (one pair of delays forever —
+    // the per-pluck feedback DelayNode leaked live graph nodes for hours)
+    echoIn = ctx.createGain(); echoIn.gain.value = 1.0;
+    const dA = ctx.createDelay(); dA.delayTime.value = 0.31;
+    const dB = ctx.createDelay(); dB.delayTime.value = 0.43;
+    const fA = ctx.createGain(); fA.gain.value = 0.3;
+    const fB = ctx.createGain(); fB.gain.value = 0.3;
+    echoIn.connect(dA); dA.connect(musicBus); dA.connect(fA).connect(dB);
+    dB.connect(musicBus); dB.connect(fB).connect(dA);
     startSub(); startDoom(); startMael(); startFlow();
   }
 
   // --- organ voice: additive harmonics with cathedral attack ---
-  function organ(freq, gain, attack = 4, dur = 22) {
+  function organ(freq, gain, attack = 4, dur = 22, noSub = false) {
     const g = ctx.createGain(); g.gain.value = 0;
     const lp = ctx.createBiquadFilter(); lp.type = "lowpass";
     lp.frequency.value = 460 + 2100 * sig.intensity;   // darker at rest
-    g.connect(lp).connect(musicBus);
+    g.connect(lp).connect(padBus);
     const t = ctx.currentTime;
     g.gain.linearRampToValueAtTime(gain, t + attack);
     g.gain.setTargetAtTime(0, t + dur - 7, 2.4);
-    const parts = [[1, 1], [2, 0.42], [3, 0.21], [4, 0.1], [0.5, 0.25]];
+    // the dedicated sub OWNS the bottom octave — the lowest chord voice
+    // dropping its 0.5x partial un-muds the floor
+    const parts = noSub ? [[1, 1], [2, 0.42], [3, 0.21], [4, 0.1]]
+                        : [[1, 1], [2, 0.42], [3, 0.21], [4, 0.1], [0.5, 0.25]];
     const oscs = parts.map(([m, a]) => {
       const o = ctx.createOscillator(); o.type = "sine";
       o.frequency.value = freq * m;
@@ -82,7 +106,7 @@ const LWAUDIO = (() => {
 
   // CHOIR: a detuned saw pair through "ahh" formant bandpasses — the
   // E.S. Posthumus chorus, rising out of the organ as battle builds.
-  function choir(freq, gain, dur = 22) {
+  function choir(freq, gain, dur = 22) {       // (dur in seconds)
     const t = ctx.currentTime;
     const g = ctx.createGain(); g.gain.value = 0;
     g.gain.linearRampToValueAtTime(gain, t + 5);
@@ -100,7 +124,7 @@ const LWAUDIO = (() => {
       const fg = ctx.createGain(); fg.gain.value = fa;
       mix.connect(bp).connect(fg).connect(g);
     }
-    g.connect(musicBus);
+    g.connect(padBus);
     return g;
   }
 
@@ -119,7 +143,7 @@ const LWAUDIO = (() => {
     activeGains = [];
     chordIdx = (chordIdx + (Math.random() < 0.75 ? 1 : CHORDS.length - 1)) % CHORDS.length;
     const semis = CHORDS[chordIdx];
-    voices = semis.map((s, i) => organ(f(s), i === 0 ? 0.16 : 0.10 - i * 0.015));
+    voices = semis.map((s, i) => organ(f(s), i === 0 ? 0.16 : 0.10 - i * 0.015, 4, 22, i === 0));
     activeGains.push(...voices.map(v => v.g));
     // the chorus swells with the war: barely-there at peace, full voice in battle
     const ch = 0.035 + 0.11 * sig.intensity + 0.05 * (sig.doom ? 1 : 0);
@@ -178,18 +202,21 @@ const LWAUDIO = (() => {
     g.gain.setValueAtTime(0, t);
     g.gain.linearRampToValueAtTime(amp, t + 0.02);
     g.gain.setTargetAtTime(0, t + 0.03, 0.5);
-    const dl = ctx.createDelay(); dl.delayTime.value = 0.31;
-    const fb = ctx.createGain(); fb.gain.value = 0.35;
-    o.connect(g); g.connect(musicBus);
-    g.connect(dl); dl.connect(fb).connect(dl); dl.connect(musicBus);
+    o.connect(g); g.connect(musicBus); g.connect(echoIn);
     o.start(t); o.stop(t + 4);
   }
 
   // TAIKO: ceremonial hits — a pitch-dropping low sine + a skin-noise burst.
   // Silent at peace; the pattern wakes and quickens as the battle builds
   // (or while a Doom well is open — dread has a drum).
-  function taiko(strength, low = 1) {
+  function duck(amount = 0.68) {               // drums get a pocket in the pads
     const t = ctx.currentTime;
+    padBus.gain.setTargetAtTime(amount, t, 0.015);
+    padBus.gain.setTargetAtTime(1.0, t + 0.09, 0.22);
+  }
+  function taiko(strength, low = 1, when = null) {
+    const t = when ?? ctx.currentTime;
+    if (strength > 0.6) duck();
     const o = ctx.createOscillator(); o.type = "sine";
     o.frequency.setValueAtTime(66 * low, t);
     o.frequency.exponentialRampToValueAtTime(34 * low, t + 0.32);
@@ -205,6 +232,39 @@ const LWAUDIO = (() => {
     bp.frequency.value = 190; bp.Q.value = 1.1;
     const ng = ctx.createGain(); ng.gain.value = 0.5 * strength;
     src.connect(bp).connect(ng).connect(musicBus); src.start(t);
+  }
+  // MATCH RESOLUTION: the score finishes the story instead of stopping.
+  // win: one great drum + an open-fifth home cadence with the choir cresting;
+  // lose: the dread interval (b2) sinking home, low and drumless;
+  // another human won: the win cadence, softer — one fanfare per room.
+  function resolveEnd(outcome) {
+    if (!ctx || !enabled) return;
+    const now = ctx.currentTime;
+    coda = now + 7;
+    activeGains.forEach(retire); activeGains = [];
+    const scale = outcome === "human" ? 0.6 : 1.0;
+    if (outcome === "lose") {
+      for (const [semi, base, gn] of [[1, 55, 0.12], [1, 110, 0.10]]) {
+        const o = ctx.createOscillator(); o.type = "sine";
+        o.frequency.setValueAtTime(f(semi, base), now);
+        o.frequency.setTargetAtTime(f(0, base), now + 0.8, 1.1);  // b2 sinks home
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0, now);
+        g.gain.linearRampToValueAtTime(gn, now + 0.5);
+        g.gain.setTargetAtTime(0, now + 4.5, 1.6);
+        const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 500;
+        o.connect(g).connect(lp).connect(musicBus);
+        o.start(now); o.stop(now + 10);
+      }
+      return;
+    }
+    taiko(1.0 * scale, 0.8);
+    const cadence = [[-12, 0.18], [0, 0.14], [7, 0.10], [12, 0.08], [19, 0.06]];
+    for (const [semi, gn] of cadence) {
+      const v = organ(f(semi), gn * scale, 0.4, 10, semi === -12);
+      activeGains.push(v.g);
+    }
+    activeGains.push(choir(f(12) * 2, 0.16 * scale, 10));
   }
 
   // FLOW: the sound of the swarm itself moving — a looping noise bed whose
@@ -223,6 +283,11 @@ const LWAUDIO = (() => {
     for (let i = 0; i < len; i++) {
       last = 0.985 * last + 0.07 * (Math.random() * 2 - 1);   // much deeper red
       d[i] = last * 3.2;
+    }
+    const F = (ctx.sampleRate * 0.25) | 0;     // seam crossfade: kill the loop thump
+    for (let i = 0; i < F; i++) {
+      const w = i / F;
+      d[len - F + i] = (1 - w) * d[len - F + i] + w * d[i];
     }
     const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true;
     flowLP = ctx.createBiquadFilter(); flowLP.type = "lowpass"; flowLP.frequency.value = 300;
@@ -256,11 +321,12 @@ const LWAUDIO = (() => {
     const t = ctx.currentTime;
     if (t - lastThud < 0.18) return;
     lastThud = t;
+    if (strength > 0.5) duck(0.72);
     const o = ctx.createOscillator(); o.type = "sine";
     o.frequency.setValueAtTime(150, t);
     o.frequency.exponentialRampToValueAtTime(48, t + 0.28);
     const g = ctx.createGain();
-    g.gain.setValueAtTime(Math.min(0.5, 0.1 + strength * 0.4), t);
+    g.gain.setValueAtTime(Math.min(0.35, 0.08 + strength * 0.27), t);
     g.gain.setTargetAtTime(0, t + 0.05, 0.12);
     o.connect(g).connect(sfxBus); o.start(t); o.stop(t + 0.8);
   }
@@ -277,7 +343,7 @@ const LWAUDIO = (() => {
     o.connect(g).connect(sfxBus); o.start(t); o.stop(t + 0.3);
   }
   function stanceTap(i) {                       // per-stance confirmation note
-    if (!ctx) return;
+    if (!ctx || !enabled) return;
     const t = ctx.currentTime;
     const o = ctx.createOscillator(); o.type = "sine";
     o.frequency.value = f(PENTA[i % PENTA.length], 330);
@@ -344,11 +410,6 @@ const LWAUDIO = (() => {
       vib.start(when); vib.stop(when + dur + 1);
     }
   }
-  function taikoAt(when, strength, low) {      // grid-scheduled taiko
-    setTimeout(() => enabled && taiko(strength, low),
-               Math.max(0, (when - ctx.currentTime) * 1000 - 5));
-  }
-
   let lastT = 0, wasDone = false;
   function update(s) {
     if (!ctx || !enabled) return;
@@ -362,24 +423,25 @@ const LWAUDIO = (() => {
       const beat = (st16 / 4) | 0, sub16 = st16 % 4;
       const bar = (gridStep / 16) | 0;
       // harmonic rhythm doubles at climax: chords every bar, else every 2
-      if (st16 === 0 || (drive > 0.55 && st16 === 16)) {
+      const inCoda = now < coda;                 // resolution playing: war machine rests
+      if (!inCoda && (st16 === 0 || (drive > 0.55 && st16 === 16))) {
         if ((bar % 2 === 0) || drive > 0.55) nextChord();
       }
       // the GALLOP: hit on 1, and-a (sub16 0, 2, 3) — rest on the e
-      if (drive > 0.05 && sub16 !== 1) {
+      if (!inCoda && drive > 0.05 && sub16 !== 1) {
         const accent = sub16 === 0;
         spicc(OSTP[beat], nextNote, (accent ? 1 : 0.62) * (0.055 + 0.105 * drive));
         if (drive > 0.5 && accent) spicc(OSTP[beat] + 12, nextNote, 0.04 + 0.05 * drive);
       }
-      // TAIKO: downbeat boom + backbeat + pickup; relentless at climax
-      if (drive > 0.1) {
-        if (st16 === 0) taikoAt(nextNote, Math.min(1, 0.5 + drive), 1);
-        if (st16 === 16) taikoAt(nextNote, 0.6 * Math.min(1, 0.5 + drive), 1.2);
-        if (drive > 0.35 && (st16 === 8 || st16 === 24)) taikoAt(nextNote, 0.4 * drive, 1.5);
-        if (drive > 0.6 && st16 === 30) taikoAt(nextNote, 0.5 * drive, 1.4);
+      // TAIKO on the grid, sample-accurate (setTimeout flammed 20-50ms on phones)
+      if (!inCoda && drive > 0.1) {
+        if (st16 === 0) taiko(Math.min(1, 0.5 + drive), 1, nextNote);
+        if (st16 === 16) taiko(0.6 * Math.min(1, 0.5 + drive), 1.2, nextNote);
+        if (drive > 0.35 && (st16 === 8 || st16 === 24)) taiko(0.4 * drive, 1.5, nextNote);
+        if (drive > 0.6 && st16 === 30) taiko(0.5 * drive, 1.4, nextNote);
       }
       // the THEME at full battle, riding the pulse
-      if (drive > 0.4 && gridStep >= melNext) {
+      if (!inCoda && drive > 0.4 && gridStep >= melNext) {
         const [semi, beats] = THEME[melPos % THEME.length];
         lead(semi, nextNote, beats * SPB, 0.075 + 0.05 * drive);
         melNext = gridStep + beats * 4;
@@ -396,7 +458,7 @@ const LWAUDIO = (() => {
     sub.g.gain.setTargetAtTime(0.13 + 0.11 * sig.intensity, now, 1.5);
     doomDrone.gain.setTargetAtTime(sig.doom ? 0.20 : 0, now, sig.doom ? 1.2 : 0.6);
     maelWash.gain.setTargetAtTime(sig.mael ? 0.12 : 0, now, 0.8);
-    if (s.done && !wasDone) stinger(s.won);
+    if (s.done && !wasDone) resolveEnd(s.outcome || (s.won ? "win" : "lose"));
     wasDone = s.done;
   }
 
@@ -407,10 +469,11 @@ const LWAUDIO = (() => {
   }
   function setVolumes(m, sx) {
     musicVol = m; sfxVol = sx;
-    if (musicBus) musicBus.gain.value = m;
-    if (sfxBus) sfxBus.gain.value = sx;
+    if (!ctx) return;
+    musicBus.gain.setTargetAtTime(m, ctx.currentTime, 0.04);
+    sfxBus.gain.setTargetAtTime(sx, ctx.currentTime, 0.04);
   }
-  return { update, thud, blip, stanceTap, setFlow, setEnabled, setVolumes,
+  return { update, thud, blip, stanceTap, setFlow, taiko, setEnabled, setVolumes,
            get enabled() { return enabled; },
            get debug() { return { state: ctx && ctx.state, beat: gridStep, music: musicBus && musicBus.gain.value }; } };
 })();

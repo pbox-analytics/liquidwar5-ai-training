@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Liquid War — play the AI</title>
 <link rel="manifest" href="manifest.json" />
 <meta name="theme-color" content="#0b0e14" />
@@ -23,6 +23,16 @@
   #tick { min-width: 5ch } #fps { min-width: 4ch } #flood { min-width: 3ch } #spread { min-width: 7ch }
   #mapname { min-width: 7ch; text-align: left }
   #stancePill { display: inline-block; min-width: 12ch; text-align: center; font-weight: 700 }
+  /* the DOMINANCE BAR: territory share per team — the one instrument that says
+     who is winning, readable from across the couch */
+  #domwrap { display: inline-flex; align-items: center; gap: 8px; }
+  #dombar { position: relative; display: inline-flex; width: 320px; height: 12px;
+            border-radius: 6px; overflow: hidden; background: #11151f;
+            box-shadow: inset 0 0 0 1px #232a3a; transition: box-shadow .4s; }
+  #dombar .seg { height: 100%; transition: width .3s ease; position: relative; }
+  #dombar .notch { position: absolute; top: 0; bottom: 0; width: 1px; background: #ffffff88; }
+  #dombar .youline { position: absolute; left: 10%; bottom: 0; height: 2px; background: #fff; transition: left .3s, width .3s; }
+  #domword { font-size: 13px; font-weight: 700; min-width: 7ch; }
   #spinPill { display: inline-block; min-width: 8ch; text-align: center }
   #teams { font-variant-numeric: tabular-nums }
   #teams { display: flex; gap: 8px; }
@@ -40,7 +50,28 @@
             letter-spacing: .12em; text-shadow: 0 0 24px #000, 0 0 60px currentColor; z-index: 4; }
   #netveil { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
              background: #0b0e14cc; z-index: 8; font-size: 18px; color: #9aa4b2; }
+  #intro { position: absolute; inset: 0; z-index: 7; background: #0b0e14e6;
+           display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 26px; }
+  #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 96px; z-index: 11;
+           background: #11151f; border: 1px solid #2a3550; border-radius: 12px; padding: 10px 18px;
+           font-size: 15px; display: none; box-shadow: 0 6px 24px #000a; }
+  #banner { flex-direction: column; gap: 6px; }
+  #banner.show .headline { animation: bannerIn .65s cubic-bezier(.16,1,.3,1) both; }
+  @keyframes bannerIn { 0% { transform: scale(1.55); filter: blur(12px); opacity: 0; letter-spacing: .34em }
+                        100% { transform: scale(1); filter: blur(0); opacity: 1; letter-spacing: .12em } }
+  #banner .card { font-size: 16px; color: #9aa4b2; text-align: center; line-height: 1.9;
+                  text-shadow: 0 0 12px #000; opacity: 0; transition: opacity .8s; font-weight: 400;
+                  letter-spacing: normal; pointer-events: auto; }
+  #banner.show .card { opacity: 1; transition-delay: .8s; }
+  #banner .card button { font-size: 17px; min-height: 52px; padding: 8px 22px; margin: 6px;
+                         border-radius: 12px; font-weight: 700; }
+  #otpill { display: none; position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+            z-index: 4; background: #40222288; border: 1px solid #7a3a3a; color: #ffb4a8;
+            border-radius: 10px; padding: 4px 12px; font-size: 13px; }
   canvas { touch-action: none; }   /* the finger steers — no scroll/zoom stealing */
+  html, body { overscroll-behavior: none; }      /* pull-to-refresh can't kill a match */
+  #sheet { overscroll-behavior: contain; }
+  button, select, .pill { touch-action: manipulation; }  /* stance re-tap != double-tap zoom */
   #touchbar, #sheet, #sheetScrim { display: none; }
   /* ---- APP LAYOUT (touch devices): battlefield-first, thumb-zone controls,
          everything configurable in a slide-up sheet ---- */
@@ -48,12 +79,14 @@
     body { padding: 0; gap: 0; min-height: 100dvh; }
     h1, #help, #visuals { display: none; }
     #hud { position: sticky; top: 0; z-index: 5; width: 100%; background: #0b0e14ee;
-           padding: 6px 8px calc(6px) 8px; gap: 8px; justify-content: space-between;
-           border-bottom: 1px solid #1b2233; }
+           padding: calc(6px + env(safe-area-inset-top)) 8px 6px 8px; gap: 8px;
+           justify-content: space-between; border-bottom: 1px solid #1b2233; }
     #hud .pill { border: 0; background: none; padding: 2px 4px; }
     #hud select, #hud button, #hud input, #tick, #flood, #spread, #mapname { display: none; }
-    #hud #stancePill, #hud #teams, #hud #fps { display: inline-block; }
-    #teams { display: flex !important; }
+    #hud #stancePill, #hud #domwrap { display: inline-flex; }
+    #hud #teams, #hud #fps { display: none; }       /* counts -> the bar; fps -> ?debug=1 */
+    #domwrap { flex: 1; }
+    #dombar { width: auto; flex: 1; }
     canvas { border: 0; border-radius: 0; max-width: 100vw; }
     #touchbar { display: flex; position: fixed; bottom: 0; left: 0; right: 0; z-index: 6;
                 gap: 4px; padding: 8px 6px calc(8px + env(safe-area-inset-bottom)) 6px;
@@ -100,6 +133,9 @@
     <span class="pill">spread <b id="spread">—</b></span>
     <span class="pill">map <b id="mapname">—</b></span>
     <span class="pill" id="stancePill">Swarm</span>
+    <span id="domwrap" title="">
+      <span id="dombar"></span><span id="domword"></span>
+    </span>
     <span class="pill" id="spinPill">spin ↻</span>
     <span class="pill" id="teams"></span>
     <select id="mode">
@@ -129,14 +165,22 @@
            title="LAN play: open the same room name on another machine to join as the next team"
            style="background:#1b2233;color:#cdd6f4;border:1px solid #2a3550;border-radius:8px;padding:6px 10px">
     <button id="invite" title="Copy a join link for another player on your network">🔗 invite</button>
-    <button id="sound" title="Procedural score + battle sound (S)">🔇</button>
+    <button id="sound" title="Procedural score + battle sound (M)">🔇</button>
     <button id="reset">New game</button>
     <button id="fs" title="Fullscreen (F)">⛶</button>
   </div>
   <div id="stage">
     <canvas id="c" width="110" height="80"></canvas>
     <div id="banner"></div>
+    <div id="otpill">⚔ OVERTIME — fronts weaken</div>
     <div id="netveil">⟳ reconnecting…</div>
+    <div id="intro">
+      <div style="font-size:clamp(38px,9vw,96px);font-weight:800;letter-spacing:.1em;
+                  text-shadow:0 0 40px #2f7bff66">LIQUID WAR</div>
+      <div id="introTeach" style="font-size:16px;line-height:2;color:#9aa4b2;text-align:center"></div>
+      <button id="introPlay" style="min-height:56px;width:60%;max-width:340px;font-size:20px;
+              font-weight:700;border-radius:14px;background:#1d2c4f;border-color:#3d59a8">▶ PLAY</button>
+    </div>
   </div>
   <div id="touchbar">
     <span id="loadoutBar" style="display:flex;flex:1;gap:6px"></span>
@@ -189,8 +233,9 @@
 // install prompt over HTTPS — behind plain http this is inert but harmless.
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 </script>
-<script src="audio.js?v=1781239812"></script>
-<script src="gl.js?v=1781239130"></script>
+<div id="toast"></div>
+<script src="audio.js?v=1781241440"></script>
+<script src="gl.js?v=1781241440"></script>
 <script>
 const COLORS = ["#2f7bff","#ff3a2e","#4ade80","#fbbf24","#c084fc","#fb923c"]; // team 0 = you (vivid blue) / team 1 = warm red
 const RGB = COLORS.map(h => [parseInt(h.slice(1,3),16)/255, parseInt(h.slice(3,5),16)/255, parseInt(h.slice(5,7),16)/255]);
@@ -233,7 +278,7 @@ let curPT = null, prevPT = null, curSt = null;
 let flashes = [];    // conversion flashes {x,y,life,col} popped when a mote changes team
 const MAXFLASH = 120;  // cap spawns per server frame (conversions can be hundreds)
 let tLast = 0, dtServer = 22;                          // ms between server frames (EMA)
-let lastTick = -1, lastMap = "";
+let lastTick = -1, lastMap = "", lastNote = "";
 let doomA = 0, doomR = 5, doomLvl = 1;                 // black-hole strength/radius (animated)
 let whirlA = 0;                                        // maelstrom whirlpool strength (animated)
 let lastFrameT = 0;
@@ -261,6 +306,15 @@ let curPos = null, pendingGrid = null;
 let flushSt = Array(6).fill(null);          // {x, y, t0, amp}
 let convEMA = 0;                            // combat intensity (drives the score)
 let flowEMA = 0;                            // your swarm's motion (drives the flow sound)
+// match stats for the result card
+let mDealt = 0, mTaken = 0, mBite = 0, mPeak = 0;
+let toastT = null;
+function toast(msg, ms = 3200) {
+  const el = document.getElementById("toast");
+  el.textContent = msg; el.style.display = "block";
+  clearTimeout(toastT);
+  toastT = setTimeout(() => el.style.display = "none", ms);
+}
 let cursSpd = new Float32Array(6);
 let prevCursorsHud = null, prevHudT = 0;
 function processGrid(g) {              // walls mask (cheap ~5Hz re-upload) + contact sparks
@@ -310,7 +364,10 @@ function onFrame(buf) {                                 // a fresh binary frame 
       conv++;
       const lt = prevPT[i];                       // the team that BLED this mote
       if (lt < 6) { lostN[lt]++; lostX[lt] += curPos[2*i+1]; lostY[lt] += curPos[2*i]; }
+      if (curPT[i] === MYT) mDealt++;
+      if (lt === MYT) mTaken++;
     }
+    for (let t = 0; t < TEAMS; t++) if (t !== MYT && lostN[t] > mBite) mBite = lostN[t];
     // combat flush: heavy bleeding spawns/reinforces a red shockwave from the wound
     for (let t = 0; t < TEAMS; t++) {
       if (lostN[t] >= 10) {
@@ -338,12 +395,53 @@ function onFrame(buf) {                                 // a fresh binary frame 
   }
 }
 function onHud(st) {                                    // the JSON channel: HUD + cursors
+  if (st.error === "room_full") {
+    ws._intentional = true;
+    document.getElementById("netveil").style.display = "none";
+    const bn = document.getElementById("banner");
+    bn.style.display = "flex"; bn.style.flexDirection = "column"; bn.style.pointerEvents = "auto";
+    bn.style.color = "#9aa4b2"; bn.style.fontSize = "20px"; bn.style.letterSpacing = "0";
+    bn.innerHTML = `Room “${st.room}” is full (${st.players}/${st.seats} seats).<br>` +
+                   `<span style="font-size:15px">Ask the host to start a bigger game.</span><br>` +
+                   `<button onclick="document.getElementById('room').value='';connect();` +
+                   `this.parentElement.style.display='none'" style="margin-top:14px">OK — play solo</button>`;
+    return;
+  }
   if (st.you !== undefined) MYT = st.you;
   const sized = (st.w !== W || st.h !== H);
   W = st.w; H = st.h; TEAMS = st.teams; curSt = st;
   if (sized) sizeCanvas();
-  if (st.tick < lastTick || st.map !== lastMap) { flashes = []; particles = []; }   // new game
+  if (st.tick < lastTick || st.map !== lastMap) {
+    flashes = []; particles = [];
+    mDealt = mTaken = mBite = mPeak = 0;          // fresh card per match
+  }
   lastTick = st.tick; lastMap = st.map;
+  if (st.fighters) mPeak = Math.max(mPeak, st.fighters[MYT] / Math.max(1, st.fighters.reduce((a, b) => a + b, 0)));
+  // 3-2-1-GO countdown (server freezes the armies; everyone starts together)
+  const bn0 = document.getElementById("banner");
+  if (st.countdown) {
+    bn0.style.display = "flex"; bn0.classList.remove("show");
+    bn0.style.color = "#cdd6f4"; bn0.style.pointerEvents = "none";
+    if (bn0.dataset.cd !== String(st.countdown)) {
+      bn0.dataset.cd = String(st.countdown);
+      bn0.innerHTML = `<div class="headline">${st.countdown}</div>`;
+      LWAUDIO.taiko(0.7, 1);
+    }
+  } else if (bn0.dataset.cd) {
+    delete bn0.dataset.cd;
+    bn0.innerHTML = `<div class="headline">GO!</div>`;
+    LWAUDIO.taiko(1.0, 0.9);
+    setTimeout(() => { if (!curSt || !curSt.done) bn0.style.display = "none"; }, 700);
+  }
+  document.getElementById("otpill").style.display = st.overtime ? "block" : "none";
+  if (st.note && st.note.ev && lastNote !== st.note.ev + st.note.team) {
+    lastNote = st.note.ev + st.note.team;
+    const who = "P" + (st.note.team + 1), col = ["BLUE","RED","GREEN","YELLOW","PURPLE","ORANGE"][st.note.team] || "";
+    if (st.note.ev === "join_restart") toast(`${who} joined — they're ${col} — new round!`);
+    else if (st.note.ev === "join") toast(`${who} joined — they're ${col}`);
+    else if (st.note.ev === "leave") toast(`${who} left — the AI takes their army`);
+    if (st.note.ev.startsWith("join")) LWAUDIO.stanceTap(st.note.team);
+  }
   if (pendingGrid && pendingGrid.length === W * H) { processGrid(pendingGrid); pendingGrid = null; }
   // cursor speeds (cells/s, smoothed) drive the bow-wave wake
   const nowH = performance.now();
@@ -459,6 +557,12 @@ function frame() {                                     // 60fps interpolated ren
   // cursors: soft halo + pulsating ring + white core (drawn crisp, post-bloom)
   let ck = 0;
   const beat = 1 + 0.3 * Math.sin(performance.now() / 170);
+  // ROUT BEACONS: the hunt for the last 4% was never a fight, it was a search —
+  // a dying army's remnant pulses so the endgame concludes
+  if (curSt.rout) for (const [rt, ry, rx] of curSt.rout) {
+    ck = pushFx(curArr, ck, rx + .5, ry + .5, 16 * beat, 1, RGB[rt % RGB.length], 0.5);
+    ck = pushFx(curArr, ck, rx + .5, ry + .5, 26 * beat, 1, RGB[rt % RGB.length], 0.18);
+  }
   curSt.cursors.forEach((c, t) => {
     if (!curSt.alive[t]) return;
     if (doomA > 0.25 && t === (aiDoom ? aiDoom[0] : MYT)) return;  // the black hole IS that team's cursor
@@ -494,22 +598,54 @@ function frame() {                                     // 60fps interpolated ren
   }
   // the score listens to the battle
   const myF = curSt.fighters ? curSt.fighters[MYT] : 0;
-  const totF = curSt.fighters ? curSt.fighters.reduce((a, b) => a + b, 0) : 1;
-  const won = curSt.fighters && curSt.fighters.indexOf(Math.max(...curSt.fighters)) === MYT;
+  const maxF = curSt.fighters ? Math.max(...curSt.fighters) : 1;
+  const won = curSt.fighters && curSt.fighters.indexOf(maxF) === MYT;
   LWAUDIO.update({
-    intensity: Math.min(1, convEMA / 90),
-    losing: Math.max(0, 0.5 - myF / Math.max(1, totF)) * 2,
+    intensity: curSt.overtime ? Math.max(0.5, Math.min(1, convEMA / 90)) : Math.min(1, convEMA / 90),
+    // deficit vs the LEADER, not vs 50% (in a 4-seat room everyone is under
+    // 50% — the dread voice droned through every multi-game even while winning)
+    losing: myF >= maxF ? 0 : Math.min(1, (maxF - myF) / Math.max(1, maxF) * 1.5),
     doom: (curSt.stance === "Doom" || curSt.ai_doom) ? 1 : 0,
     mael: (curSt.stance === "Maelstrom" || curSt.ai_mael) ? 1 : 0,
     done: !!curSt.done, won,
+    outcome: !curSt.done ? null
+      : (curSt.winner ?? -1) === MYT ? "win"
+      : (curSt.seats || []).includes(curSt.winner) ? "human" : "lose",
   });
-  // end-of-game banner: VICTORY in your colour, DEFEAT in ash
+  // THE POST-MATCH MOMENT: result card with the story of the match,
+  // edge-triggered entrance, fireworks from the winner's cursor
   const bn = document.getElementById("banner");
-  if (curSt.done) {
-    bn.style.display = "flex";
-    bn.textContent = won ? "VICTORY" : "DEFEAT";
-    bn.style.color = won ? COLORS[MYT % COLORS.length] : "#6b7280";
-  } else bn.style.display = "none";
+  if (curSt.done && !bn.classList.contains("show") && !bn.dataset.cd) {
+    const w = curSt.winner ?? curSt.fighters.indexOf(Math.max(...curSt.fighters));
+    const youWon = w === MYT;
+    const humanWon = !youWon && (curSt.seats || []).includes(w);
+    const names = ["BLUE", "RED", "GREEN", "YELLOW", "PURPLE", "ORANGE"];
+    const head = youWon ? "VICTORY" : humanWon ? `${names[w]} WINS` : "DEFEAT";
+    const col = youWon || humanWon ? COLORS[w % COLORS.length] : "#6b7280";
+    const mins = Math.floor(curSt.tick / 60 / 60), secs = Math.floor(curSt.tick / 60) % 60;
+    bn.style.display = "flex"; bn.style.pointerEvents = "none"; bn.style.color = col;
+    bn.innerHTML =
+      `<div class="headline">${head}</div>` +
+      `<div class="card">` +
+      `“${curSt.map}” · ${mins}:${String(secs).padStart(2, "0")}<br>` +
+      `Converted ${mDealt.toLocaleString()} · Lost ${mTaken.toLocaleString()}<br>` +
+      (mBite > 20 ? `Biggest bite: ${mBite} motes<br>` : "") +
+      `Peak control: ${Math.round(mPeak * 100)}%<br>` +
+      `<button onclick="ws&&ws.send(JSON.stringify({reset:true}))">⚔ Rematch</button>` +
+      `<button onclick="ws&&(ws.send(JSON.stringify({map:-1})))">🗺 New map</button>` +
+      `</div>`;
+    bn.classList.add("show");
+    // fireworks: sparks fountain from the winner's cursor in their colour
+    const wc = curSt.cursors[w];
+    for (let i = 0; i < 250 && particles.length < MAXP; i++) {
+      const a = Math.random() * 6.283, sp = 0.8 + Math.random() * 2.6;
+      particles.push({ x: wc[1] + .5, y: wc[0] + .5, vx: Math.cos(a) * sp,
+                       vy: Math.sin(a) * sp - 0.8, life: 0.7 + Math.random() * 0.6,
+                       col: RGB[w % RGB.length] });
+    }
+  } else if (!curSt.done && bn.classList.contains("show")) {
+    bn.classList.remove("show"); bn.style.display = "none";
+  }
   R.render({
     f, time, teams: TEAMS,
     beats, flush: flushArr, cursSpd, life: pLife,
@@ -541,6 +677,41 @@ function updateHUD(st) {
       on && st.mode ? `${S_NAME[+b.dataset.st]} · ${st.mode}` : S_NAME[+b.dataset.st];
   });
   document.getElementById("opp").textContent = st.opponent + (st.players > 1 ? ` · ${st.players}P` : "");
+  // dominance bar: one segment per team, your segment underlined, a notch at
+  // the equal share point, a status word that needs no explanation
+  const total = Math.max(1, st.fighters.reduce((a, b) => a + b, 0));
+  const bar = document.getElementById("dombar");
+  let segs = bar.querySelectorAll(".seg");
+  if (segs.length !== st.fighters.length) {
+    bar.innerHTML = st.fighters.map((_, t) =>
+      `<span class="seg" style="background:${COLORS[t % COLORS.length]}"></span>`).join("") +
+      `<span class="notch"></span><span class="youline"></span>`;
+    segs = bar.querySelectorAll(".seg");
+  }
+  let acc = 0, myLeft = 0, myShare = 0;
+  st.fighters.forEach((fc, t) => {
+    const w = fc / total;
+    segs[t].style.width = (w * 100) + "%";
+    if (t === MYT) { myLeft = acc; myShare = w; }
+    acc += w;
+  });
+  bar.querySelector(".notch").style.left = (100 / st.fighters.length) + "%";
+  const yl = bar.querySelector(".youline");
+  yl.style.left = (myLeft * 100) + "%"; yl.style.width = (myShare * 100) + "%";
+  const lead = st.fighters.indexOf(Math.max(...st.fighters));
+  bar.style.boxShadow = Math.max(...st.fighters) / total > 0.5
+    ? `inset 0 0 0 1px #232a3a, 0 0 10px ${COLORS[lead % COLORS.length]}66`
+    : "inset 0 0 0 1px #232a3a";
+  const dw = document.getElementById("domword");
+  if (st.fighters.length === 2) {
+    dw.textContent = myShare > 0.55 ? "Winning" : myShare < 0.45 ? "Losing" : "Even";
+    dw.style.color = myShare > 0.55 ? "#4ade80" : myShare < 0.45 ? "#f87171" : "#9aa4b2";
+  } else {
+    const rank = 1 + st.fighters.filter((fc, t) => t !== MYT && fc > st.fighters[MYT]).length;
+    dw.textContent = `${rank}${["st","nd","rd"][rank-1] || "th"} of ${st.fighters.length}`;
+    dw.style.color = rank === 1 ? "#4ade80" : "#9aa4b2";
+  }
+  document.getElementById("domwrap").title = st.fighters.join(" / ");
   const tdiv = document.getElementById("teams"); tdiv.innerHTML = "";
   st.fighters.forEach((f, t) => {
     const el = document.createElement("span"); el.className = "t";
@@ -570,8 +741,9 @@ function connect() {
   curPos = null; pendingGrid = null;
   ws.onmessage = (e) => (e.data instanceof ArrayBuffer ? onFrame(e.data) : onHud(JSON.parse(e.data)));
   ws.onopen = () => { reconnectDelay = 800; document.getElementById("netveil").style.display = "none"; };
-  ws.onclose = () => {                      // phones sleep, wifi blips: come back on our own
+  ws.onclose = (evt) => {                   // phones sleep, wifi blips: come back on our own
     if (ws !== null && ws._intentional) return;
+    if (evt && evt.code === 4001) return;   // room full: the overlay explains, no retry storm
     document.getElementById("netveil").style.display = "flex";
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(5000, reconnectDelay * 1.7);
@@ -605,6 +777,33 @@ fetch("checkpoints").then(r => r.json()).then(list => {
     (navigator.clipboard ? navigator.clipboard.writeText(url) : Promise.reject())
       .then(() => { const b = document.getElementById("invite"); b.textContent = "✓ copied"; setTimeout(() => b.textContent = "🔗 invite", 1500); })
       .catch(() => prompt("Share this link:", url));
+  };
+}
+
+// ---- INTRO: the landing moment, the three-line teach, and the audio-unlock
+// gesture (the live battle behind it is a free attract mode)
+{
+  const teach = document.getElementById("introTeach");
+  if (!localStorage.getItem("lw-seen")) {
+    const move = matchMedia("(pointer: coarse)").matches
+      ? "Hold anywhere — your whole army flows to your finger."
+      : "Hold the mouse or use ← ↑ ↓ → — your army follows.";
+    teach.innerHTML =
+      `<div>You are <span style="display:inline-block;width:14px;height:14px;border-radius:3px;` +
+      `background:${COLORS[0]};vertical-align:-2px"></span> <b style="color:${COLORS[0]}">BLUE</b>.</div>` +
+      `<div>${move}</div>` +
+      `<div>Touch the enemy to convert them. Take every last drop to win.</div>`;
+  }
+  document.getElementById("introPlay").onclick = () => {
+    const first = !localStorage.getItem("lw-seen");
+    localStorage.setItem("lw-seen", "1");
+    if (localStorage.getItem("lw-sound") !== "0") setSound(true);   // sound is OPT-OUT now
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ reset: true }));
+    document.getElementById("intro").remove();
+    const bn = document.getElementById("banner");
+    bn.style.display = "flex"; bn.style.color = "#cdd6f4"; bn.textContent = "GO!";
+    setTimeout(() => { if (bn.textContent === "GO!") bn.style.display = "none"; }, 800);
+    if (first && LWAUDIO.enabled) toast("music on — 🔇 to mute");
   };
 }
 
@@ -654,9 +853,10 @@ const volSync = () => LWAUDIO.setVolumes(parseFloat(document.getElementById("vMu
                                          parseFloat(document.getElementById("vSfx").value));
 document.getElementById("vMusic").oninput = volSync;
 document.getElementById("vSfx").oninput = volSync;
-// sound prefs restore on the first user gesture (browser autoplay policy)
-if (localStorage.getItem("lw-sound") === "1")
-  window.addEventListener("pointerdown", () => setSound(true), { once: true });
+// sound prefs restore on the first user gesture (browser autoplay policy);
+// OPT-OUT: the score is the product's voice — silence is the explicit choice
+if (localStorage.getItem("lw-sound") !== "0")
+  window.addEventListener("pointerdown", () => { if (!LWAUDIO.enabled) setSound(true); }, { once: true });
 function renderLoadout() {
   const bar = document.getElementById("loadoutBar");
   bar.innerHTML = "";
@@ -720,18 +920,23 @@ function sendDir() {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ dir }));
 }
 window.addEventListener("keydown", (e) => {
+  if (e.repeat) return;                            // every toggle is edge-triggered
+  if (e.target !== document.body && e.target !== cv && ("value" in e.target)) return;  // typing != hotkeys
   if (e.key >= "1" && e.key <= "9") {             // number row selects a held STANCE (0..8)
     sendStance(parseInt(e.key) - 1);
     return;
   }
-  if (e.key === "s" || e.key === "S") { setSound(!LWAUDIO.enabled); return; }   // sound toggle
+  if (e.key === "m" || e.key === "M") { setSound(!LWAUDIO.enabled); return; }   // sound toggle (S is WASD!)
   if (e.key === "t" || e.key === "T") { trails = !trails; return; }   // toggle motion trails
   if (e.key === "f" || e.key === "F") { toggleFullscreen(); return; }  // big-screen mode
   if (e.key === "q" || e.key === "Q") { spin = spin === -1 ? 0 : -1; sendSpin(); return; }  // orbit CCW / off
   if (e.key === "e" || e.key === "E") { spin = spin === 1 ? 0 : 1; sendSpin(); return; }    // orbit CW / off
   if (e.key in KEYS) { KEYS[e.key] = 1; e.preventDefault(); sendDir(); }
 });
-window.addEventListener("keyup",   (e) => { if (e.key in KEYS) { KEYS[e.key] = 0; e.preventDefault(); sendDir(); } });
+window.addEventListener("keyup",   (e) => {
+  if (e.target !== document.body && e.target !== cv && ("value" in e.target)) return;
+  if (e.key in KEYS) { KEYS[e.key] = 0; e.preventDefault(); sendDir(); }
+});
 document.getElementById("reset").onclick = () => ws && ws.send(JSON.stringify({reset:true}));
 document.getElementById("mode").onchange = connect;
 document.getElementById("opponent").onchange = connect;

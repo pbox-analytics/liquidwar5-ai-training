@@ -248,6 +248,9 @@ class GameSession:
         if ai_stance is not None:                  # AI fills every seat without a human
             apply_stances(self.engine, ai_stance, dydx, human_teams=human_set)
             self._ai_fx_markers(ai_stance, human_set)
+            ot = getattr(self, "_overtime", 1.0)
+            if ot > 1.0:
+                self.engine._surge.mul_(ot)            # overtime: fronts melt faster, for all
             # AI Doom holders glide slow too (parity with the human dial)
             spd = getattr(self.engine, "_cursor_speed_t", None)
             if spd is not None:
@@ -644,6 +647,9 @@ class Room:
         self.closed = False
         self.map_choice: int | None = None
         self.reset_flag = False
+        self.note = None                    # join/leave toast payload
+        self.note_ttl = 0
+        self.freeze = 0                     # countdown ticks before a round starts
 
     def join(self, sock: WebSocket) -> Player | None:
         free = [t for t in range(self.session.engine.T) if t not in self.players]
@@ -651,13 +657,26 @@ class Room:
             return None
         p = Player(sock, free[0])
         p.task = asyncio.create_task(p.sender())
+        had_humans = bool(self.players)
         self.players[p.team] = p
+        # FAIR JOIN: landing mid-match means inheriting whatever shape the AI
+        # left that army in. Past a short grace window, a joiner triggers a
+        # fresh round (maps are point-symmetric — restarts are fair).
+        if had_humans and (self.session.engine.tick > 8 * TICK_HZ or self.session.done):
+            self.reset_flag = True
+            self.note = {"ev": "join_restart", "team": p.team}
+        else:
+            self.note = {"ev": "join", "team": p.team}
+        self.note_ttl = 90
         return p
 
     def leave(self, team: int) -> None:
         p = self.players.pop(team, None)    # the seat reverts to AI control
         if p is not None and p.task is not None:
             p.task.cancel()
+        if self.players:
+            self.note = {"ev": "leave", "team": team}
+            self.note_ttl = 90
         if not self.players:
             self.closed = True
 
@@ -712,12 +731,18 @@ class Room:
                 session.engine._map_choice = self.map_choice   # picked map (None=random)
                 session.reset(); self.reset_flag = False; hold = 0; logged = False
                 clear_knobs(session.engine)
+                self.freeze = 3 * int(TICK_HZ)         # 3-2-1-GO: everyone starts on GO
             elif session.done:
                 hold += 1
-                if hold > TICK_HZ * 2.5:               # show the result ~2.5s, then new game
+                # POST-MATCH MOMENT: hold the result for ~20s — long enough to
+                # read the card and hit Rematch (any {reset} ends it early)
+                if hold > TICK_HZ * 20:
                     session.engine._map_choice = self.map_choice
                     session.reset(); hold = 0; logged = False
                     clear_knobs(session.engine)
+                    self.freeze = 3 * int(TICK_HZ)
+            elif self.freeze > 0:
+                self.freeze -= 1                       # armies hold their breath
             else:
                 _e = session.engine
                 clear_knobs(_e)
@@ -731,11 +756,41 @@ class Room:
                         _e, p.team, p.ctrl, p.spin_sign, p.last_dir, p.c0_hist, n)
                     humans[p.team] = (p.ctrl["target"], p.ctrl["dir"])
                 _e._cursor_speed_t = speeds                   # per-seat (Doom slows ITS holder only)
+                # OVERTIME SURGE: equal-mass conversion combat can trench-war
+                # forever. Past 3:00, damage escalates (compounding per minute,
+                # capped 2.5x) so games CONCLUDE through normal play.
+                ot_min = (session.engine.tick / TICK_HZ - 180.0) / 60.0
+                self.overtime = ot_min > 0
+                session._overtime = min(2.5, 1.0 + 0.15 * ot_min) if self.overtime else 1.0
                 session.step(humans)
             blob = session.frame_blob()
             st = session.state(); st["fps"] = round(fps, 1)
             st["players"] = len(players)
             st["seats"] = sorted(self.players)            # which teams are humans (lobby chips)
+            if self.freeze > 0:
+                st["countdown"] = (self.freeze + int(TICK_HZ) - 1) // int(TICK_HZ)
+            if getattr(self, "overtime", False) and not session.done:
+                st["overtime"] = True
+            if session.done:
+                st["winner"] = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])
+            else:
+                # ROUT BEACON: a team under 4% of starting mass broadcasts its
+                # remnant centroid — endgame drag was never killing the last
+                # drops, it was FINDING them on a 384x576 board
+                e2 = session.engine
+                routs = []
+                for t, n in enumerate(st["fighters"]):
+                    if 0 < n < 0.04 * e2.fighters_per_team:
+                        m = (e2.fteam[0] == t)
+                        routs.append([t, float(e2.fy[0, m].float().mean()),
+                                      float(e2.fx[0, m].float().mean())])
+                if routs:
+                    st["rout"] = routs
+            if self.note is not None and self.note_ttl > 0:
+                st["note"] = self.note
+                self.note_ttl -= 1
+                if self.note_ttl <= 0:
+                    self.note = None
             for p in players:
                 p.c0_hist.append(list(st["cursors"][p.team])); del p.c0_hist[:-7]   # comet aim window
             if session.done and not logged:
@@ -788,14 +843,24 @@ async def ws(sock: WebSocket) -> None:
     key = q.get("room") or f"~solo-{id(sock)}"
     room = ROOMS.get(key)
     if room is None or room.closed:
+        size = q.get("size", "full")
+        teams = int(q.get("teams", "2"))
+        if not key.startswith("~solo-"):
+            # NAMED rooms default to family size — empty seats are AI until a
+            # human claims one, so the bigger board costs nothing socially and
+            # the third player stops bouncing off a silently-full 1v1.
+            floor = int(os.environ.get("LW_ROOM_SEATS", "4" if size == "small" else "3"))
+            teams = max(teams, floor)
         room = Room(key, mode=q.get("mode", "play"),
                     opponent=q.get("opponent", "latest"),
-                    teams=int(q.get("teams", "2")),
-                    size=q.get("size", "full"))
+                    teams=teams, size=size)
         ROOMS[key] = room
     player = room.join(sock)
-    if player is None:                                  # room full
-        await sock.close()
+    if player is None:                                  # room full: say so, don't ghost
+        await sock.send_json({"error": "room_full", "room": key,
+                              "seats": room.session.engine.T,
+                              "players": len(room.players)})
+        await sock.close(code=4001)
         return
     if room.task is None:
         room.task = asyncio.create_task(room.run())
