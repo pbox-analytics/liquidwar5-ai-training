@@ -576,16 +576,23 @@ class LiquidWarEngine:
         # pinning it (no more releasing a key to line up with the opening).
         bt = b.unsqueeze(1).expand(self.B, self.T)                    # (B,T) batch index
         zero = torch.zeros_like(adir[:, :, 0])
-        for _ in range(self.cursor_speed):
+        # optional per-(B,T) speeds (training parity: Doom holders glide slow,
+        # same dial as play's per-seat list) — substeps beyond a team's speed
+        # are masked off; the loop still runs cursor_speed (the max) times
+        spd_bt = getattr(self, "_cursor_speed_bt", None)
+        for k in range(self.cursor_speed):
             oy = self.cursor_pos[:, :, 0].clone()                     # (B,T) substep snapshot
             ox = self.cursor_pos[:, :, 1].clone()
             done = torch.zeros(self.B, self.T, dtype=torch.bool, device=self.device)
+            allow = None if spd_bt is None else (spd_bt > k)
             for dy, dx in ((adir[:, :, 0], adir[:, :, 1]),
                            (adir[:, :, 0], zero), (zero, adir[:, :, 1])):
                 ny = (oy + dy).clamp(1, self.H - 2)
                 nx = (ox + dx).clamp(1, self.W - 2)
                 ok = (~done & self.passable[bt, ny, nx] & self.team_alive
                       & ((ny != oy) | (nx != ox)))
+                if allow is not None:
+                    ok = ok & allow
                 self.cursor_pos[:, :, 0] = torch.where(ok, ny, self.cursor_pos[:, :, 0])
                 self.cursor_pos[:, :, 1] = torch.where(ok, nx, self.cursor_pos[:, :, 1])
                 # Seed-decay bookkeeping below needs the OCTILE cost of the

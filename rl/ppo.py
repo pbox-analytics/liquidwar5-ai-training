@@ -16,8 +16,14 @@ gradient of signal every tick instead of a single sparse end reward.
 
 import torch
 
-from rl.policy import act, apply_stances
+from rl.policy import (ACTIONS, EGO_CHANNELS, NUM_STANCES, act, apply_stances,
+                       build_egocentric_obs)
 from rl.eval import _heuristic_dydx
+
+# Flat-action ids for the scripted anchored opponents (looked up, not hardcoded,
+# so a reordered ACTIONS table can't silently retarget them).
+_A_MAEL_UNDERTOW = ACTIONS.index(("Maelstrom", "undertow"))   # 19
+_A_DOOM_2X = ACTIONS.index(("Doom", "2x"))                    # 17
 
 
 def _team_share(engine):
@@ -28,21 +34,48 @@ def _team_share(engine):
 
 
 @torch.no_grad()
-def collect_rollout(engine, policy, steps, device):
+def collect_rollout(engine, policy, steps, device, stance_eps=0.0):
     """Run `steps` ticks of self-play, returning a rollout dict.
 
-    All tensors are (steps, B, T, ...) on `device`. Episodes that finish
-    (done) are reset mid-rollout so collection stays full.
+    All tensors are (steps, B, T, ...) on `device`. Finished games are
+    excluded from the buffer and the whole batch is re-seeded once >30% of
+    games are done (the engine has no per-game reset).
+
+    stance_eps: EPS-GREEDY STANCES — on decision ticks each team picks a
+    uniform-random stance with prob eps; the stored logprob is the mixture
+    log(eps/N + (1-eps)*p) so PPO stays unbiased (ppo_update must be passed
+    the SAME eps so its ratio compares like with like).
     """
     B, T = engine.B, engine.T
+    # DEAD-AIR FIX: engine `done` (teams_left <= 1) is LATCHED — a finished
+    # game keeps reporting done every tick, so the old code re-fired the
+    # terminal +1/-1 every tick and filled the buffer with post-victory idle
+    # transitions (~99% of data once most games finished). Track the previous
+    # tick's done state so the terminal reward fires ONCE (newly done) and
+    # already-finished games never reach the buffer.
+    prev_done = engine.team_alive.sum(dim=1) <= 1       # (B,) done state now
+    if prev_done.float().mean().item() > 0.3:           # stale batch -> re-seed up front
+        engine.reset()
+        prev_done = torch.zeros(B, dtype=torch.bool, device=device)
+    deadair = torch.zeros((), device=device)            # finished-game ticks collected
     # DRIFT-PROOFING: anchor ~1/3 of games against the FIXED heuristic — teams 1.. there
-    # are heuristic-driven with neutral knobs and masked out of training, so team 0 is
-    # rewarded for beating a REAL opponent, not just its drifting clone (kills the
-    # self-play reward-hacking that made the win-rate oscillate).
+    # are heuristic-driven and masked out of training, so team 0 is rewarded for
+    # beating a REAL opponent, not just its drifting clone (kills the self-play
+    # reward-hacking that made the win-rate oscillate). The anchored games split
+    # into thirds by game index — neutral knobs (as before), heuristic HOLDING
+    # Maelstrom undertow, heuristic HOLDING Doom 2x — so Doom stops feasting on
+    # well-less prey and the Maelstrom counter actually appears in the data.
     n_anchor = B // 3
     anchored = torch.zeros(B, T, dtype=torch.bool, device=device)
+    anch_neutral = torch.zeros(B, T, dtype=torch.bool, device=device)
+    anch_mael = torch.zeros(B, T, dtype=torch.bool, device=device)
+    anch_doom = torch.zeros(B, T, dtype=torch.bool, device=device)
     if n_anchor > 0:
         anchored[:n_anchor, 1:] = True
+        third = n_anchor // 3
+        anch_neutral[:n_anchor - 2 * third, 1:] = True
+        anch_mael[n_anchor - 2 * third:n_anchor - third, 1:] = True
+        anch_doom[n_anchor - third:n_anchor, 1:] = True
     # STICKY STANCES: re-decide the stance every K ticks and HOLD it between —
     # formations need time to exist before they can earn credit (see act()).
     K_HOLD = 45
@@ -69,56 +102,88 @@ def collect_rollout(engine, policy, steps, device):
         decide = int(engine.tick) % K_HOLD == 0
         dydx, stance, logprob, value, _ = act(policy, obs, T, alive,
                                               held_stance=held, decide=decide)
+        if stance_eps > 0 and decide:
+            # EPS-GREEDY STANCES: second forward for the stance log-probs
+            # (cheap — decision ticks are 1/K_HOLD of steps). Re-sample a
+            # uniform stance with prob eps and store the MIXTURE logprob so the
+            # PPO ratio matches the true sampling distribution.
+            ego = build_egocentric_obs(obs, T).reshape(
+                B * T, EGO_CHANNELS, *obs.shape[-2:])
+            _, s_logits, _ = policy(ego)
+            slogp_all = s_logits.log_softmax(dim=-1).view(B, T, NUM_STANCES)
+            explore = (torch.rand(B, T, device=device) < stance_eps) & alive
+            rand_st = torch.randint(0, NUM_STANCES, (B, T), device=device)
+            new_st = torch.where(explore, rand_st, stance)
+            slogp_old = slogp_all.gather(-1, stance.unsqueeze(-1)).squeeze(-1)
+            slogp_new = slogp_all.gather(-1, new_st.unsqueeze(-1)).squeeze(-1)
+            mix = torch.log(stance_eps / NUM_STANCES
+                            + (1.0 - stance_eps) * slogp_new.exp())
+            logprob = torch.where(alive, logprob - slogp_old + mix,
+                                  torch.zeros_like(logprob))   # dead teams keep 0
+            stance = new_st
         held = stance                                  # carry the held stance forward
         decide_buf[s] = decide
-        if n_anchor > 0:                               # anchored opponents follow the heuristic, no stance
+        if n_anchor > 0:                               # anchored opponents follow the heuristic
             h = _heuristic_dydx(engine)
             dydx = torch.where(anchored.unsqueeze(-1), h, dydx)
-            stance = torch.where(anchored, torch.zeros_like(stance), stance)
+            # forced stances BEFORE apply_stances so the Maelstrom/Doom
+            # variants' knobs + wells flow through the normal path
+            stance = torch.where(anch_neutral, torch.zeros_like(stance), stance)
+            stance = torch.where(anch_mael, torch.full_like(stance, _A_MAEL_UNDERTOW), stance)
+            stance = torch.where(anch_doom, torch.full_like(stance, _A_DOOM_2X), stance)
         move_idx = (dydx[..., 0] + 1) * 3 + (dydx[..., 1] + 1)  # (B,T) in 0..8
 
         apply_stances(engine, stance, dydx)            # drive each team's stance knobs (self-play)
-        if n_anchor > 0:                               # heuristic opponents run NEUTRAL knobs (eval baseline)
-            engine._spin = torch.where(anchored, torch.ones_like(engine._spin), engine._spin)
-            engine._burst = torch.where(anchored, torch.zeros_like(engine._burst), engine._burst)
-            engine._surge = torch.where(anchored, torch.ones_like(engine._surge), engine._surge)
-            engine._drill = torch.where(anchored.unsqueeze(-1), torch.zeros_like(engine._drill), engine._drill)
-            engine._wall = torch.where(anchored.unsqueeze(-1), torch.zeros_like(engine._wall), engine._wall)
-            engine._fig8 = torch.where(anchored, torch.zeros_like(engine._fig8), engine._fig8)
+        if n_anchor > 0:                               # NEUTRAL-variant opponents run bare knobs (eval baseline)
+            engine._spin = torch.where(anch_neutral, torch.ones_like(engine._spin), engine._spin)
+            engine._burst = torch.where(anch_neutral, torch.zeros_like(engine._burst), engine._burst)
+            engine._surge = torch.where(anch_neutral, torch.ones_like(engine._surge), engine._surge)
+            engine._drill = torch.where(anch_neutral.unsqueeze(-1), torch.zeros_like(engine._drill), engine._drill)
+            engine._wall = torch.where(anch_neutral.unsqueeze(-1), torch.zeros_like(engine._wall), engine._wall)
+            engine._fig8 = torch.where(anch_neutral, torch.zeros_like(engine._fig8), engine._fig8)
             for k in ("_node_l", "_node_m", "_node_k", "_node_w", "_node_v", "_ring", "_ring_ecc"):
-                setattr(engine, k, torch.where(anchored, torch.zeros_like(getattr(engine, k)), getattr(engine, k)))
-            engine._tide = torch.where(anchored.unsqueeze(-1), torch.zeros_like(engine._tide), engine._tide)
-            if getattr(engine, "_wells_enabled", False):       # anchored teams cast no wells
+                setattr(engine, k, torch.where(anch_neutral, torch.zeros_like(getattr(engine, k)), getattr(engine, k)))
+            engine._tide = torch.where(anch_neutral.unsqueeze(-1), torch.zeros_like(engine._tide), engine._tide)
+            if getattr(engine, "_wells_enabled", False):       # neutral-variant teams cast no wells
                 for k in ("_doom_str", "_doom_horizon", "_doom_cap", "_vortex_str"):
-                    getattr(engine, k).mul_((~anchored).float())
+                    getattr(engine, k).mul_((~anch_neutral).float())
         _, done, info = engine.step(dydx)
 
         share = _team_share(engine)
         reward = (share - prev_share)                   # (B,T) dense
         prev_share = share
 
+        newly = done & ~prev_done                       # finished THIS tick
+        if newly.any():
+            # Terminal reward: winner (most fighters) +1, others -1, ONLY on
+            # the tick the game actually finished (done is latched — gating on
+            # raw done paid the winner +1 every idle tick after the win).
+            fighters = engine.team_oh.sum(dim=(2, 3))   # (B,T)
+            winner = fighters.argmax(dim=1)             # (B,)
+            term = -torch.ones(B, T, device=device)
+            term[torch.arange(B, device=device), winner] = 1.0
+            reward = reward + term * newly.float().unsqueeze(1)
+
         obs_buf.append(obs)
         act_buf[s] = move_idx
         stance_buf[s] = stance
         logp_buf[s] = logprob
         val_buf[s] = value
-        alive_buf[s] = alive & ~anchored               # never train on the heuristic opponents' transitions
+        # never train on heuristic opponents OR ticks inside finished games
+        alive_buf[s] = alive & ~anchored & ~prev_done.unsqueeze(1)
         done_buf[s] = done.float().unsqueeze(1).expand(B, T)
-
-        if done.any():
-            # Terminal reward: winner (most fighters) +1, others -1, for
-            # games that just finished.
-            fighters = engine.team_oh.sum(dim=(2, 3))   # (B,T)
-            winner = fighters.argmax(dim=1)             # (B,)
-            term = -torch.ones(B, T, device=device)
-            term[torch.arange(B, device=device), winner] = 1.0
-            term = term * done.float().unsqueeze(1)
-            reward = reward + term
-            # Reset finished games so the rollout keeps producing data.
-            _reset_done_games(engine, done)
-            prev_share = _team_share(engine)
-
         rew_buf[s] = reward
+        deadair = deadair + prev_done.float().sum()
+
+        prev_done = done.clone()
+        if done.float().mean().item() > 0.3:
+            # Stopgap re-seed (the engine has no per-game reset): refresh the
+            # whole batch and cut GAE here — a reset is an episode boundary,
+            # so done=1 for EVERY game or values bootstrap across the seam.
+            engine.reset()
+            prev_done = torch.zeros(B, dtype=torch.bool, device=device)
+            prev_share = _team_share(engine)
+            done_buf[s] = 1.0
 
     engine._held_stance = held                          # persists across rollouts
     # Bootstrap value for the final obs.
@@ -137,22 +202,10 @@ def collect_rollout(engine, policy, steps, device):
         "alive": alive_buf,
         "dones": done_buf,
         "last_value": last_val,                         # (B,T)
+        # telemetry: fraction of collected (step, game) ticks that were inside
+        # an already-finished game (dead air) — should sit <5% after the fix
+        "frac_deadair": (deadair / max(1, steps * B)).item(),
     }
-
-
-def _reset_done_games(engine, done):
-    """Re-initialize only the games in `done` (others keep running)."""
-    if done.all():
-        engine.reset()
-        return
-    # Simplest correct approach: full reset is cheap relative to a rollout;
-    # but to avoid disturbing in-flight games we reset all when ANY large
-    # fraction is done. For partial, re-seed via a fresh engine.reset() is
-    # not per-game, so we do a full reset only when all done; otherwise we
-    # let finished games sit idle (team_alive<=1 -> "stay", zero reward).
-    # This keeps semantics simple and correct; throughput cost is minor for
-    # short rollouts. (A per-game reset can be added later.)
-    return
 
 
 def compute_gae(rewards, values, dones, last_value, gamma=0.99, lam=0.95):
@@ -172,10 +225,16 @@ def compute_gae(rewards, values, dones, last_value, gamma=0.99, lam=0.95):
 
 def ppo_update(policy, optimizer, rollout, num_teams,
                epochs=4, minibatches=4, clip=0.2, vf_coef=0.5,
-               ent_coef=0.01, max_grad_norm=0.5):
-    """Clipped PPO update over the collected rollout. Returns a stats dict."""
-    from rl.policy import build_egocentric_obs, EGO_CHANNELS
+               ent_coef=0.01, stance_ent_coef=0.015, stance_eps=0.0,
+               max_grad_norm=0.5):
+    """Clipped PPO update over the collected rollout. Returns a stats dict.
 
+    stance_ent_coef: SEPARATE coefficient for the stance head's entropy,
+    normalized over DECISION ticks only — stances decide on ~1/K_HOLD of
+    samples, so a mean over all samples made the stated bonus ~45x weaker.
+    stance_eps: must match collect_rollout's eps — the fresh stance logprob
+    uses the same eps-mixture or the importance ratio is biased.
+    """
     steps, B, C, H, W = rollout["obs"].shape
     T = num_teams
     device = rollout["obs"].device
@@ -214,7 +273,23 @@ def ppo_update(policy, optimizer, rollout, num_teams,
 
     n = idx_alive.numel()
     mb_size = max(1, n // minibatches)
-    stats = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0, "n": float(n)}
+    stats = {"policy_loss": 0.0, "value_loss": 0.0,
+             "move_entropy": 0.0, "stance_entropy": 0.0, "n": float(n)}
+    # STANCE TELEMETRY: decision-tick histogram over the alive training rows —
+    # top-5 stance ids + fractions, and how many stances still hold >1% mass
+    # (a collapsed head shows one id near 1.00 and n_stances_above_1pct == 1).
+    dec = smask.bool() & alive
+    if dec.any():
+        fracs = torch.bincount(stances[dec], minlength=NUM_STANCES).float()
+        fracs = fracs / fracs.sum().clamp(min=1)
+        topv, topi = fracs.topk(min(5, NUM_STANCES))
+        stats["stance_hist"] = " ".join(
+            f"{i}:{v:.2f}" for i, v in zip(topi.tolist(), topv.tolist()) if v > 0)
+        stats["n_stances_above_1pct"] = float((fracs > 0.01).sum().item())
+    else:
+        stats["stance_hist"] = ""
+        stats["n_stances_above_1pct"] = 0.0
+    stats["frac_deadair"] = float(rollout.get("frac_deadair", 0.0))
     count = 0
     for _ in range(epochs):
         perm = idx_alive[torch.randperm(n, device=device)]
@@ -224,15 +299,26 @@ def ppo_update(policy, optimizer, rollout, num_teams,
             mdist = torch.distributions.Categorical(logits=move_logits)
             sdist = torch.distributions.Categorical(logits=stance_logits)
             m = smask[mb]
-            new_logp = mdist.log_prob(actions[mb]) + m * sdist.log_prob(stances[mb])
+            if stance_eps > 0:
+                # same eps-mixture as collection (see collect_rollout) — the
+                # ratio must compare mixture to mixture to stay unbiased
+                sp = sdist.log_prob(stances[mb]).exp()
+                slogp = torch.log(stance_eps / NUM_STANCES + (1.0 - stance_eps) * sp)
+            else:
+                slogp = sdist.log_prob(stances[mb])
+            new_logp = mdist.log_prob(actions[mb]) + m * slogp
             ratio = (new_logp - old_logp[mb]).exp()
             a = adv_f[mb]
             l1 = ratio * a
             l2 = torch.clamp(ratio, 1 - clip, 1 + clip) * a
             policy_loss = -torch.min(l1, l2).mean()
             value_loss = (value - ret_f[mb]).pow(2).mean()
-            entropy = (mdist.entropy() + m * sdist.entropy()).mean()
-            loss = policy_loss + vf_coef * value_loss - ent_coef * entropy
+            # DECISION-NORMALIZED stance entropy: mean over decision ticks
+            # only, with its own coefficient — the move head keeps ent_coef.
+            move_ent = mdist.entropy().mean()
+            stance_ent = (m * sdist.entropy()).sum() / m.sum().clamp(min=1.0)
+            loss = (policy_loss + vf_coef * value_loss
+                    - ent_coef * move_ent - stance_ent_coef * stance_ent)
 
             optimizer.zero_grad()
             loss.backward()
@@ -241,10 +327,11 @@ def ppo_update(policy, optimizer, rollout, num_teams,
 
             stats["policy_loss"] += policy_loss.item()
             stats["value_loss"] += value_loss.item()
-            stats["entropy"] += entropy.item()
+            stats["move_entropy"] += move_ent.item()
+            stats["stance_entropy"] += stance_ent.item()
             count += 1
 
-    for k in ("policy_loss", "value_loss", "entropy"):
+    for k in ("policy_loss", "value_loss", "move_entropy", "stance_entropy"):
         stats[k] /= max(1, count)
     stats["mean_return"] = ret_f[idx_alive].mean().item()
     return stats

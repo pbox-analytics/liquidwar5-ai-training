@@ -28,11 +28,14 @@ import base64
 import glob
 import math
 import os
+import random
+import time
 from pathlib import Path
 from typing import Any
 
 import torch
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from rl.eval import _heuristic_dydx
@@ -44,6 +47,16 @@ DEVICE = os.environ.get("LW_PLAY_DEVICE", "cpu")
 TICK_HZ = float(os.environ.get("LW_TICK_HZ", "60"))               # game + frame rate (60fps;
 #   the deploy over-targets 63 so asyncio's ~1ms sleep granularity lands on a true 60)
 _STATIC = Path(__file__).parent / "static"
+
+# The tick loop is LAUNCH-BOUND: what kills fps is the launch thread losing
+# the CPU to co-tenant batch jobs (measured: host load 48 -> 6fps). Keep the
+# intraop pool tiny (frame_blob's CPU tensor ops are trivial) and raise our
+# scheduling priority (works under --cap-add=SYS_NICE; harmless without).
+torch.set_num_threads(2)
+try:
+    os.nice(-10)
+except OSError:
+    pass
 
 
 def _latest_checkpoint() -> str | None:
@@ -114,27 +127,40 @@ class GameSession:
         self.engine._cuda_graph = os.environ.get("LW_CUDA_GRAPH", "0") == "1"
         self.engine.reset()
         self.policy: CursorPolicy | None = None
+        self._opp_request = opponent
+        self._set_opponent(opponent)
+
+    def _set_opponent(self, opponent: str) -> None:
+        """Load (or re-roll) the AI. ``latest`` ROTATES per match: mostly the
+        live champion, sometimes an archived generation — three eras play
+        three genuinely different games, and one collapsed checkpoint can't
+        define 'the AI' for every round (the perma-Doom complaint)."""
+        self.policy = None
+        self._legacy = None
         self.ckpt_name = opponent
-        if opponent not in ("heuristic", "random"):
-            if opponent == "latest":
-                path = _latest_checkpoint()
-            else:                                  # roster pick: a path RELATIVE to CKPT_DIR only
-                cand = (Path(CKPT_DIR) / opponent).resolve()
-                path = (str(cand) if str(cand).startswith(str(Path(CKPT_DIR).resolve()) + os.sep)
-                        and cand.is_file() else _latest_checkpoint())
-            if path:
-                self.policy, n_act = _load_policy(path)
-                self.ckpt_name = Path(path).name
-                # legacy small-head checkpoint (5- or 8-stance eras) -> the
-                # flat actions those base stances meant; pre-stance era -> all
-                # Classic (the pure blob); full-width heads map raw
-                if n_act == 0:
-                    self._legacy = torch.full((NUM_STANCES,), NUM_STANCES - 1,
-                                              dtype=torch.long, device=DEVICE)
-                elif n_act <= len(LEGACY_ACTION):
-                    self._legacy = torch.tensor(LEGACY_ACTION[:n_act], device=DEVICE)
-                else:
-                    self._legacy = None
+        if opponent in ("heuristic", "random"):
+            return
+        if opponent == "latest":
+            arch = sorted(glob.glob(os.path.join(CKPT_DIR, "rl", "archive", "*.pt")))
+            path = (random.choice(arch) if arch and random.random() < 0.35
+                    else _latest_checkpoint())
+        else:                                  # roster pick: a path RELATIVE to CKPT_DIR only
+            cand = (Path(CKPT_DIR) / opponent).resolve()
+            path = (str(cand) if str(cand).startswith(str(Path(CKPT_DIR).resolve()) + os.sep)
+                    and cand.is_file() else _latest_checkpoint())
+        if path:
+            self.policy, n_act = _load_policy(path)
+            self.ckpt_name = Path(path).name
+            # legacy small-head checkpoint (5- or 8-stance eras) -> the
+            # flat actions those base stances meant; pre-stance era -> all
+            # Classic (the pure blob); full-width heads map raw
+            if n_act == 0:
+                self._legacy = torch.full((NUM_STANCES,), NUM_STANCES - 1,
+                                          dtype=torch.long, device=DEVICE)
+            elif n_act <= len(LEGACY_ACTION):
+                self._legacy = torch.tensor(LEGACY_ACTION[:n_act], device=DEVICE)
+            else:
+                self._legacy = None
 
     @property
     def done(self) -> bool:
@@ -144,14 +170,73 @@ class GameSession:
     def _ai_dydx(self):
         """``(dydx, ai_stance)`` for ALL teams from the configured AI. ``ai_stance``
         is the policy's chosen stance per team (``None`` for the heuristic, which
-        has no stances)."""
+        has no stances).
+
+        Two policy-agnostic guards sit between the network and the game (both
+        born of the perma-Doom-3x checkpoint, but kept as safety nets):
+          - DOOM GOVERNOR: a seat may hold Doom (flat 16-18) for at most
+            LW_AI_DOOM_BUDGET consecutive ticks (~600 = 10s), then those
+            logits are masked -inf for LW_AI_DOOM_COOLDOWN ticks (~360) and
+            argmax falls to its best non-Doom plan. 0 disables.
+          - STANCE MIXTURE: LW_AI_STANCE_TEMP > 0 samples the stance head at
+            that temperature once per ~45 ticks and HOLDS it (training's
+            K_HOLD cadence) — the AI shows its real mixture instead of the
+            argmax mode. Default 0 (argmax) until a non-collapsed head ships.
+        """
         if self.policy is None:
             return _heuristic_dydx(self.engine), None
-        obs = self.engine.get_observation()
-        dydx, stance, _, _, _ = act(self.policy, obs, self.engine.T,
-                                    self.engine.team_alive, deterministic=True)
-        if getattr(self, "_legacy", None) is not None:    # old 8-stance policy.pt
+        e = self.engine
+        T = e.T
+        budget = int(os.environ.get("LW_AI_DOOM_BUDGET", "600"))
+        cooldown = int(os.environ.get("LW_AI_DOOM_COOLDOWN", "360"))
+        temp = float(os.environ.get("LW_AI_STANCE_TEMP", "0"))
+        if getattr(self, "_doom_cool", None) is None or len(self._doom_cool) != T:
+            self._doom_run = [0] * T
+            self._doom_cool = [0] * T
+            self._ai_hold = None
+            self._ai_hold_t = -999
+        cool, run = self._doom_cool, self._doom_run
+        full_head = getattr(self, "_legacy", None) is None
+        mask = None
+        if budget > 0 and full_head and any(c > 0 for c in cool):
+            mask = torch.zeros(1, T, NUM_STANCES, device=DEVICE)
+            for t in range(T):
+                if cool[t] > 0:
+                    mask[0, t, 16:19] = float("-inf")
+        n = int(e.tick)
+        redecide = (temp <= 0 or self._ai_hold is None
+                    or self._ai_hold.shape[1] != T or n - self._ai_hold_t >= 45)
+        obs = e.get_observation()
+        dydx, stance, _, _, _ = act(self.policy, obs, T, e.team_alive,
+                                    deterministic=True,
+                                    stance_temp=(temp if redecide else 0.0),
+                                    stance_mask=mask)
+        if temp > 0:
+            if redecide:
+                self._ai_hold = stance.clone()
+                self._ai_hold_t = n
+            else:
+                stance = self._ai_hold
+        if not full_head:                                 # old 5/8-stance policy.pt
             stance = self._legacy[stance]
+            if budget > 0 and any(c > 0 for c in cool):   # no logits to mask: override
+                for t in range(T):
+                    if cool[t] > 0 and 16 <= int(stance[0, t]) <= 18:
+                        stance[0, t] = NUM_STANCES - 1    # Classic during cooldown
+        # governor bookkeeping (inference runs every 2nd tick -> count by 2)
+        acts = stance[0].tolist()
+        for t in range(T):
+            if cool[t] > 0:
+                cool[t] = max(0, cool[t] - 2)
+                run[t] = 0
+            elif 16 <= acts[t] <= 18:
+                run[t] += 2
+                if budget > 0 and run[t] >= budget:
+                    cool[t] = cooldown
+                    run[t] = 0
+                    self._ai_hold = None                  # masked seat re-decides NOW
+            else:
+                run[t] = 0
         return dydx, stance
 
     @torch.no_grad()
@@ -246,21 +331,15 @@ class GameSession:
         self._ai_doom = None
         self._ai_mael = None
         if ai_stance is not None:                  # AI fills every seat without a human
+            # (apply_stances also writes the AI seats' cursor speeds — the
+            # Doom mobility tax lives in the knob table now, train AND play)
             apply_stances(self.engine, ai_stance, dydx, human_teams=human_set)
             self._ai_fx_markers(ai_stance, human_set)
-            ot = getattr(self, "_overtime", 1.0)
-            if ot > 1.0:
-                self.engine._surge.mul_(ot)            # overtime: fronts melt faster, for all
-            # AI Doom holders glide slow too (parity with the human dial)
-            spd = getattr(self.engine, "_cursor_speed_t", None)
-            if spd is not None:
-                base = max(1, round(self.engine.W / 96))
-                acts = ai_stance[0].tolist()
-                for t in range(self.engine.T):
-                    if t not in human_set:
-                        a = acts[t]
-                        spd[t] = (max(1, round(base * (0.7, 0.5, 0.35)[a - 16]))
-                                  if 16 <= a <= 18 else base)
+        # overtime melts fronts for EVERY opponent type — it used to sit inside
+        # the policy branch above, so heuristic/random games never concluded
+        ot = getattr(self, "_overtime", 1.0)
+        if ot > 1.0:
+            self.engine._surge.mul_(ot)
         self.engine.step(dydx)
 
     def _ai_fx_markers(self, ai_stance: torch.Tensor, human_set=()) -> None:
@@ -281,8 +360,13 @@ class GameSession:
                 self._ai_mael = [t, *e.cursor_pos[0, t].tolist()]
 
     def reset(self) -> None:
+        if self._opp_request == "latest":      # per-match rotation (see _set_opponent)
+            self._set_opponent("latest")
         self.engine.reset()
         self._prev_pos = None                  # force a keyframe after every reset
+        self._grid_burst = 8                   # first frames carry the grid (cold flood)
+        self._last_blob = None                 # never serve the OLD map's frozen frame
+        self._last_blob_tick = None
 
     def frame_blob(self) -> bytes:
         """The per-tick BINARY channel: mote positions + teams (+ the cell
@@ -290,19 +374,43 @@ class GameSession:
         periodic int16 KEYFRAMES every position update is an int8 DELTA —
         about half the bytes of the old base64-in-JSON stream, with zero
         client-side atob/JSON cost. Layout (little-endian):
-          u8 type (1=keyframe int16 abs, 2=delta int8) | u8 hasGrid |
-          u16 pn | u32 tick | pos[2*pn] | pteam u8[pn] | grid i8[H*W]?
+          u8 type (1=keyframe i16 abs, 2=delta i8) | u8 hasGrid |
+          u16 pn | u32 seq | pos[2*pn] | pteam u8[pn] | grid i8[H*W]?
+        Cadence runs on a SEND counter, not the engine tick: while the tick is
+        frozen (3-2-1 countdown, the 20s result hold) the old tick-modulo test
+        was stuck true and streamed a full keyframe + grid EVERY frame —
+        ~14 MB/s per client of identical bytes on the big board. ``seq`` also
+        lets the client detect a dropped frame and re-sync on the next
+        keyframe instead of accumulating deltas across the gap (mote smear).
         """
         e = self.engine
+        # FROZEN ENGINE, FREE FRAME: while the tick isn't advancing (3-2-1
+        # countdown, the 20s result hold) the world is static — serve the
+        # cached blob and skip the GPU->CPU transfers entirely. The client
+        # drops repeated-seq deltas by design; the first live frame after a
+        # freeze forces a keyframe so it re-syncs instantly.
+        tick_now = int(e.tick)
+        if tick_now == getattr(self, "_last_blob_tick", -1) \
+                and getattr(self, "_last_blob", None) is not None:
+            self._frozen = True
+            return self._last_blob
+        self._last_blob_tick = tick_now
+        if getattr(self, "_frozen", False):
+            self._frozen = False
+            self._prev_pos = None
+        self._fseq = getattr(self, "_fseq", 0) + 1
         step = max(1, e.N // 9000)
         pidx = torch.arange(0, e.N, step, device=e.device)
         pos = torch.stack((e.fy[0, pidx], e.fx[0, pidx]), dim=1).reshape(-1).to(torch.int16).cpu()
         prev = getattr(self, "_prev_pos", None)
-        key = prev is None or prev.numel() != pos.numel() or int(e.tick) % 30 == 0
+        key = prev is None or prev.numel() != pos.numel() or self._fseq % 30 == 0
         self._prev_pos = pos
         body = (pos if key else (pos - prev).to(torch.int8)).numpy().tobytes()
         pteam = e.fteam[0, pidx].to(torch.uint8).cpu().numpy().tobytes()
-        send_grid = (int(e.tick) % 12 == 0) or int(e.tick) < 8 or self.done
+        burst = getattr(self, "_grid_burst", 8)
+        send_grid = (self._fseq % 12 == 0) or burst > 0
+        if burst > 0:
+            self._grid_burst = burst - 1
         grid = b""
         if send_grid:
             oh = e.team_oh[0]
@@ -313,8 +421,9 @@ class GameSession:
             grid = cell.cpu().numpy().tobytes()
         import struct
         head = struct.pack("<BBHI", 1 if key else 2, 1 if send_grid else 0,
-                           pidx.numel(), int(e.tick))
-        return head + body + pteam + grid
+                           pidx.numel(), self._fseq & 0xFFFFFFFF)
+        self._last_blob = head + body + pteam + grid
+        return self._last_blob
 
     def state(self) -> dict[str, Any]:
         e = self.engine
@@ -328,7 +437,11 @@ class GameSession:
         # display-only, so recompute at ~10Hz (every 6 ticks) and cache — keeps the
         # per-frame sync count (hence the frame rate) low. Render-essential fields
         # (grid, cursors, alive) stay per-frame.
-        if not hasattr(self, "_hud") or int(e.tick) % 6 == 0:
+        # gate on the tick ADVANCING: with the tick frozen at 0 through a
+        # countdown, `% 6 == 0` re-ran this multi-sync block every iteration
+        if not hasattr(self, "_hud") or (int(e.tick) % 6 == 0
+                                         and int(e.tick) != getattr(self, "_last_hud_tick", -1)):
+            self._last_hud_tick = int(e.tick)
             reach = int((~e.walls[0]).sum())
             flood = int((e.gradient[0, 0] < GRADIENT_INF).sum())
             spread = []
@@ -402,8 +515,8 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n) -> int:
             # comet back into a blob
             cdy = (c0_hist[-1][0] > c0_hist[0][0]) - (c0_hist[-1][0] < c0_hist[0][0])
             cdx = (c0_hist[-1][1] > c0_hist[0][1]) - (c0_hist[-1][1] < c0_hist[0][1])
-            _e._drill[0, 0, 0] = 0.85 * cdy     # dense head pierces along the motion
-            _e._drill[0, 0, 1] = 0.85 * cdx     #   (the drill machinery, velocity-aimed)
+            _e._drill[0, t, 0] = 0.85 * cdy     # dense head pierces along the motion
+            _e._drill[0, t, 1] = 0.85 * cdx     #   (the drill machinery, velocity-aimed)
             _e._spin[0, t] = 0.35 * sgn         # slight twist gives the tail life
             _e._burst[0, t] = -0.25             # packed head, trailing wake
     elif stance == 1:                           # Spin: 3 forms (tap 2): vortex -> sawblade -> galaxy
@@ -428,15 +541,15 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n) -> int:
         DSPIN = (0.3, 0.7, 1.5); DSURGE = (1.0, 2.0, 4.0); DADV = (1.0, 0.62, 0.34)
         sgn = spin_sign if spin_sign != 0 else 1   # the bit always spins
         _e._spin[0, t] = DSPIN[m] * sgn         # faster spin -> harder grind, but looser + slower
-        _e._drill[0, 0, 0] = float(last_dir[0]) * DADV[m]  # |drill| = advance speed
-        _e._drill[0, 0, 1] = float(last_dir[1]) * DADV[m]
+        _e._drill[0, t, 0] = float(last_dir[0]) * DADV[m]  # |drill| = advance speed
+        _e._drill[0, t, 1] = float(last_dir[1]) * DADV[m]
         if DSURGE[m] > 1.0:                     # the spinning front grinds (chews) harder
             _e._surge[0, t] = DSURGE[m]
     elif stance == 3:                           # Wall: a concentrated bar, horizontal or vertical (tap 4 to flip)
         if ctrl["wall_orient"] == 0:            # horizontal bar = vertical facing
-            _e._wall[0, 0, 0] = 1.0; _e._wall[0, 0, 1] = 0.0
+            _e._wall[0, t, 0] = 1.0; _e._wall[0, t, 1] = 0.0
         else:                                   # vertical bar = horizontal facing
-            _e._wall[0, 0, 0] = 0.0; _e._wall[0, 0, 1] = 1.0
+            _e._wall[0, t, 0] = 0.0; _e._wall[0, t, 1] = 1.0
         _e._burst[0, t] = -0.9                  # strong inward pull -> a dense solid COLUMN, not a picket line
     elif stance == 4:                           # Pulse: 3 modes (tap 5 to cycle)
         pm = ctrl["pulse_mode"]
@@ -477,8 +590,8 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n) -> int:
                 _e._burst[0, t] = 1.0
                 _e._surge[0, t] = 5.0
         else:                                   # tide: rolling DIRECTIONAL fronts (aimed by last_dir, like Wall)
-            _e._tide[0, 0, 0] = float(last_dir[0])
-            _e._tide[0, 0, 1] = float(last_dir[1])
+            _e._tide[0, t, 0] = float(last_dir[0])
+            _e._tide[0, t, 1] = float(last_dir[1])
             _e._surge[0, t] = 2.5               # the marching crests hit hard
     elif stance == 5:                           # Doom: violent black-hole implosion
         sgn = spin_sign if spin_sign != 0 else 1
@@ -590,6 +703,8 @@ class Player:
         self.sock = sock
         self.team = team
         self.name = name
+        self.color = team % 6               # palette index (0..5) — lobby-pickable
+        self.loadout: list[int] = []        # the 3-stance kit, for the lobby card
         self.ctrl: dict[str, Any] = dict(PLAYER_CTRL)
         self.spin_sign = 1
         self.last_dir = [0, 1]
@@ -617,25 +732,42 @@ class Player:
             self.dead = True
 
 
+def _clear_knobs(_e) -> None:
+    """Per-tick neutral stance state (humans + AI rewrite what they hold)."""
+    _e._surge.fill_(1.0)   # neutral damage mult (in-place: graph input)
+    _e._doom_str.zero_(); _e._doom_horizon.zero_(); _e._doom_cap.zero_(); _e._vortex_str.zero_()
+    _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_()
+    _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_()
+    _e._node_k.zero_(); _e._node_w.zero_(); _e._node_v.zero_(); _e._tide.zero_()
+
+
 class Room:
     """One live game shared by 1..T human players (the rest are AI seats).
 
     LAN play: every client opens ``/?room=<name>`` — the first one creates the
-    room (their mode/opponent/teams params win), later ones take the next free
-    seat. A leaver's seat hands back to the AI mid-game. The room runs ONE
-    game loop and broadcasts each frame to every seat (with per-seat HUD
-    fields layered on)."""
+    room. NAMED rooms open in a LOBBY: players gather over a live all-AI
+    battle (free attract mode), pick a color, set a name and kit, and the
+    HOST (first joiner) dials how many AI opponents join before pressing
+    START — the engine is rebuilt to exactly humans+AI seats. Solo rooms skip
+    the lobby: instant play, like always. A leaver's seat hands back to the
+    AI mid-game. The room runs ONE game loop and broadcasts each frame to
+    every seat (with per-seat HUD fields layered on)."""
+
+    MAX_SEATS = 6                          # client palette / engine ceiling
 
     def __init__(self, key: str, mode: str, opponent: str, teams: int,
                  size: str = "full") -> None:
         self.key = key
+        self.mode = mode
+        self.opponent = opponent           # kept for the lobby-start rebuild
+        self.size = size
         small = size == "small"            # phone boards: same archetypes, half scale
-        self.session = GameSession(
-            mode=mode, opponent=opponent, teams=teams,
+        self._dims = dict(
             height=192 if small else int(os.environ.get("LW_PLAY_H", "384")),
             width=288 if small else int(os.environ.get("LW_PLAY_W", "576")),
             fighters=2000 if small else int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),
         )
+        self.session = GameSession(mode=mode, opponent=opponent, teams=teams, **self._dims)
         if small:
             # small boards run EAGER (they're ~5ms/tick anyway): phone rooms
             # churn constantly (screen sleep / tab switches), and the
@@ -643,44 +775,130 @@ class Room:
             # what kept poisoning the CUDA context in async mode. The one
             # long-lived big-board graph has been stable all day.
             self.session.engine._cuda_graph = False
+        self.named = not key.startswith("~solo-")
+        self.phase = "lobby" if self.named else "play"
+        self.host: int | None = None       # seat of the first joiner — starts the match
+        self.ai_count = 1                  # host dial: AI seats folded in at START
+        self.start_flag = False
         self.players: dict[int, Player] = {}
+        self.recent: dict[str, tuple[int, int, float]] = {}  # name -> (seat, color, left_at)
         self.task: asyncio.Task | None = None
         self.closed = False
         self.map_choice: int | None = None
         self.reset_flag = False
-        self.note = None                    # join/leave toast payload
-        self.note_ttl = 0
+        self.notes: list[list] = []         # queued join/leave toasts [payload, ttl]
         self.wins: dict[int, int] = {}      # session scoreboard, by seat
-        self.freeze = 0                     # countdown ticks before a round starts
+        # solo round 1 gets its 3-2-1 too (it used to start mid-stride)
+        self.freeze = 3 * int(TICK_HZ) if self.phase == "play" else 0
+        self.overtime = False
 
-    def join(self, sock: WebSocket, name: str = "") -> Player | None:
-        free = [t for t in range(self.session.engine.T) if t not in self.players]
+    def note_push(self, payload: dict) -> None:
+        """Queue a toast — back-to-back joins used to overwrite each other."""
+        self.notes.append([payload, 90])
+        del self.notes[:-4]
+
+    def _palette(self) -> list[int]:
+        """Per-TEAM palette indices (0..5) for the client: humans wear their
+        picked color, AI seats dress from the leftovers — color is COSMETIC
+        and travels with the player, decoupled from seat index."""
+        T = self.session.engine.T
+        cols = [-1] * T
+        taken = set()
+        for t, p in self.players.items():
+            taken.add(p.color)
+            if t < T:
+                cols[t] = p.color
+        pool = [c for c in range(6) if c not in taken]
+        for t in range(T):
+            if cols[t] < 0:
+                cols[t] = pool.pop(0) if pool else t % 6
+        return cols
+
+    def join(self, sock: WebSocket, name: str = "",
+             color: int | None = None) -> Player | None:
+        # the lobby seats up to MAX_SEATS — START compacts everyone onto the
+        # engine; mid-match joins are capped by the live engine's seat count
+        cap = self.MAX_SEATS if self.phase == "lobby" else self.session.engine.T
+        free = [t for t in range(cap) if t not in self.players]
         if not free:
             return None
-        p = Player(sock, free[0], name)
+        # REJOIN GRACE: a name that left <2 min ago gets its seat + color back
+        # without the fair-join restart — wifi blips, phone sleep and fat-
+        # fingered tab closes shouldn't cost the table the match.
+        back = self.recent.pop(name.lower(), None) if name else None
+        rejoin = back is not None and time.monotonic() - back[2] < 120
+        seat = back[0] if rejoin and back[0] in free else free[0]
+        p = Player(sock, seat, name)
+        taken = {pl.color for pl in self.players.values()}
+        pool = [c for c in range(6) if c not in taken]
+        want = back[1] if rejoin else color
+        p.color = want if want in pool else (pool[0] if pool else seat % 6)
         p.task = asyncio.create_task(p.sender())
         had_humans = bool(self.players)
-        self.players[p.team] = p
+        self.players[seat] = p
+        if self.host is None or self.host not in self.players:
+            self.host = seat
         # FAIR JOIN: landing mid-match means inheriting whatever shape the AI
         # left that army in. Past a short grace window, a joiner triggers a
-        # fresh round (maps are point-symmetric — restarts are fair).
-        if had_humans and (self.session.engine.tick > 8 * TICK_HZ or self.session.done):
+        # fresh round (maps are point-symmetric — restarts are fair). Lobby
+        # joins and rejoins just sit down.
+        if (self.phase == "play" and not rejoin and had_humans
+                and (self.session.engine.tick > 8 * TICK_HZ or self.session.done)):
             self.reset_flag = True
-            self.note = {"ev": "join_restart", "team": p.team}
+            self.note_push({"ev": "join_restart", "team": seat})
         else:
-            self.note = {"ev": "join", "team": p.team}
-        self.note_ttl = 90
+            self.note_push({"ev": "join", "team": seat})
         return p
 
     def leave(self, team: int) -> None:
         p = self.players.pop(team, None)    # the seat reverts to AI control
         if p is not None and p.task is not None:
             p.task.cancel()
+        if p is not None and p.name:
+            self.recent[p.name.lower()] = (team, p.color, time.monotonic())
         if self.players:
-            self.note = {"ev": "leave", "team": team}
-            self.note_ttl = 90
+            self.note_push({"ev": "leave", "team": team})
+            if self.host == team:           # the crown passes to the next seat
+                self.host = min(self.players)
         if not self.players:
             self.closed = True
+
+    def _start_match(self) -> None:
+        """The host pressed START: size the engine to the lobby — humans get
+        seats 0..n-1 (colors travel with them) plus the host's chosen AI
+        seats — then open with the 3-2-1 countdown."""
+        humans = sorted(self.players)
+        want = max(2, min(self.MAX_SEATS, len(humans) + self.ai_count))
+        e = self.session.engine
+        if want != e.T:
+            if getattr(e, "_graph", None) is not None:  # same teardown hazard as Room.run
+                torch.cuda.synchronize()
+                e._graph = None
+            self.session = GameSession(mode=self.mode, opponent=self.opponent,
+                                       teams=want, **self._dims)
+            if self.size == "small":
+                self.session.engine._cuda_graph = False
+        old = dict(self.players)
+        self.players.clear()
+        new_wins: dict[int, int] = {}
+        for new_t, old_t in enumerate(sorted(old)):
+            pl = old[old_t]
+            pl.team = new_t
+            self.players[new_t] = pl
+            if self.host == old_t:
+                self.host = new_t
+            if old_t in self.wins:          # humans keep their tallies; AI seats
+                new_wins[new_t] = self.wins[old_t]   # are new identities anyway
+        self.wins = new_wins
+        self.session.engine._map_choice = self.map_choice
+        self.session.reset()
+        _clear_knobs(self.session.engine)
+        self.reset_flag = False
+        self.freeze = 3 * int(TICK_HZ)
+        self.overtime = False
+        self.session._overtime = 1.0
+        self.phase = "play"
+        self.note_push({"ev": "start"})
 
     async def run(self) -> None:
         try:
@@ -701,7 +919,6 @@ class Room:
                 self.session.engine._graph = None
 
     async def _run(self) -> None:
-        session = self.session
         dt = 1.0 / TICK_HZ
         hold = 0                                       # ticks to linger on a finished game
         fps = TICK_HZ                                  # achieved frame rate (EMA)
@@ -711,15 +928,9 @@ class Room:
         n = 0
         next_dl = loop.time()                          # absolute frame deadline (drift-corrected)
 
-        def clear_knobs(_e) -> None:
-            _e._surge.fill_(1.0)   # neutral damage mult (in-place: graph input)
-            _e._doom_str.zero_(); _e._doom_horizon.zero_(); _e._doom_cap.zero_(); _e._vortex_str.zero_()
-            _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_()
-            _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_()
-            _e._node_k.zero_(); _e._node_w.zero_(); _e._node_v.zero_(); _e._tide.zero_()
-
         while not self.closed:
             t0 = loop.time()                                  # frame start, for steady pacing
+            session = self.session                            # _start_match may rebuild it
             players = list(self.players.values())
             for p in players:
                 if p.ctrl["spin"] is not None:                # Q/E -> orbit direction
@@ -729,11 +940,33 @@ class Room:
                     p.ctrl["map"] = None
                 if p.ctrl["reset"]:
                     self.reset_flag = True; p.ctrl["reset"] = False
-            if self.reset_flag:
+            if self.phase == "lobby":
+                # GATHER: the lobby card floats over a live all-AI battle.
+                # Player input waits; the host's START flips to play.
+                if self.start_flag:
+                    self.start_flag = False
+                    self._start_match()
+                    session = self.session
+                    hold = 0; logged = False
+                elif session.done or self.reset_flag:
+                    session.engine._map_choice = self.map_choice
+                    session.reset(); self.reset_flag = False
+                    _clear_knobs(session.engine)
+                else:
+                    _clear_knobs(session.engine)
+                    session._overtime = 1.0
+                    session.step({})                   # every seat AI-driven
+                    _ea = session.engine               # attract pays the same sweep cap
+                    if (_ea.tick >= 80 and getattr(_ea, "_fixed_sweeps", None) is None
+                            and not getattr(_ea, "_cuda_graph", False)):
+                        _ea._fixed_sweeps = _ea.cursor_speed + 4
+            elif self.reset_flag:
                 session.engine._map_choice = self.map_choice   # picked map (None=random)
                 session.reset(); self.reset_flag = False; hold = 0; logged = False
-                clear_knobs(session.engine)
+                _clear_knobs(session.engine)
                 self.freeze = 3 * int(TICK_HZ)         # 3-2-1-GO: everyone starts on GO
+                self.overtime = False                  # last round's surge isn't this round's
+                session._overtime = 1.0
             elif session.done:
                 hold += 1
                 # POST-MATCH MOMENT: hold the result for ~20s — long enough to
@@ -741,13 +974,15 @@ class Room:
                 if hold > TICK_HZ * 20:
                     session.engine._map_choice = self.map_choice
                     session.reset(); hold = 0; logged = False
-                    clear_knobs(session.engine)
+                    _clear_knobs(session.engine)
                     self.freeze = 3 * int(TICK_HZ)
+                    self.overtime = False
+                    session._overtime = 1.0
             elif self.freeze > 0:
                 self.freeze -= 1                       # armies hold their breath
             else:
                 _e = session.engine
-                clear_knobs(_e)
+                _clear_knobs(_e)
                 base_cs = max(1, round(_e.W / 96))
                 speeds = [base_cs] * _e.T
                 humans = {}
@@ -765,11 +1000,27 @@ class Room:
                 self.overtime = ot_min > 0
                 session._overtime = min(2.5, 1.0 + 0.15 * ot_min) if self.overtime else 1.0
                 session.step(humans)
+                # past the cold flood, pin the eager gradient to the same fixed
+                # sweep count the captured graph used (cursor_speed+4): the
+                # convergence early-out never fires with a moving cursor anyway,
+                # and dropping it removes ~516 launches + 12 sync stalls/tick
+                if (_e.tick >= 80 and getattr(_e, "_fixed_sweeps", None) is None
+                        and not getattr(_e, "_cuda_graph", False)):
+                    _e._fixed_sweeps = _e.cursor_speed + 4
             blob = session.frame_blob()
             st = session.state(); st["fps"] = round(fps, 1)
             st["players"] = len(players)
             st["seats"] = sorted(self.players)            # which teams are humans (lobby chips)
             st["names"] = {str(t): pl.name for t, pl in self.players.items() if pl.name}
+            st["phase"] = self.phase
+            st["ai_n"] = self.ai_count
+            st["colors"] = self._palette()                # cosmetic palette map, lobby-picked
+            if self.host is not None:
+                st["host"] = self.host
+            if self.phase == "lobby":
+                st["lobby"] = [{"team": t, "name": pl.name, "color": pl.color,
+                                "loadout": pl.loadout[:3]}
+                               for t, pl in sorted(self.players.items())]
             if self.wins:
                 st["wins"] = {str(t): n for t, n in self.wins.items()}
             if self.freeze > 0:
@@ -781,24 +1032,28 @@ class Room:
             else:
                 # ROUT BEACON: a team under 4% of starting mass broadcasts its
                 # remnant centroid — endgame drag was never killing the last
-                # drops, it was FINDING them on a 384x576 board
+                # drops, it was FINDING them on a 384x576 board. (The loop var
+                # must NOT be ``n`` — it shadowed the room's pulse clock and
+                # froze human Pulse wave/nova timing on a fighter count.)
                 e2 = session.engine
                 routs = []
-                for t, n in enumerate(st["fighters"]):
-                    if 0 < n < 0.04 * e2.fighters_per_team:
+                for t, cnt in enumerate(st["fighters"]):
+                    if 0 < cnt < 0.04 * e2.fighters_per_team:
                         m = (e2.fteam[0] == t)
-                        routs.append([t, float(e2.fy[0, m].float().mean()),
-                                      float(e2.fx[0, m].float().mean())])
+                        if m.any():        # HUD counts are ~6 ticks stale: no NaN centroids
+                            routs.append([t, float(e2.fy[0, m].float().mean()),
+                                          float(e2.fx[0, m].float().mean())])
                 if routs:
                     st["rout"] = routs
-            if self.note is not None and self.note_ttl > 0:
-                st["note"] = self.note
-                self.note_ttl -= 1
-                if self.note_ttl <= 0:
-                    self.note = None
+            if self.notes:
+                st["note"] = self.notes[0][0]
+                self.notes[0][1] -= 1
+                if self.notes[0][1] <= 0:
+                    self.notes.pop(0)
             for p in players:
-                p.c0_hist.append(list(st["cursors"][p.team])); del p.c0_hist[:-7]   # comet aim window
-            if session.done and not logged:
+                if p.team < len(st["cursors"]):    # lobby seats can outnumber engine seats
+                    p.c0_hist.append(list(st["cursors"][p.team])); del p.c0_hist[:-7]   # comet aim window
+            if self.phase == "play" and session.done and not logged:
                 w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])
                 self.wins[w] = self.wins.get(w, 0) + 1
                 print(f"[telemetry] GAME END room={self.key} map={st['map']} tick={st['tick']} winner=team{w} "
@@ -846,7 +1101,12 @@ async def ws(sock: WebSocket) -> None:
     loop per room; per-socket receivers feed each seat's held controls."""
     await sock.accept()
     q = sock.query_params
+    mode = q.get("mode", "play")
     key = q.get("room") or f"~solo-{id(sock)}"
+    if mode == "spectate":
+        # spectators never occupy a seat in a shared room (they'd freeze an
+        # army and trigger fair-join restarts) — spectate is always solo
+        key = f"~solo-{id(sock)}"
     room = ROOMS.get(key)
     if room is None or room.closed:
         size = q.get("size", "full")
@@ -857,11 +1117,13 @@ async def ws(sock: WebSocket) -> None:
             # the third player stops bouncing off a silently-full 1v1.
             floor = int(os.environ.get("LW_ROOM_SEATS", "4" if size == "small" else "3"))
             teams = max(teams, floor)
-        room = Room(key, mode=q.get("mode", "play"),
+        room = Room(key, mode=mode,
                     opponent=q.get("opponent", "latest"),
                     teams=teams, size=size)
         ROOMS[key] = room
-    player = room.join(sock, (q.get("name") or "").strip()[:12])
+    colorq = q.get("color")
+    player = room.join(sock, (q.get("name") or "").strip()[:12],
+                       int(colorq) if colorq and colorq.isdigit() else None)
     if player is None:                                  # room full: say so, don't ghost
         await sock.send_json({"error": "room_full", "room": key,
                               "seats": room.session.engine.T,
@@ -911,6 +1173,34 @@ async def ws(sock: WebSocket) -> None:
                 if s == 7 and ctrl["stance"] == 7:    # re-tap Atom cycles orbital -> binary star
                     ctrl["atom_mode"] ^= 1
                 ctrl["stance"] = s
+            elif "name" in msg:                # lobby: live rename
+                player.name = str(msg["name"]).strip()[:12]
+            elif "color" in msg:               # lobby: pick a color (if free)
+                try:
+                    c = int(msg["color"])
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= c < 6 and all(pl.color != c for t2, pl in room.players.items()
+                                      if t2 != player.team):
+                    player.color = c
+            elif "loadout" in msg:             # the 3-stance kit, for the lobby card
+                try:
+                    player.loadout = [int(x) for x in list(msg["loadout"])[:3]
+                                      if 0 <= int(x) <= 8]
+                except (TypeError, ValueError):
+                    pass
+            elif "ai" in msg:                  # host dial: AI opponents at START
+                try:
+                    if player.team == room.host:
+                        room.ai_count = max(0, min(5, int(msg["ai"])))
+                except (TypeError, ValueError):
+                    pass
+            elif msg.get("start"):             # host opens the match
+                if player.team == room.host and room.phase == "lobby":
+                    room.start_flag = True
+            elif msg.get("lobby"):             # back to the gather screen
+                if room.named:
+                    room.phase = "lobby"
             elif "dir" in msg:                 # keyboard (arrows/WASD)
                 ctrl["dir"] = msg["dir"]
             elif "target" in msg:              # mouse
@@ -919,20 +1209,26 @@ async def ws(sock: WebSocket) -> None:
         pass
     finally:
         room.leave(player.team)
-        if room.closed:
+        # pop only OUR room: a successor room created under the same key
+        # while this socket lingered must not be evicted from the index
+        if room.closed and ROOMS.get(key) is room:
             ROOMS.pop(key, None)
 
 
 @app.get("/rooms")
-def rooms() -> list[dict[str, Any]]:
-    """Open named rooms, for the zero-typing 'Join a game' list."""
+async def rooms() -> list[dict[str, Any]]:
+    """Open named rooms, for the zero-typing 'Join a game' list. ``async`` so
+    it runs ON the event loop — the threadpool version raced live joins."""
     out = []
     for key, r in list(ROOMS.items()):
         if key.startswith("~solo-") or r.closed or not r.players:
             continue
         e = r.session.engine
-        out.append({"room": key, "players": len(r.players), "seats": e.T,
-                    "names": [p.name or f"P{p.team + 1}" for p in r.players.values()],
+        plist = list(r.players.values())
+        out.append({"room": key, "players": len(plist),
+                    "seats": Room.MAX_SEATS if r.phase == "lobby" else e.T,
+                    "phase": r.phase,
+                    "names": [p.name or f"P{p.team + 1}" for p in plist],
                     "map": MAP_NAMES[e._last_arch] if 0 <= getattr(e, "_last_arch", -1) < len(MAP_NAMES) else "?",
                     "tick": int(e.tick)})
     return out
@@ -952,6 +1248,20 @@ def checkpoints() -> list[dict[str, Any]]:
              "name": Path(f).stem,
              "mtime": int(m)}
             for f, m in sorted(seen.items(), key=lambda kv: -kv[1])]
+
+
+@app.get("/liquidwar.apk")
+def apk() -> FileResponse:
+    """The Android app, served as an explicit DOWNLOAD (Content-Disposition).
+    Chrome on Android refuses 'dangerous' file types over plain-HTTP unless
+    the response is unambiguous about being an attachment — and even then it
+    warns; the sheet links a .zip fallback that downloads without the fuss."""
+    f = _STATIC / "liquidwar.apk"
+    if not f.is_file():
+        raise HTTPException(404, "APK not built yet")
+    return FileResponse(f, media_type="application/vnd.android.package-archive",
+                        filename="liquidwar.apk",
+                        headers={"Content-Disposition": 'attachment; filename="liquidwar.apk"'})
 
 
 @app.get("/healthz")

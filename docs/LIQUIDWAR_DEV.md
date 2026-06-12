@@ -385,3 +385,106 @@ install prompt needs HTTPS, e.g. `tailscale serve` on pstorm.
   has Kafka + Grafana. A `/metrics` endpoint on the play server would close the
   loop.
 - `docs/POTENTIAL_FEATURES.md` — slime-mold special moves + fluid-clash backlog.
+
+## 17. Lobby v2 — gather, pick, start (2026-06-11)
+
+Named rooms now open in a LOBBY phase instead of dropping joiners into a
+running game. The card floats over a live all-AI battle (free attract mode).
+
+- **Phase machine** (`Room.phase`): `lobby` -> (host `{start:true}`) ->
+  `_start_match()` -> `play`. Result card's 🏠 Lobby button (`{lobby:true}`)
+  goes back. Solo `~solo-*` rooms are always `play` (instant game, as ever).
+- **Colors are cosmetic and travel with the player**: `Player.color` is a
+  palette index (0-5), picked in the lobby (`{color:n}`, conflicts rejected
+  server-side), persisted client-side as `lw-color` and passed at connect.
+  `st.colors` broadcasts the per-TEAM palette map; the client rewrites
+  COLORS/RGB in place and calls `R.setPalette` — every shader/fx site keys
+  off team index and just follows.
+- **Host dial** (`{ai:n}`, host-only): how many AI seats join at START.
+  `_start_match()` rebuilds the GameSession when `humans + ai != engine.T`
+  (seats compact to 0..n-1, colors/wins follow, host crown remaps).
+- **Live identity**: `{name:"..."}` renames mid-lobby; `{loadout:[a,b,c]}`
+  shows each player's 3-stance kit on the lobby card.
+- **Rejoin grace**: a name that left <2 min ago gets its seat+color back, no
+  fair-join restart (`Room.recent`).
+- Lobby seats up to 6 regardless of the attract engine's T; START sizes the
+  real match. `/rooms` now reports `phase` so the browser can say "in lobby".
+
+## 18. AI guardrails at the play server (2026-06-11)
+
+Born of the perma-Doom-3x checkpoint (see §19), kept as policy-agnostic
+safety nets (all env-tunable, `web/server.py:_ai_dydx`):
+
+- `LW_AI_DOOM_BUDGET` (600 ticks) / `LW_AI_DOOM_COOLDOWN` (360): a seat may
+  hold Doom that long, then actions 16-18 are masked -inf and argmax falls to
+  its best non-Doom plan. Legacy small-head checkpoints get a post-act
+  Classic override instead. 0 disables.
+- `LW_AI_STANCE_TEMP` (0): >0 samples the stance head at that temperature
+  once per ~45 ticks and holds (training's K_HOLD cadence) — shows the true
+  mixture instead of the argmax mode. Inert on a collapsed head.
+- **Opponent rotation**: `opponent=latest` re-rolls per match — 65% the live
+  champion, 35% a random `rl/archive/*.pt` generation. Three eras play three
+  different games; the HUD opponent field names the one you got.
+- **Doom mobility tax is in the knob table now** (`_KNOBS` `cspd` column):
+  `apply_stances` writes per-seat speeds in play AND `_cursor_speed_bt`
+  (batched) in training — the tax finally exists in the trainer's world.
+
+## 19. Training postmortem — why the AI never left Doom (2026-06-11)
+
+A DS+MLE+playtester panel measured the deployed policy: stance head is a
+delta function on Doom-3x (P=1.0000, entropy 0.0 nats; T=2.0 sampling still
+picks it 240/240). Root causes, all verified against code + live logs:
+
+1. **Dead-air rollouts**: engine `done` is latched, the terminal +1/-1
+   re-applied every tick, `_reset_done_games` a no-op below all-done — ~99%
+   of buffer transitions were post-victory idle. ret saturated at 0.993
+   while eval skill fell 0.938 -> 0.354 (wells-100 was actively degrading).
+2. **Stance gradient starvation**: K_HOLD masking puts stance terms on ~2.2%
+   of samples; ent-coef 0.001 averaged over ALL samples = effective 2.2e-5.
+   The logged `ent` is move-head dominated — collapse was invisible.
+3. **Warm-start fossil**: wells-080/090 lineage learned Doom under pre-nerf
+   physics; the prior survived every warm start. Policy now: any run across
+   a balance change resets the stance head (`--reset-stance-head`).
+4. **Nothing punished Doom**: anchored opponents had wells ZEROED (Doom ate
+   free food 1/3 of games); eval never set `_wells_enabled` and best.pt
+   gated on a wells-blind 48-game eval frozen at a lucky 1.000 since ~1899.
+5. **Horizon mismatch**: (gamma·lam)^45 = 0.06 — only instant-payoff stances
+   (Doom conversions) fit inside the credit window; nova can't even finish a
+   charge in one hold.
+6. **Train/play gaps**: play shows argmax-mode every 2 ticks vs training's
+   sampled 45-tick holds; the Doom cursor tax existed only in play (fixed,
+   see §18).
+
+The wells-110 program (rl/ changes landed 2026-06-11): newly-done-only
+terminal rewards + finished-game exclusion + batch reset >30% done;
+`--stance-ent-coef` (decision-normalized); `--reset-stance-head` +
+`--stance-eps` mixture exploration; eval vs a counter-capable pool (neutral /
+scripted-Maelstrom / scripted-Doom) with wells ON, best gated on pool mean,
+resume decays the carried best; anchored thirds now script Maelstrom/Doom
+opponents so both "Doom loses into Maelstrom" and "Maelstrom defends" appear
+in the data; stance telemetry (per-update histogram, separate entropies,
+frac_deadair) so collapse can never hide again.
+
+## 20. Perf review adoption (2026-06-11)
+
+Live measurements (panel): clean solo big board 47-56fps eager; the fps-6
+outages were co-tenant CPU starvation (host load 48). Landed:
+
+- run-play.sh: `--cap-add=SYS_NICE --cpu-shares=4096 --cpuset-cpus=0-5`,
+  uvicorn `--ws-ping-*` (reaps half-open phones in ~40s); server.py:
+  `torch.set_num_threads(2)` + `os.nice(-10)`. Batch jobs on pstorm should
+  run `nice -n 19`, ideally `taskset -c 6-23`.
+- frame_blob: send-counter cadence (`_fseq`) + frozen-tick cached-blob
+  early-out (countdown/result-hold frames cost ~0 GPU and ~0 bytes new);
+  state() HUD block gated on the tick ADVANCING. The wire seq also lets the
+  client drop mis-based deltas after a queue drop (no more mote smear).
+- Eager sweep cap after the cold flood (`_fixed_sweeps = cursor_speed+4` at
+  tick>=80): -516 launches and -12 sync stalls/tick, same fixed count the
+  graph used.
+- Client: walls texture re-uploads only when the mask changes (was 3-6ms at
+  5Hz); trails no longer wiped per grid frame; HUD DOM writes gated to ~10Hz
+  + #teams rebuilds only on content change.
+- Still queued (medium/large): dead-peer reaping + attract throttle, the
+  _move_fighters launch diet (5610 of 6761 launches/tick), grid RLE + team
+  diffs (~32 -> ~16 Mbit/s), engine-pool path back to CUDA graphs, batched
+  same-geometry rooms.

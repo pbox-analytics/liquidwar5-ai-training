@@ -1,24 +1,37 @@
 "use strict";
 // Procedural audio for Liquid War — no samples, everything synthesized.
 //
-// MUSIC: an "Interstellar organ x bioluminescent ambient" hybrid —
-//   - organ pads: additive sine harmonics, 4s attacks, slow chord drift
-//     through an Aeolian progression (voice-led, never jumps)
+// MUSIC: ONE chord progression, TWO voicings, crossfaded on combat —
+//   - PEACE voice: organ pads (additive sine harmonics, 4s attacks, slow
+//     chord drift, voice-led, never jumps) — calm, spacious, and OUT of the
+//     fight: fully silent by intensity ~0.45. The organ is a sanctuary
+//     instrument, never a combat one.
+//   - WAR voice: a string section (the Pompeii voice) — detuned saw stacks
+//     per chord tone through a lowpass that opens with the battle, bow-swell
+//     attacks, octave-doubled bass, re-articulating on the half-bar so it
+//     pulses with the 104 BPM grid instead of droning
 //   - tectonic sub: a slow-swelling low triangle an octave below the root
 //   - sparkles: sparse pentatonic bell-plucks through delay (the
 //     bioluminescent layer; density falls as combat rises)
 //   - generated impulse-response reverb (procedural cathedral)
-// ADAPTIVE: combat intensity opens the filter, speeds the chord clock and
-// thins the sparkles; LOSING detunes a tension voice in; Doom (either side)
-// adds a pulsing 36.7Hz drone; Maelstrom adds a swirling band-passed wash.
+// ADAPTIVE: combat intensity crossfades organ->strings (equal-power, ~2s),
+// brightens and raises the choir, speeds the chord clock and thins the
+// sparkles; LOSING detunes a tension voice into BOTH voicings; Doom (either
+// side) adds a pulsing 36.7Hz drone; Maelstrom adds a swirling wash.
+// STANCE SIGNATURES: each held formation hums its own continuous texture
+// (wingbeat noise, rotating sweep, machine grind, ...) at identity-not-noise
+// gain UNDER the score; 0.6s crossfade on stance change; Doom and Maelstrom
+// reuse the existing drone/wash machinery; Classic is intentional silence.
 // SFX: conversion thuds scaled by bleed size, tiny blips for skirmish,
-// per-stance tap notes, victory/defeat stingers.
+// per-stance tap notes (timbre keyed to the slot), victory/defeat stingers.
 const LWAUDIO = (() => {
-  let ctx = null, master, musicBus, sfxBus, padBus, echoIn;
+  let ctx = null, master, musicBus, sfxBus, padBus, peaceBus, warBus, echoIn;
   let coda = 0;                                // >now = match resolution playing; grid muted
   let musicVol = 0.5, sfxVol = 0.7, enabled = false;
   let chordTimer = 0, sparkTimer = 0, chordIdx = 0, voices = [];
   let sub = null, doomDrone = null, maelWash = null, tension = null;
+  let maelWhirlPan = null, maelWhirlLP = null; // held-Maelstrom whirl depths
+  let stanceBus = null, stanceSig = null, stanceCur = "", smodeCur = "";
   let sig = { intensity: 0, losing: 0, doom: 0, mael: 0 };
   let lastThud = 0, lastBlip = 0;
 
@@ -65,9 +78,17 @@ const LWAUDIO = (() => {
     sfxBus = ctx.createGain(); sfxBus.gain.value = sfxVol;
     const sSend = ctx.createGain(); sSend.gain.value = 0.25;
     sfxBus.connect(master); sfxBus.connect(sSend).connect(sendHP);
-    // PAD BUS: organ + choir ride here so big drum moments can duck them
+    // PAD BUS: chords + choir ride here so big drum moments can duck them
     padBus = ctx.createGain(); padBus.gain.value = 1.0;
     padBus.connect(musicBus);
+    // TWO VOICINGS, ONE PROGRESSION: update() equal-power crossfades these
+    // on intensity — organ at peace, strings at war, never both at full
+    peaceBus = ctx.createGain(); peaceBus.gain.value = 1.0;
+    warBus = ctx.createGain(); warBus.gain.value = 0.0;
+    peaceBus.connect(padBus); warBus.connect(padBus);
+    // STANCE BUS: the per-formation signature textures (identity, not noise)
+    stanceBus = ctx.createGain(); stanceBus.gain.value = 1.0;
+    stanceBus.connect(musicBus);
     // shared ping-pong echo for the sparkles (one pair of delays forever —
     // the per-pluck feedback DelayNode leaked live graph nodes for hours)
     echoIn = ctx.createGain(); echoIn.gain.value = 1.0;
@@ -80,12 +101,12 @@ const LWAUDIO = (() => {
     startSub(); startDoom(); startMael(); startFlow();
   }
 
-  // --- organ voice: additive harmonics with cathedral attack ---
+  // --- organ voice (PEACE): additive harmonics with cathedral attack ---
   function organ(freq, gain, attack = 4, dur = 22, noSub = false) {
     const g = ctx.createGain(); g.gain.value = 0;
     const lp = ctx.createBiquadFilter(); lp.type = "lowpass";
     lp.frequency.value = 460 + 2100 * sig.intensity;   // darker at rest
-    g.connect(lp).connect(padBus);
+    g.connect(lp).connect(peaceBus);
     const t = ctx.currentTime;
     g.gain.linearRampToValueAtTime(gain, t + attack);
     g.gain.setTargetAtTime(0, t + dur - 7, 2.4);
@@ -102,6 +123,39 @@ const LWAUDIO = (() => {
       return o;
     });
     return { g, oscs };
+  }
+
+  // --- string section (WAR): per chord tone, a detuned saw stack through a
+  // lowpass that opens with the battle — bow-swell attack, shorter release
+  // than the organ, and a half-bar re-articulation so the section PULSES on
+  // the 104 BPM grid instead of droning. THIS is what plays when units
+  // fight; the organ stays home.
+  function strings(freq, gain, when, dur = 22) {
+    const t = when ?? ctx.currentTime;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(gain, t + 0.12);    // bow swell, not bloom
+    g.gain.setTargetAtTime(0, t + dur - 9, 1.3);
+    const lp = ctx.createBiquadFilter(); lp.type = "lowpass";
+    lp.frequency.value = 1200 + 1300 * sig.intensity;  // 1.2k-2.5k with the war
+    lp.Q.value = 0.8;
+    // RE-ARTICULATION: settle toward each half-bar, swell back out on it —
+    // only setTargetAtTime events, so the curve never fights the schedule
+    const pulse = ctx.createGain();
+    pulse.gain.setValueAtTime(1, t);
+    for (let k = 1; k <= 8; k++) {                     // outlives any chord
+      const hb = t + k * SPB * 2;
+      pulse.gain.setTargetAtTime(0.55, hb - 0.38, 0.16);
+      pulse.gain.setTargetAtTime(1.0, hb, 0.05);
+    }
+    g.connect(pulse).connect(lp).connect(warBus);
+    for (const det of [-8, 0, 7]) {                    // the section, not a soloist
+      const o = ctx.createOscillator(); o.type = "sawtooth";
+      o.frequency.value = freq;
+      o.detune.value = det + (Math.random() - 0.5) * 3;
+      o.connect(g); o.start(t); o.stop(t + dur + 1);
+    }
+    return g;
   }
 
   // CHOIR: a detuned saw pair through "ahh" formant bandpasses — the
@@ -121,7 +175,9 @@ const LWAUDIO = (() => {
     for (const [ff, fq, fa] of [[700, 9, 1.0], [1080, 11, 0.55], [2500, 14, 0.18]]) {
       const bp = ctx.createBiquadFilter(); bp.type = "bandpass";
       bp.frequency.value = ff; bp.Q.value = fq;
-      const fg = ctx.createGain(); fg.gain.value = fa;
+      // battle BRIGHTENS the chorus: the upper formants open with intensity
+      const fg = ctx.createGain();
+      fg.gain.value = fa * (ff > 900 ? 1 + 1.1 * sig.intensity : 1);
       mix.connect(bp).connect(fg).connect(g);
     }
     g.connect(padBus);
@@ -135,24 +191,33 @@ const LWAUDIO = (() => {
     g.gain.setValueAtTime(g.gain.value, now);
     g.gain.setTargetAtTime(0, now, 1.1);
   }
-  function nextChord() {
+  function nextChord(when) {
     // HANDOVER: the grid changes chords every 2 bars (~5s) but voices used to
     // live ~20s — three or four chords rang at once and combat made the
     // pileup audibly sour. Old voices bow out as the new chord enters.
+    // BOTH voicings retire through here, so chords never stack on either side.
     activeGains.forEach(retire);
     activeGains = [];
     chordIdx = (chordIdx + (Math.random() < 0.75 ? 1 : CHORDS.length - 1)) % CHORDS.length;
     const semis = CHORDS[chordIdx];
+    // PEACE voicing: the organ, as ever
     voices = semis.map((s, i) => organ(f(s), i === 0 ? 0.16 : 0.10 - i * 0.015, 4, 22, i === 0));
     activeGains.push(...voices.map(v => v.g));
+    // WAR voicing of the SAME chord: strings an octave up, on the grid,
+    // plus the octave-doubled bass note for the floor
+    const t = when ?? ctx.currentTime;
+    activeGains.push(...semis.map((s, i) => strings(f(s) * 2, i === 0 ? 0.10 : 0.07 - i * 0.008, t)));
+    activeGains.push(strings(f(semis[0]), 0.09, t));
     // the chorus swells with the war: barely-there at peace, full voice in battle
-    const ch = 0.035 + 0.11 * sig.intensity + 0.05 * (sig.doom ? 1 : 0);
+    const ch = 0.04 + 0.13 * sig.intensity + 0.05 * (sig.doom ? 1 : 0);
     activeGains.push(choir(f(semis[0]) * 2, ch));
     if (sig.intensity > 0.35) activeGains.push(choir(f(semis[1]) * 2, ch * 0.7));
-    // losing: a minor-second tension voice bleeds in with the deficit
+    // losing: a minor-second tension voice bleeds into BOTH voicings
     if (sig.losing > 0.1) {
-      tension = organ(f(semis[0] + 1) / 2, 0.07 * Math.min(1, sig.losing * 2.5), 5);
+      const tg = 0.07 * Math.min(1, sig.losing * 2.5);
+      tension = organ(f(semis[0] + 1) / 2, tg, 5);
       activeGains.push(tension.g);
+      activeGains.push(strings(f(semis[0] + 1), tg, t));
     }
   }
 
@@ -171,11 +236,13 @@ const LWAUDIO = (() => {
     const o2 = ctx.createOscillator(); o2.frequency.value = 36.95;   // beat ~0.25Hz
     const g = ctx.createGain(); g.gain.value = 0;
     const trem = ctx.createOscillator(); trem.frequency.value = 0.8; // the heartbeat
-    const tg = ctx.createGain(); tg.gain.value = 0.04;
+    // tremolo depth is GATED with the drone (update scales it): a fixed
+    // depth summed into g.gain kept a faint 36.7Hz pulse alive at idle
+    const tg = ctx.createGain(); tg.gain.value = 0;
     trem.connect(tg).connect(g.gain);
     o.connect(g); o2.connect(g); g.connect(musicBus);
     o.start(); o2.start(); trem.start();
-    doomDrone = g;
+    doomDrone = g; doomTremG = tg;
     // ENEMY DOOM, audible: 36.7Hz is silent on phone speakers. The approach
     // layer is a beating 110Hz pair + a dark saw, opening and LOUDENING with
     // proximity, its heartbeat tremolo ACCELERATING 0.8 -> 3.5Hz as the hole
@@ -186,8 +253,9 @@ const LWAUDIO = (() => {
     enemyLP = ctx.createBiquadFilter(); enemyLP.type = "lowpass"; enemyLP.frequency.value = 200;
     enemyG = ctx.createGain(); enemyG.gain.value = 0;
     enemyTrem = ctx.createOscillator(); enemyTrem.frequency.value = 0.8;
-    const etg = ctx.createGain(); etg.gain.value = 0.05;
+    const etg = ctx.createGain(); etg.gain.value = 0;    // gated with the layer (see update)
     enemyTrem.connect(etg).connect(enemyG.gain);
+    enemyTremG = etg;
     e1.connect(enemyLP); e2.connect(enemyLP); e3.connect(enemyLP);
     enemyLP.connect(enemyG).connect(musicBus);
     e1.start(); e2.start(); e3.start(); enemyTrem.start();
@@ -204,10 +272,11 @@ const LWAUDIO = (() => {
     c1.start(); c2.start(); cwob.start();
   }
   let enemyG = null, enemyLP = null, enemyTrem = null, clashG = null;
+  let doomTremG = null, enemyTremG = null;
   let novaRiser = null;
-  function novaCharge(on) {                    // the riser teaches the detonation by ear
+  function novaCycle(nova) {                   // the riser teaches the detonation by ear
     const now = ctx.currentTime;
-    if (on && !novaRiser) {
+    if (nova === "charge" && !novaRiser) {
       const o = ctx.createOscillator(); o.type = "sawtooth";
       o.frequency.setValueAtTime(f(12, 220), now);
       o.frequency.linearRampToValueAtTime(f(24, 220), now + 1.8);
@@ -217,14 +286,19 @@ const LWAUDIO = (() => {
       const g = ctx.createGain();
       g.gain.setValueAtTime(0, now);
       g.gain.linearRampToValueAtTime(0.09, now + 1.6);
+      // SELF-TERMINATING: if the charge signal freezes (hidden tab, dropped
+      // frames) the saw must not drone at full gain forever
+      g.gain.setTargetAtTime(0, now + 2.4, 0.3);
       o.connect(lp).connect(g).connect(sfxBus);
-      o.start(now);
+      o.start(now); o.stop(now + 4);
       novaRiser = { o, g };
-    } else if (!on && novaRiser) {
+    } else if (nova !== "charge" && novaRiser) {
       novaRiser.g.gain.setTargetAtTime(0, now, 0.02);     // cut...
-      novaRiser.o.stop(now + 0.3);
+      try { novaRiser.o.stop(now + 0.3); } catch (e) {}
       novaRiser = null;
-      taiko(1.0, 0.7); thud(1.0); duck(0.6);              // ...and DETONATE
+      // ...and DETONATE — but ONLY on the real boom phase: aborting the
+      // charge (stance switch, mode cycle, match end) gets no false payoff
+      if (nova === "boom") { taiko(1.0, 0.7); thud(1.0); duck(0.6); }
     }
   }
 
@@ -237,10 +311,147 @@ const LWAUDIO = (() => {
     const lfo = ctx.createOscillator(); lfo.frequency.value = 0.11;
     const lg = ctx.createGain(); lg.gain.value = 320;
     bp.frequency.value = 420; lfo.connect(lg).connect(bp.frequency);
+    // WHIRL (held Maelstrom): one slow 0.25Hz LFO leans the wash around the
+    // head AND breathes a lowpass on top — both depths sit at 0 until the
+    // stance is held, so the plain mael signal sounds exactly as before
+    const lpW = ctx.createBiquadFilter(); lpW.type = "lowpass"; lpW.frequency.value = 2600;
+    const pan = ctx.createStereoPanner();
+    const whirl = ctx.createOscillator(); whirl.frequency.value = 0.25;
+    maelWhirlPan = ctx.createGain(); maelWhirlPan.gain.value = 0;
+    maelWhirlLP = ctx.createGain(); maelWhirlLP.gain.value = 0;
+    whirl.connect(maelWhirlPan).connect(pan.pan);
+    whirl.connect(maelWhirlLP).connect(lpW.frequency);
     const g = ctx.createGain(); g.gain.value = 0;
-    src.connect(bp).connect(g).connect(musicBus);
-    src.start(); lfo.start();
+    src.connect(bp).connect(lpW).connect(g).connect(pan).connect(musicBus);
+    src.start(); lfo.start(); whirl.start();
     maelWash = g;
+  }
+
+  // ---- STANCE SIGNATURES: one continuous texture per held formation,
+  // sitting UNDER the score (identity, not noise — gains 0.05-0.08 on the
+  // music bus). 0.6s crossfade old->new on stance change; retired graphs are
+  // stopped + disconnected after the fade so churn never leaks nodes.
+  // Doom and Maelstrom reuse the existing drone/wash machinery (see update);
+  // Classic is intentional silence — the original game's voice.
+  function mkSig(level) {                      // fade-in handle for a signature
+    const g = ctx.createGain();
+    const t = ctx.currentTime;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(level, t + 0.6);
+    g.connect(stanceBus);
+    return { g, nodes: [] };                   // nodes: everything with a .stop()
+  }
+  function retireSig(h) {
+    if (!h) return;
+    const now = ctx.currentTime;
+    h.g.gain.cancelScheduledValues(now);
+    h.g.gain.setValueAtTime(h.g.gain.value, now);
+    h.g.gain.linearRampToValueAtTime(0, now + 0.6);
+    setTimeout(() => {                         // stop AFTER the fade — no clicks
+      for (const n of h.nodes) { try { n.stop(); } catch (e) {} }
+      try { h.g.disconnect(); } catch (e) {}
+    }, 900);
+  }
+  function noiseSrc(secs = 1) {                // small white-noise loop for textures
+    const len = (ctx.sampleRate * secs) | 0, buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true;
+    return src;
+  }
+  const SIGS = {
+    Swarm() {                                  // airy shimmer — a thousand wingbeats
+      const h = mkSig(0.05);
+      const src = noiseSrc();
+      const bp = ctx.createBiquadFilter(); bp.type = "bandpass";
+      bp.frequency.value = 4500; bp.Q.value = 1.2;
+      const fl = ctx.createGain(); fl.gain.value = 0.6;
+      const lfo = ctx.createOscillator(); lfo.frequency.value = 6;   // the flutter
+      const lg = ctx.createGain(); lg.gain.value = 0.35;
+      lfo.connect(lg).connect(fl.gain);
+      src.connect(bp).connect(fl).connect(h.g);
+      src.start(); lfo.start(); h.nodes.push(src, lfo);
+      return h;
+    },
+    Spin() {                                   // rotating sweep — the blade going by
+      const h = mkSig(0.05);
+      const o = ctx.createOscillator(); o.type = "sawtooth"; o.frequency.value = f(0, 220);
+      const bp = ctx.createBiquadFilter(); bp.type = "bandpass";
+      bp.frequency.value = 1000; bp.Q.value = 5;
+      const pan = ctx.createStereoPanner();
+      const lfo = ctx.createOscillator(); lfo.frequency.value = 0.4; // one rev ~2.5s
+      const fg = ctx.createGain(); fg.gain.value = 620;
+      const pg = ctx.createGain(); pg.gain.value = 0.8;
+      lfo.connect(fg).connect(bp.frequency);   // sweep + pan in phase = rotation
+      lfo.connect(pg).connect(pan.pan);
+      o.connect(bp).connect(pan).connect(h.g);
+      o.start(); lfo.start(); h.nodes.push(o, lfo);
+      return h;
+    },
+    Drill() {                                  // low machine grind, gated at 8Hz
+      const h = mkSig(0.07);
+      const ws = ctx.createWaveShaper();       // the grit
+      const curve = new Float32Array(257);
+      for (let i = 0; i < 257; i++) curve[i] = Math.tanh(2.5 * (i / 128 - 1));
+      ws.curve = curve;
+      const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 260;
+      const gate = ctx.createGain(); gate.gain.value = 0.5;
+      const lfo = ctx.createOscillator(); lfo.type = "square"; lfo.frequency.value = 8;
+      const lg = ctx.createGain(); lg.gain.value = 0.45;             // gates ~0.05..0.95
+      lfo.connect(lg).connect(gate.gain);
+      for (const [type, fr] of [["square", 55], ["sawtooth", 55.6]]) {
+        const o = ctx.createOscillator(); o.type = type; o.frequency.value = fr;
+        o.connect(ws); o.start(); h.nodes.push(o);
+      }
+      ws.connect(lp).connect(gate).connect(h.g);
+      lfo.start(); h.nodes.push(lfo);
+      return h;
+    },
+    Wall() {                                   // granite stillness — D2+A2, barely breathing
+      const h = mkSig(0.05);
+      const br = ctx.createGain(); br.gain.value = 0.8;
+      const lfo = ctx.createOscillator(); lfo.frequency.value = 0.1; // the breath
+      const lg = ctx.createGain(); lg.gain.value = 0.2;
+      lfo.connect(lg).connect(br.gain);
+      for (const fr of [73.42, 110]) {         // perfect fifth, both in the Phrygian bed
+        const o = ctx.createOscillator(); o.type = "sine"; o.frequency.value = fr;
+        o.connect(br); o.start(); h.nodes.push(o);
+      }
+      br.connect(h.g); lfo.start(); h.nodes.push(lfo);
+      return h;
+    },
+    Pulse() {                                  // empty vessel: the GRID delivers the ticks
+      return mkSig(0.08);
+    },
+    Atom() {                                   // 220 vs 223Hz: orbital interference, ears apart
+      const h = mkSig(0.05);
+      for (const [fr, p] of [[220, -0.6], [223, 0.6]]) {
+        const o = ctx.createOscillator(); o.type = "sine"; o.frequency.value = fr;
+        const og = ctx.createGain(); og.gain.value = 0.5;
+        const pan = ctx.createStereoPanner(); pan.pan.value = p;
+        o.connect(og).connect(pan).connect(h.g);
+        o.start(); h.nodes.push(o);
+      }
+      return h;
+    },
+    // Doom / Maelstrom: no graph here — update() drives the existing drone
+    // and wash machinery off stanceCur. Classic: silence, on purpose.
+  };
+  function pulseTick(when, dest, thump) {      // the Pulse clock-throb, grid-locked
+    const o = ctx.createOscillator(); o.type = "sine"; o.frequency.value = 1760;
+    const bp = ctx.createBiquadFilter(); bp.type = "bandpass";
+    bp.frequency.value = 1760; bp.Q.value = 9;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.6, when);
+    g.gain.setTargetAtTime(0, when + 0.004, 0.02);
+    o.connect(bp).connect(g).connect(dest);
+    o.start(when); o.stop(when + 0.25);
+    if (!thump) return;                        // the faint sub only rides the beat
+    const o2 = ctx.createOscillator(); o2.type = "sine"; o2.frequency.value = 55;
+    const g2 = ctx.createGain();
+    g2.gain.setValueAtTime(0.5, when);
+    g2.gain.setTargetAtTime(0, when + 0.02, 0.05);
+    o2.connect(g2).connect(dest); o2.start(when); o2.stop(when + 0.4);
   }
 
   function sparkle() {                          // bioluminescent bell-pluck
@@ -261,14 +472,16 @@ const LWAUDIO = (() => {
   // TAIKO: ceremonial hits — a pitch-dropping low sine + a skin-noise burst.
   // Silent at peace; the pattern wakes and quickens as the battle builds
   // (or while a Doom well is open — dread has a drum).
-  function duck(amount = 0.68) {               // drums get a pocket in the pads
-    const t = ctx.currentTime;
-    padBus.gain.setTargetAtTime(amount, t, 0.015);
+  function duck(amount = 0.68, when = null) {  // drums get a pocket in the pads
+    if (!ctx) return;
+    const t = when ?? ctx.currentTime;         // honor the grid's lookahead — the
+    padBus.gain.setTargetAtTime(amount, t, 0.015);   // pocket used to open ~250ms early
     padBus.gain.setTargetAtTime(1.0, t + 0.09, 0.22);
   }
   function taiko(strength, low = 1, when = null) {
+    if (!ctx || !enabled) return;              // public API: must survive pre-enable calls
     const t = when ?? ctx.currentTime;
-    if (strength > 0.6) duck();
+    if (strength > 0.6) duck(0.68, t);
     const o = ctx.createOscillator(); o.type = "sine";
     o.frequency.setValueAtTime(66 * low, t);
     o.frequency.exponentialRampToValueAtTime(34 * low, t + 0.32);
@@ -294,6 +507,10 @@ const LWAUDIO = (() => {
     const now = ctx.currentTime;
     coda = now + 7;
     activeGains.forEach(retire); activeGains = [];
+    // cadences belong to the ORGAN: snap the crossfade home for the coda
+    // (update() holds it there while the resolution plays)
+    peaceBus.gain.setTargetAtTime(1, now, 0.15);
+    warBus.gain.setTargetAtTime(0, now, 0.15);
     const scale = outcome === "human" ? 0.6 : 1.0;
     if (outcome === "lose") {
       for (const [semi, base, gn] of [[1, 55, 0.12], [1, 110, 0.10]]) {
@@ -394,30 +611,31 @@ const LWAUDIO = (() => {
     g.gain.setTargetAtTime(0, t + 0.01, 0.05);
     o.connect(g).connect(sfxBus); o.start(t); o.stop(t + 0.3);
   }
-  function stanceTap(i) {                       // per-stance confirmation note
+  // per-stance confirmation note: same pentatonic bed, but each stance
+  // answers in its OWN voice — waveform + register keyed to the slot
+  // (Swarm..Classic), so the hand learns the sound before the eye finds the
+  // label. Classic keeps the original plain sine: purity.
+  const TAP_TYPE = ["sine", "sawtooth", "square", "triangle", "sine",
+                    "sawtooth", "triangle", "sine", "sine"];
+  const TAP_OCT  = [1, 1, 0.5, 0.5, 2, 0.25, 1, 2, 1];
+  function stanceTap(i) {
     if (!ctx || !enabled) return;
     const t = ctx.currentTime;
-    const o = ctx.createOscillator(); o.type = "sine";
-    o.frequency.value = f(PENTA[i % PENTA.length], 330);
+    const o = ctx.createOscillator(); o.type = TAP_TYPE[i % 9];
+    o.frequency.value = f(PENTA[i % PENTA.length], 330) * TAP_OCT[i % 9];
+    const lp = ctx.createBiquadFilter(); lp.type = "lowpass";
+    lp.frequency.value = o.type === "sine" ? 4000 : 1400;  // keep rough waves soft
     const g = ctx.createGain();
     g.gain.setValueAtTime(0.12, t);
     g.gain.setTargetAtTime(0, t + 0.04, 0.18);
-    o.connect(g).connect(sfxBus); o.start(t); o.stop(t + 1);
+    o.connect(lp).connect(g).connect(sfxBus); o.start(t); o.stop(t + 1);
+    if (i % 9 === 7) {                          // Atom: the beat pair, even in the tap
+      const o2 = ctx.createOscillator(); o2.type = "sine";
+      o2.frequency.value = o.frequency.value + 3;
+      o2.connect(lp); o2.start(t); o2.stop(t + 1);
+    }
   }
-  function stinger(won) {
-    if (!ctx) return;
-    const base = won ? [0, 7, 12, 19] : [0, -3, -8];
-    base.forEach((s, i) => {
-      const o = ctx.createOscillator(); o.type = "sine";
-      o.frequency.value = f(s, won ? 220 : 165);
-      const g = ctx.createGain();
-      const t = ctx.currentTime + i * (won ? 0.12 : 0.3);
-      g.gain.setValueAtTime(0, t);
-      g.gain.linearRampToValueAtTime(0.14, t + 0.1);
-      g.gain.setTargetAtTime(0, t + 0.4, won ? 0.5 : 1.4);
-      o.connect(g).connect(sfxBus); o.start(t); o.stop(t + 5);
-    });
-  }
+  // (the old stinger() is gone — resolveEnd() is the match-resolution voice)
 
   // ---- THE GRID (the Pompeii engine, energetic cut): 104 BPM, a 16th-note
   // lookahead clock. The ostinato GALLOPS (DUM-dumdum per beat), taiko gets a
@@ -470,6 +688,18 @@ const LWAUDIO = (() => {
     sig = s;
     const now = ctx.currentTime, dt = Math.min(0.1, now - lastT || 0.016);
     lastT = now;
+    // a NEW round while the coda still rings (quick Rematch) un-mutes the
+    // grid — the war machine used to start the next match silenced
+    if (!s.done && wasDone && coda > now) coda = 0;
+    // STANCE SIGNATURE handover (stance/smode are OPTIONAL — undefined-safe):
+    // retire the old texture, raise the new one, 0.6s crossfade
+    const st = s.stance || "";
+    smodeCur = s.smode || "";
+    if (st !== stanceCur) {
+      retireSig(stanceSig);
+      stanceCur = st;
+      stanceSig = Object.hasOwn(SIGS, st) ? SIGS[st]() : null;  // Doom/Mael/Classic build nothing
+    }
     if (nextNote < now) nextNote = now + 0.05;
     const drive = Math.max(sig.intensity, sig.doom ? 0.3 : 0);
     while (nextNote < now + 0.25) {            // standard WebAudio lookahead
@@ -479,7 +709,7 @@ const LWAUDIO = (() => {
       // harmonic rhythm doubles at climax: chords every bar, else every 2
       const inCoda = now < coda;                 // resolution playing: war machine rests
       if (!inCoda && (st16 === 0 || (drive > 0.55 && st16 === 16))) {
-        if ((bar % 2 === 0) || drive > 0.55) nextChord();
+        if ((bar % 2 === 0) || drive > 0.55) nextChord(nextNote);
       }
       // the GALLOP: hit on 1, and-a (sub16 0, 2, 3) — rest on the e
       if (!inCoda && drive > 0.05 && sub16 !== 1) {
@@ -493,6 +723,12 @@ const LWAUDIO = (() => {
         if (st16 === 16) taiko(0.6 * Math.min(1, 0.5 + drive), 1.2, nextNote);
         if (drive > 0.35 && (st16 === 8 || st16 === 24)) taiko(0.4 * drive, 1.5, nextNote);
         if (drive > 0.6 && st16 === 30) taiko(0.5 * drive, 1.4, nextNote);
+      }
+      // PULSE signature: the clock-throb rides the same grid, sample-accurate
+      // (every 4th 16th; nova mode: the clock RACES at 8ths)
+      if (!inCoda && stanceCur === "Pulse" && stanceSig) {
+        const every = smodeCur === "nova" ? 2 : 4;
+        if (gridStep % every === 0) pulseTick(nextNote, stanceSig.g, sub16 === 0);
       }
       // the THEME at full battle, riding the pulse
       if (!inCoda && drive > 0.4 && gridStep >= melNext) {
@@ -510,19 +746,47 @@ const LWAUDIO = (() => {
       sparkTimer = 1.2 + Math.random() * 3.5 + 4 * drive;
     }
     sub.g.gain.setTargetAtTime(0.13 + 0.11 * sig.intensity, now, 1.5);
+    // PEACE/WAR crossfade: equal-power on intensity, smoothed (~2s settle)
+    // so it breathes — organ fully out by intensity ~0.45, strings own the
+    // battle. Forced home during the coda so cadences play on the organ.
+    const war = now < coda ? 0 : Math.min(1, (sig.intensity || 0) / 0.45);
+    peaceBus.gain.setTargetAtTime(Math.cos(war * Math.PI / 2), now, 0.5);
+    warBus.gain.setTargetAtTime(Math.sin(war * Math.PI / 2), now, 0.5);
     // YOUR doom: the sub drone scales with charge level; ENEMY doom: the
-    // audible approach layer + accelerating heartbeat; the counter CLASHES
-    const lvl = sig.doomLvl || 0;
-    doomDrone.gain.setTargetAtTime(lvl ? [0.14, 0.19, 0.24][lvl - 1] : (sig.doom ? 0.12 : 0), now, 1.0);
+    // audible approach layer + accelerating heartbeat; the counter CLASHES.
+    // HOLDING Doom yourself wakes the same drone (max, never summed — one
+    // well, one voice, even when both sides are doom-handed)
+    const lvl = sig.doomLvl || 0, dtab = [0.14, 0.19, 0.24];
+    let dg = lvl ? dtab[lvl - 1] : (sig.doom ? 0.12 : 0);
+    if (stanceCur === "Doom") dg = Math.max(dg, lvl ? dtab[lvl - 1] : 0.10);
+    doomDrone.gain.setTargetAtTime(dg, now, 1.0);
+    doomTremG.gain.setTargetAtTime(dg * 0.3, now, 1.0);  // heartbeat depth gated WITH the drone
     const prox = sig.doomProx || 0;
-    enemyG.gain.setTargetAtTime(prox > 0.02 ? 0.05 + 0.13 * prox : 0, now, 0.5);
+    const eg = prox > 0.02 ? 0.05 + 0.13 * prox : 0;
+    enemyG.gain.setTargetAtTime(eg, now, 0.5);
+    enemyTremG.gain.setTargetAtTime(eg * 0.4, now, 0.5);
     enemyLP.frequency.setTargetAtTime(200 + 700 * prox, now, 0.5);
     enemyTrem.frequency.setTargetAtTime(0.8 + 2.7 * prox, now, 0.4);
-    clashG.gain.setTargetAtTime(0.06 * Math.min(sig.mael ? 1 : 0, prox > 0.1 ? 1 : 0) * Math.max(prox, 0.4), now, 0.4);
-    maelWash.gain.setTargetAtTime(sig.mael ? 0.12 : 0, now, 0.8);
-    novaCharge(sig.nova === "charge");
+    // the clash is YOUR counter-play cue: it sings only when YOU hold the
+    // Maelstrom against a nearby enemy well (sig.mael also covers AI storms)
+    const meMael = stanceCur === "Maelstrom" ? 1 : 0;
+    clashG.gain.setTargetAtTime(0.06 * Math.min(meMael, prox > 0.1 ? 1 : 0) * Math.max(prox, 0.4), now, 0.4);
+    // HOLDING Maelstrom keeps a quieter wash up and engages the whirl
+    const maelHeld = stanceCur === "Maelstrom";
+    maelWash.gain.setTargetAtTime(sig.mael ? 0.12 : (maelHeld ? 0.08 : 0), now, 0.8);
+    maelWhirlPan.gain.setTargetAtTime(maelHeld ? 0.7 : 0, now, 0.4);
+    maelWhirlLP.gain.setTargetAtTime(maelHeld ? 1500 : 0, now, 0.4);
+    novaCycle(sig.nova);
     if (s.done && !wasDone) resolveEnd(s.outcome || (s.won ? "win" : "lose"));
     wasDone = s.done;
+  }
+  // hidden tab: a muted-by-OS game kept paying for (and sometimes leaking)
+  // battle SFX — suspend the whole context, resume on return
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (!ctx || !enabled) return;
+      if (document.hidden) ctx.suspend(); else ctx.resume();
+    });
   }
 
   function setEnabled(v) {
@@ -538,5 +802,5 @@ const LWAUDIO = (() => {
   }
   return { update, thud, blip, stanceTap, setFlow, taiko, setEnabled, setVolumes,
            get enabled() { return enabled; },
-           get debug() { return { state: ctx && ctx.state, beat: gridStep, music: musicBus && musicBus.gain.value }; } };
+           get debug() { return { state: ctx && ctx.state, beat: gridStep, stance: stanceCur, music: musicBus && musicBus.gain.value }; } };
 })();

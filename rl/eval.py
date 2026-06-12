@@ -39,8 +39,19 @@ from pathlib import Path
 
 import torch
 
-from rl.policy import CursorPolicy, act, apply_stances
+from rl.policy import ACTIONS, CursorPolicy, act, apply_stances
 from simulator.engine import LiquidWarEngine
+
+#: The best.pt gate's scripted opponent pool: heuristic cursor + a flat action
+#: held permanently by every opponent team (None = un-stanced, neutral knobs —
+#: the historical baseline). A single neutral opponent could not see the Doom
+#: collapse coming: Doom farmed well-less prey and no Maelstrom counter ever
+#: appeared, so the gate evaluates vs all three and best.pt needs the MEAN.
+POOL_OPPONENTS = (
+    ("neutral", None),
+    ("maelstrom", ACTIONS.index(("Maelstrom", "undertow"))),   # flat action 19
+    ("doom2x", ACTIONS.index(("Doom", "2x"))),                 # flat action 17
+)
 
 
 @torch.no_grad()
@@ -90,17 +101,21 @@ def _opponent_dydx(opponent, engine: LiquidWarEngine, obs: torch.Tensor) -> torc
 def win_rate(eval_policy: CursorPolicy, opponent, *, games: int = 128,
              teams: int = 4, height: int = 80, width: int = 110,
              fighters: int = 500, device: str = "cuda",
-             max_ticks: int = 3000) -> float:
+             max_ticks: int = 3000, opp_stance: int | None = None) -> float:
     """Fraction of ``games`` that team 0 (``eval_policy``) wins vs ``opponent``.
 
     :param eval_policy: the policy under evaluation (drives team 0).
     :param opponent: ``"heuristic"`` | ``"random"`` | a :class:`CursorPolicy`
         (drives teams 1..T-1).
+    :param opp_stance: flat action held PERMANENTLY by teams 1..T-1, forced
+        through the same :func:`apply_stances` path the policy uses (knobs +
+        wells included). ``None`` = un-stanced opponents with neutral knobs.
     :returns: team-0 win fraction in ``[0, 1]``.
     """
     engine = LiquidWarEngine(batch_size=games, height=height, width=width,
                              num_teams=teams, fighters_per_team=fighters,
                              device=device)
+    engine._wells_enabled = True   # eval mirrors play: Doom/Maelstrom wells are REAL
     engine.reset()
     B, T = engine.B, engine.T
     winners = torch.full((B,), -1, dtype=torch.long, device=device)  # -1 = unfinished
@@ -110,12 +125,16 @@ def win_rate(eval_policy: CursorPolicy, opponent, *, games: int = 128,
                                               deterministic=True)
         dydx = _opponent_dydx(opponent, engine, obs)
         dydx[:, 0] = eval_dydx[:, 0]                  # team 0 = eval policy
-        # team 0 holds its chosen stance; opponents (1..) stay un-stanced (default).
+        # team 0 holds its chosen stance; opponents (1..) hold ``opp_stance``
+        # (knobs/wells via the normal path) or stay un-stanced + neutral knobs.
         st = torch.zeros(B, T, dtype=torch.long, device=device)
         st[:, 0] = eval_stance[:, 0]
+        if opp_stance is not None:
+            st[:, 1:] = opp_stance
         apply_stances(engine, st, dydx)
-        engine._spin[:, 1:] = 1.0; engine._burst[:, 1:] = 0.0
-        engine._drill[:, 1:] = 0.0; engine._wall[:, 1:] = 0.0; engine._surge[:, 1:] = 1.0
+        if opp_stance is None:
+            engine._spin[:, 1:] = 1.0; engine._burst[:, 1:] = 0.0
+            engine._drill[:, 1:] = 0.0; engine._wall[:, 1:] = 0.0; engine._surge[:, 1:] = 1.0
         _, done, _ = engine.step(dydx)
         newly = done & (winners < 0)
         if newly.any():
@@ -128,6 +147,68 @@ def win_rate(eval_policy: CursorPolicy, opponent, *, games: int = 128,
         w = engine.team_oh.sum(dim=(2, 3)).argmax(dim=1)
         winners[unfinished] = w[unfinished]
     return (winners == 0).float().mean().item()
+
+
+@torch.no_grad()
+def win_rate_pool(eval_policy: CursorPolicy, *, games: int = 32,
+                  teams: int = 2, height: int = 80, width: int = 110,
+                  fighters: int = 500, device: str = "cuda",
+                  max_ticks: int = 3000) -> tuple[float, dict[str, float]]:
+    """Win-rate vs each scripted opponent in :data:`POOL_OPPONENTS`.
+
+    All three opponents run in ONE batched engine (``games`` per opponent,
+    sliced by game index): batch scaling is sublinear, so this is much cheaper
+    than three sequential :func:`win_rate` calls and pays the cold gradient
+    flood once. Undecided games at ``max_ticks`` award the current
+    fighter-count leader, exactly like :func:`win_rate`.
+
+    :param games: games PER opponent type (3 opponents -> 3x``games`` total).
+    :returns: ``(mean_win_rate, {opponent_name: win_rate})`` — gate best.pt on
+        the mean so a one-trick policy can't ride a single soft matchup.
+    """
+    n_opp = len(POOL_OPPONENTS)
+    engine = LiquidWarEngine(batch_size=games * n_opp, height=height,
+                             width=width, num_teams=teams,
+                             fighters_per_team=fighters, device=device)
+    engine._wells_enabled = True   # eval mirrors play: Doom/Maelstrom wells are REAL
+    engine.reset()
+    B, T = engine.B, engine.T
+    # Per-game opponent action row: -1 = neutral (un-stanced, bare knobs).
+    opp_st = torch.full((B,), -1, dtype=torch.long, device=device)
+    for i, (_, a) in enumerate(POOL_OPPONENTS):
+        if a is not None:
+            opp_st[i * games:(i + 1) * games] = a
+    neutral = opp_st < 0                              # (B,)
+    winners = torch.full((B,), -1, dtype=torch.long, device=device)  # -1 = unfinished
+    for _ in range(max_ticks):
+        obs = engine.get_observation()
+        eval_dydx, eval_stance, _, _, _ = act(eval_policy, obs, T, engine.team_alive,
+                                              deterministic=True)
+        dydx = _heuristic_dydx(engine)
+        dydx[:, 0] = eval_dydx[:, 0]                  # team 0 = eval policy
+        # team 0 holds its chosen stance; opponents hold their slice's action
+        # (knobs/wells via the normal path) or stay un-stanced + neutral knobs.
+        st = opp_st.clamp(min=0).unsqueeze(1).expand(B, T).clone()
+        st[:, 0] = eval_stance[:, 0]
+        apply_stances(engine, st, dydx)
+        engine._spin[neutral, 1:] = 1.0; engine._burst[neutral, 1:] = 0.0
+        engine._drill[neutral, 1:] = 0.0; engine._wall[neutral, 1:] = 0.0
+        engine._surge[neutral, 1:] = 1.0
+        _, done, _ = engine.step(dydx)
+        newly = done & (winners < 0)
+        if newly.any():
+            w = engine.team_oh.sum(dim=(2, 3)).argmax(dim=1)
+            winners[newly] = w[newly]
+        if (winners >= 0).all():
+            break
+    unfinished = winners < 0                          # hit max_ticks: award leader
+    if unfinished.any():
+        w = engine.team_oh.sum(dim=(2, 3)).argmax(dim=1)
+        winners[unfinished] = w[unfinished]
+    won = (winners == 0).float()
+    rates = {name: won[i * games:(i + 1) * games].mean().item()
+             for i, (name, _) in enumerate(POOL_OPPONENTS)}
+    return sum(rates.values()) / len(rates), rates
 
 
 def _load_policy(path: str, device: str) -> CursorPolicy:

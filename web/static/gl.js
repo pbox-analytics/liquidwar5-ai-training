@@ -329,6 +329,11 @@ function create(canvas, teamColors) {
   }
   const COLORS = new Float32Array(18);
   teamColors.slice(0, 6).forEach((c, i) => COLORS.set(hex2rgb(c), i * 3));
+  // lobby color picks re-skin the armies live: uColors uploads every render,
+  // so rewriting the array is the whole job
+  function setPalette(hexList) {
+    hexList.slice(0, 6).forEach((c, i) => COLORS.set(hex2rgb(c), i * 3));
+  }
 
   // ---- mote buffers: a 3-buffer ring of int16 positions + per-frame team/density,
   // plus a static per-mote random table.
@@ -413,7 +418,9 @@ function create(canvas, teamColors) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    clearTrails();
+    // (no clearTrails here: the client re-uploads walls only on map change
+    // and clears trails explicitly there — a same-map re-upload mid-fight
+    // must not wipe the motion history)
   }
 
   function pushFrame(pos, team, n) {              // pos Int16Array (y,x)*n, team Uint8Array n
@@ -575,7 +582,7 @@ function create(canvas, teamColors) {
     drawFx(o.cursorFx, o.cursorFxCount, vw, vh);
   }
 
-  return { setGrid, pushFrame, render, clearTrails, resize };
+  return { setGrid, pushFrame, render, clearTrails, resize, setPalette };
 }
 
 return { create };

@@ -60,36 +60,36 @@ LEGACY_ACTION = (0, 2, 6, 8, 10, 16, 19, 22)
 # Per-action knob tables (rows = ACTIONS). Columns follow the play server's
 # stance blocks exactly; 0 = knob off. Tick-phased modes (Pulse wave / nova)
 # are patched at apply time.
-#          spin burst surge fig8 nl  nm   nk    nw    nv   adv  wy  wx tide rin  ecc dLvl mRad mOn
+#          spin burst surge fig8 nl  nm   nk    nw    nv   adv  wy  wx tide rin  ecc dLvl mRad mOn cspd
 _KNOBS = [
-    (0.5,  0.15, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Swarm cloud
-    (0.35, -0.25, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.85, 0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Swarm comet
-    (1.7,  -0.4, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Spin vortex
-    (1.6,  -0.45, 1.0, 0, 0,  8,  0.0,  0.4,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Spin sawblade
-    (1.1,  0.35, 1.0, 0, 0,  3,  0.25, -0.05, 0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Spin galaxy
-    (0.3,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  1.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Drill slow
-    (0.7,  0.0,  2.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.62, 0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Drill med
-    (1.5,  0.0,  4.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.34, 0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Drill fast
-    (0.0,  -0.9, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  1, 0, 0, 0.0,  0, 0, 0.0,  0),  # Wall horiz
-    (0.0,  -0.9, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 1, 0, 0.0,  0, 0, 0.0,  0),  # Wall vert
-    (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Pulse wave (tick-phased)
-    (0.0,  0.0,  3.0, 0, 12, 0,  0.0,  0.0,  0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Pulse rings
-    (0.0,  0.0,  3.0, 0, 16, 6,  0.0,  0.05, 0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Pulse star
-    (0.0,  0.0,  2.5, 0, 16, 8,  0.15, 0.03, 0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Pulse lattice
-    (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Pulse nova (tick-phased)
-    (0.0,  0.0,  2.5, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 1, 0.0,  0, 0, 0.0,  0),  # Pulse tide
-    (1.2,  0.0,  1.5, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 6.7,  1, 1, 0.0,  0),  # Doom 1x
-    (1.8,  0.0,  1.75, 0, 0, 0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 9.0,  1, 2, 0.0,  0),  # Doom 2x
-    (2.4,  0.0,  2.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 11.3, 1, 3, 0.0,  0),  # Doom 3x
-    (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.30, 1),  # Maelstrom undertow
-    (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, -0.7, 1),  # Maelstrom ejecta
-    (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  1),  # Maelstrom shear
-    (1.8,  0.4,  1.0, 1, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Atom orbital
-    (1.6,  0.45, 1.0, 2, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Atom binary
-    (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0),  # Classic
+    (0.5,  0.15, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Swarm cloud
+    (0.35, -0.25, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.85, 0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Swarm comet
+    (1.7,  -0.4, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Spin vortex
+    (1.6,  -0.45, 1.0, 0, 0,  8,  0.0,  0.4,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Spin sawblade
+    (1.1,  0.35, 1.0, 0, 0,  3,  0.25, -0.05, 0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Spin galaxy
+    (0.3,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  1.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Drill slow
+    (0.7,  0.0,  2.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.62, 0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Drill med
+    (1.5,  0.0,  4.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.34, 0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Drill fast
+    (0.0,  -0.9, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  1, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Wall horiz
+    (0.0,  -0.9, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 1, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Wall vert
+    (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Pulse wave (tick-phased)
+    (0.0,  0.0,  3.0, 0, 12, 0,  0.0,  0.0,  0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Pulse rings
+    (0.0,  0.0,  3.0, 0, 16, 6,  0.0,  0.05, 0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Pulse star
+    (0.0,  0.0,  2.5, 0, 16, 8,  0.15, 0.03, 0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Pulse lattice
+    (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Pulse nova (tick-phased)
+    (0.0,  0.0,  2.5, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 1, 0.0,  0, 0, 0.0,  0, 1.0),  # Pulse tide
+    (1.2,  0.0,  1.5, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 6.7,  1, 1, 0.0,  0, 0.7),  # Doom 1x
+    (1.8,  0.0,  1.75, 0, 0, 0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 9.0,  1, 2, 0.0,  0, 0.5),  # Doom 2x
+    (2.4,  0.0,  2.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 11.3, 1, 3, 0.0,  0, 0.35),  # Doom 3x
+    (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.30, 1, 1.0),  # Maelstrom undertow
+    (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, -0.7, 1, 1.0),  # Maelstrom ejecta
+    (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  1, 1.0),  # Maelstrom shear
+    (1.8,  0.4,  1.0, 1, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Atom orbital
+    (1.6,  0.45, 1.0, 2, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Atom binary
+    (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Classic
 ]
 _KNOB_NAMES = ("spin", "burst", "surge", "fig8", "nl", "nm", "nk", "nw", "nv",
-               "adv", "wy", "wx", "tide", "rin", "ecc", "dlvl", "mrad", "mon")
+               "adv", "wy", "wx", "tide", "rin", "ecc", "dlvl", "mrad", "mon", "cspd")
 _TABS_CACHE = {}
 
 
@@ -180,7 +180,7 @@ class CursorPolicy(nn.Module):
 
 
 def act(policy, obs, num_teams, team_alive=None, deterministic=False,
-        held_stance=None, decide=True):
+        held_stance=None, decide=True, stance_temp=0.0, stance_mask=None):
     """Sample cursor actions for all teams from the shared policy.
 
     Args:
@@ -197,6 +197,13 @@ def act(policy, obs, num_teams, team_alive=None, deterministic=False,
             credit (the entropy bonus then pins it at uniform). Decisions
             happen every K ticks; ppo_update masks the stance terms to match.
         decide: this tick is a stance-decision tick (always True in play/eval).
+        stance_temp: > 0 samples the STANCE head at this softmax temperature
+            even under ``deterministic`` (the move head stays argmax) — play
+            uses it so the AI shows its true stance mixture instead of the
+            mode; 0 keeps pure argmax. Training leaves this at 0.
+        stance_mask: optional additive logits mask broadcastable to
+            ``(B*T, head_size)`` (``-inf`` blocks an action) — the play
+            server's Doom-uptime governor. None = no masking.
 
     Returns:
         actions: (B, T, 2) long in {-1,0,1} for engine.step.
@@ -210,11 +217,17 @@ def act(policy, obs, num_teams, team_alive=None, deterministic=False,
     ego = build_egocentric_obs(obs, T)            # (B,T,EGO,H,W)
     flat = ego.reshape(B * T, EGO_CHANNELS, *ego.shape[-2:])
     move_logits, stance_logits, value = policy(flat)       # (B*T,9), (B*T,5), (B*T,)
+    if stance_mask is not None:
+        stance_logits = stance_logits + stance_mask.reshape(-1, stance_logits.shape[-1])
     mdist = torch.distributions.Categorical(logits=move_logits)
     sdist = torch.distributions.Categorical(logits=stance_logits)
     if deterministic:
         move = move_logits.argmax(dim=-1)
-        stance = stance_logits.argmax(dim=-1)
+        if stance_temp > 0:
+            stance = torch.distributions.Categorical(
+                logits=stance_logits / stance_temp).sample()
+        else:
+            stance = stance_logits.argmax(dim=-1)
     else:
         move = mdist.sample()
         stance = sdist.sample()
@@ -334,3 +347,18 @@ def apply_stances(engine, action, dydx, team_start=0, human_teams=None):
         engine._vortex_range[:, cols] = (1.5 * blob_r).clamp(min=60.0)[:, cols]
         engine._vortex_sign[:, cols] = 1.0
         engine._vortex_rad[:, cols] = mael_rad[:, cols]
+    # DOOM MOBILITY TAX, train/play parity: every charge level glides slow
+    # (the play server's dial). Training drives the batched per-team speed
+    # tensor; play updates the AI rows of the room's per-seat speed list —
+    # without this, training systematically overvalued Doom (it paid no
+    # mobility cost there), feeding the camp-on-Doom collapse.
+    cspd = tabs["cspd"][a]
+    base = max(1, round(engine.W / 96))
+    if human_teams is None and team_start <= 0:        # training / eval: (B,T) speeds
+        engine._cursor_speed_bt = (base * cspd).round().clamp(min=1).to(torch.int32)
+    else:                                              # play: AI seats only
+        spd_l = getattr(engine, "_cursor_speed_t", None)
+        if spd_l is not None and B == 1 and cols:
+            vals = cspd[0].tolist()
+            for t in cols:
+                spd_l[t] = max(1, round(base * vals[t]))

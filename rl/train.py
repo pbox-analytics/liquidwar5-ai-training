@@ -26,7 +26,7 @@ import torch
 from simulator.engine import LiquidWarEngine
 from rl.policy import CursorPolicy
 from rl.ppo import collect_rollout, ppo_update
-from rl.eval import win_rate
+from rl.eval import win_rate_pool
 
 # Kafka metrics publishing is optional — train fine without it.
 try:
@@ -59,6 +59,14 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=4)
     p.add_argument("--minibatches", type=int, default=4)
     p.add_argument("--ent-coef", type=float, default=0.01)
+    p.add_argument("--stance-ent-coef", type=float, default=0.015,
+                   help="Entropy coef for the STANCE head, normalized over "
+                        "decision ticks (stances decide every ~45 ticks, so "
+                        "the old all-sample mean was ~45x weaker than stated)")
+    p.add_argument("--stance-eps", type=float, default=0.0,
+                   help="Eps-greedy stance exploration on decision ticks; the "
+                        "stored/updated logprobs use the eps-mixture so PPO "
+                        "stays unbiased")
     p.add_argument("--vf-coef", type=float, default=0.5)
     # Runtime
     p.add_argument("--device", default="cuda")
@@ -76,6 +84,11 @@ def parse_args():
     p.add_argument("--warm-start", default="",
                    help="Policy .pt to warm-start FROM when the run dir is fresh "
                         "(ignored once latest.pt exists — resume wins)")
+    p.add_argument("--reset-stance-head", action="store_true",
+                   help="After loading weights (resume or --warm-start), re-init "
+                        "the stance head's FINAL layer to near-zero (~uniform "
+                        "stances) — the escape hatch for a collapsed stance head; "
+                        "conv body, move head and critic are kept")
     p.add_argument("--big-every", type=int, default=0,
                    help="MAP-SIZE CURRICULUM: every Nth update collects on a "
                         "160x240 board (batch 64, 1200 fighters/team) so the "
@@ -86,6 +99,17 @@ def parse_args():
     p.add_argument("--bootstrap-servers", default="")
     p.add_argument("--schema-registry", default="")
     return p.parse_args()
+
+
+def reset_stance_head(policy):
+    """Re-init the FINAL stance-head Linear to near-zero -> ~uniform stance
+    distribution, keeping conv body + move head + critic (recovers a stance
+    head that collapsed onto one action without throwing away cursor skill)."""
+    final = policy.stance_head[-1]                    # Linear(hidden, NUM_STANCES)
+    torch.nn.init.normal_(final.weight, mean=0.0, std=1e-4)
+    torch.nn.init.zeros_(final.bias)
+    print("!!! RESET STANCE HEAD: final stance layer re-initialized to "
+          "near-zero — stance distribution is now ~uniform !!!", flush=True)
 
 
 def setup_kafka(bootstrap, schema_registry):
@@ -148,6 +172,8 @@ def main():
         pt = resume if resume.suffix == ".pt" else resume / "latest.pt"
         if pt.exists():
             policy.load_state_dict(torch.load(pt, map_location=device, weights_only=True))
+            if args.reset_stance_head:
+                reset_stance_head(policy)
             opt_pt = pt.parent / "optim.pt"
             meta_js = pt.parent / "meta.json"
             if resume.suffix != ".pt" and opt_pt.exists():
@@ -155,7 +181,9 @@ def main():
             if resume.suffix != ".pt" and meta_js.exists():
                 meta = json.loads(meta_js.read_text())
                 start_update = int(meta.get("update", -1)) + 1
-                best_winrate0 = float(meta.get("best_winrate", -1.0))
+                # decay the carried best: a stale 1.000 from the old single-
+                # opponent gate would freeze best.pt under the new pool eval
+                best_winrate0 = min(float(meta.get("best_winrate", -1.0)), 0.9)
             print(f"resumed from {pt} at update {start_update} "
                   f"(best win-rate so far {best_winrate0:.3f})", flush=True)
         else:
@@ -164,6 +192,8 @@ def main():
                 policy.load_state_dict(torch.load(args.warm_start, map_location=device,
                                                   weights_only=True))
                 print(f"warm-started policy from {args.warm_start}", flush=True)
+                if args.reset_stance_head:
+                    reset_stance_head(policy)
     kafka = setup_kafka(args.bootstrap_servers, args.schema_registry)
 
     def save_latest(update: int, best_wr: float) -> None:
@@ -189,11 +219,13 @@ def main():
         t0 = time.time()
         env = (big_engine if big_engine is not None and args.big_every > 0
                and update % args.big_every == args.big_every - 1 else engine)
-        rollout = collect_rollout(env, policy, args.steps, device)
+        rollout = collect_rollout(env, policy, args.steps, device,
+                                  stance_eps=args.stance_eps)
         stats = ppo_update(
             policy, optimizer, rollout, num_teams=args.teams,
             epochs=args.epochs, minibatches=args.minibatches,
-            clip=args.clip, vf_coef=args.vf_coef, ent_coef=args.ent_coef)
+            clip=args.clip, vf_coef=args.vf_coef, ent_coef=args.ent_coef,
+            stance_ent_coef=args.stance_ent_coef, stance_eps=args.stance_eps)
         dt = time.time() - t0
         tps = args.steps * args.batch_size / dt if dt > 0 else 0.0
         mean_ret = stats.get("mean_return", float("nan"))
@@ -202,7 +234,11 @@ def main():
               f"ret={mean_ret:+.4f}  "
               f"ploss={stats.get('policy_loss', 0):+.4f}  "
               f"vloss={stats.get('value_loss', 0):.4f}  "
-              f"ent={stats.get('entropy', 0):.3f}  "
+              f"m_ent={stats.get('move_entropy', 0):.3f}  "
+              f"s_ent={stats.get('stance_entropy', 0):.3f}  "
+              f"dead={stats.get('frac_deadair', 0):.3f}  "
+              f"nst={int(stats.get('n_stances_above_1pct', 0))}  "
+              f"st[{stats.get('stance_hist', '')}]  "
               f"{tps:.0f} env-steps/s  {dt:.1f}s", flush=True)
 
         if kafka is not None:
@@ -230,15 +266,20 @@ def main():
 
         if (update + 1) % args.ckpt_every == 0:
             torch.save(policy.state_dict(), ckpt_dir / f"upd_{update:05d}.pt")
-            # Select best.pt by REAL skill — 1v1 win-rate vs the fixed heuristic — not the
-            # self-play return (which doesn't track skill and gave us a weak best.pt last run).
-            wr = win_rate(policy, "heuristic", games=48, teams=2, height=args.height,
-                          width=args.width, fighters=args.fighters, device=device)
-            print(f"  [eval] win-rate vs heuristic 1v1 = {wr:.3f}  (best {best_winrate:.3f})", flush=True)
+            # Select best.pt by REAL skill — MEAN 1v1 win-rate over a POOL of
+            # scripted opponents (neutral heuristic / held Maelstrom undertow /
+            # held Doom 2x), with the wells live in eval — a single neutral
+            # opponent couldn't see the Doom collapse coming.
+            wr, pool = win_rate_pool(policy, games=32, teams=2, height=args.height,
+                                     width=args.width, fighters=args.fighters,
+                                     device=device)
+            per_opp = "  ".join(f"{k}={v:.3f}" for k, v in pool.items())
+            print(f"  [eval] win-rate pool 1v1: {per_opp}  mean={wr:.3f}  "
+                  f"(best {best_winrate:.3f})", flush=True)
             # >= not >: once a (possibly lucky) eval hits 1.000, a strict > can
             # never be beaten and best.pt freezes for the rest of the run —
-            # on ties the LATER checkpoint wins (better on average), and 48
-            # games (was 24) keeps noise from minting cheap 1.000s.
+            # on ties the LATER checkpoint wins (better on average), and 96
+            # games (32 x 3 opponents) keeps noise from minting cheap 1.000s.
             if wr >= best_winrate:
                 best_winrate = wr
                 torch.save(policy.state_dict(), ckpt_dir / "best.pt")

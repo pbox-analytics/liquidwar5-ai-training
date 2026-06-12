@@ -25,13 +25,20 @@ rsync -rlt --no-perms --no-owner --no-group simulator web rl "$PSTORM:/tmp/lwfix
 
 ssh "$PSTORM" "
   docker rm -f lwplay 2>/dev/null || true
+  # PRIORITY PINNING: the tick loop is launch-bound — when batch jobs (training
+  # analysis, builds) load the host to 40+, an unpinned server fell from 50fps
+  # to 6. SYS_NICE lets server.py os.nice(-10) itself; cpu-shares + a reserved
+  # cpuset keep the launch thread scheduled no matter what else runs.
+  # (Batch work on pstorm should run 'nice -n 19', ideally 'taskset -c 6-23'.)
   docker run -d --name lwplay --gpus all -p 8099:8080 \
+    --cap-add=SYS_NICE --cpu-shares=4096 --cpuset-cpus=0-5 \
     -v /tmp/lwfix/simulator:/opt/training/simulator \
     -v /tmp/lwfix/web:/opt/training/web \
     -v /tmp/lwfix/rl:/opt/training/rl \
     -v /tmp/lwgood:/opt/training/results \
     -e LW_PLAY_DEVICE=cuda -e LW_TICK_HZ=63 \
-    --entrypoint uvicorn '$IMG' web.server:app --host 0.0.0.0 --port 8080
+    --entrypoint uvicorn '$IMG' web.server:app --host 0.0.0.0 --port 8080 \
+      --ws-ping-interval 20 --ws-ping-timeout 20
   sleep 6
   curl -fsS --max-time 5 http://localhost:8099/healthz && echo
 "
