@@ -99,6 +99,25 @@ class LiquidWarEngine:
         self._barangeN = torch.arange(batch_size, device=dev).view(batch_size, 1)
         self._dy_t = torch.tensor(_DY, device=dev)
         self._dx_t = torch.tensor(_DX, device=dev)
+        # MOMENTUM alignment table (9, 8): row = a fighter's PREVIOUS heading
+        # (direction index 0-7; row 8 = was stationary), col = candidate
+        # direction. Keeping the same heading earns +6, a 45° turn +3, a 90°
+        # turn 0, a reversal (135-180°) -4 — in gradient-field units (one
+        # neighbour step costs 10 orthogonal / 14 diagonal), scaled by the
+        # ``_inertia`` knob and SUBTRACTED from the candidate score in
+        # :meth:`_move_fighters` (lower score = better). Row 8 is all zeros: a
+        # fighter at rest has no heading to keep. Built once here; per tick
+        # it costs a single (B,N) -> (B,N,8) gather.
+        tab = torch.zeros(9, 8, device=dev)
+        for p in range(8):
+            pn = (_DY[p] * _DY[p] + _DX[p] * _DX[p]) ** 0.5
+            for c in range(8):
+                cn = (_DY[c] * _DY[c] + _DX[c] * _DX[c]) ** 0.5
+                cos = (_DY[p] * _DY[c] + _DX[p] * _DX[c]) / (pn * cn)
+                tab[p, c] = (6.0 if cos > 0.92 else
+                             3.0 if cos > 0.5 else
+                             0.0 if cos > -0.5 else -4.0)
+        self._mom_tab = tab
 
     # ------------------------------------------------------------------
     # Reset / placement
@@ -126,6 +145,13 @@ class LiquidWarEngine:
         self.fhealth = torch.full((B, N), MAX_HEALTH, dtype=torch.int32, device=dev)
         self.fteam = torch.zeros(B, N, dtype=torch.long, device=dev)
         self.occ = torch.full((B, H, W), -1, dtype=torch.long, device=dev)
+        # Per-fighter LAST TAKEN heading (0-7 = direction index into _DY/_DX,
+        # 8 = stood still) feeding the discrete momentum bias in
+        # :meth:`_move_fighters`. Updated IN PLACE (``copy_``) at the end of
+        # every movement sub-step — never rebound, so its address is stable
+        # and a captured CUDA graph reads/writes it like ``cursor_val`` /
+        # ``gradient`` (no ``_persist`` round-trip needed).
+        self._fdir = torch.full((B, N), 8, dtype=torch.long, device=dev)
 
         self.cursor_pos = torch.zeros(B, T, 2, dtype=torch.long, device=dev)
         self.cursor_val = torch.full((B, T), CURSOR_SEED, dtype=torch.int32, device=dev)
@@ -810,8 +836,24 @@ class LiquidWarEngine:
         if not hasattr(self, "fvy") or self.fvy.shape != (B, N):
             self.fvy = torch.zeros(B, N, device=self.device)
             self.fvx = torch.zeros(B, N, device=self.device)
+        if not hasattr(self, "_fdir") or self._fdir.shape != (B, N):    # lazy, like fvy (pre-reset safety)
+            self._fdir = torch.full((B, N), 8, dtype=torch.long, device=self.device)
         VEL_W = 8.0
         align = self.fvy.unsqueeze(-1) * self._dy_t + self.fvx.unsqueeze(-1) * self._dx_t  # (B,N,8)
+        # DISCRETE HEADING INERTIA: on top of the smooth velocity carry above,
+        # each fighter remembers the direction it ACTUALLY took last sub-step
+        # (``_fdir``; 8 = stood still) and its candidate scores are biased
+        # toward continuing it — same heading +6*mom, 45° turn +3*mom, 90°
+        # neutral, reversal -4*mom (``_mom_tab``, see __init__). At the
+        # default ``_inertia`` 0.35 the max bonus (~2.1) sits well under one
+        # octile step (10/14) and under every stance-shaping weight (14-26),
+        # so an attacking swarm carries weight through turns — it arcs instead
+        # of snapping to the new gradient — while Doom rings / walls / drills
+        # keep their forms and the gradient still decides where the mass ends
+        # up. Movement CHOICE only: ``movable`` (where a fighter MAY step) and
+        # combat/conversion are untouched. ``_inertia = 0`` switches it off.
+        mom = getattr(self, "_inertia", 0.35)
+        mom_bias = self._mom_tab[self._fdir] * mom if mom else None     # (B,N,8) single gather, graph-safe
         # SWIRL: a tangential bias so units spiral INTO the cursor along curved,
         # magnetized field-lines instead of straight radial columns. The inward
         # gradient (~10-14/step) still dominates SWIRL_W, so they converge — just
@@ -869,6 +911,8 @@ class LiquidWarEngine:
             push = push * (1.0 - 0.8 * (ring_f > 0).float()).unsqueeze(-1)
         out_align = (-ry / rn).unsqueeze(-1) * self._dy_t + (-rx / rn).unsqueeze(-1) * self._dx_t
         score = ng.float() + jitter.float() - VEL_W * align - swirl - push * out_align
+        if mom_bias is not None:
+            score = score - mom_bias                                   # heading inertia (movement choice only)
         if burst_f is not None:                                       # gather (-1) inward / burst (+1) outward
             score = score - 15.0 * burst_f.unsqueeze(-1) * out_align
         if ring_f is not None:                                        # accretion ring: settle on the orbit radius
@@ -1077,6 +1121,7 @@ class LiquidWarEngine:
         moved = torch.zeros(B, N, dtype=torch.bool, device=self.device)
         attacking = torch.zeros(B, N, dtype=torch.bool, device=self.device)
         front = torch.zeros(B, N, dtype=torch.long, device=self.device)
+        taken = torch.full((B, N), 8, dtype=torch.long, device=self.device)  # ACTUAL heading this sub-step (8 = none)
         # (no early-break/.any() guards in this loop: each is a GPU->CPU sync,
         # and there are rounds x unit_speed sub-steps of them per tick — at
         # B=1 the syncs cost far more than letting an empty round's no-op
@@ -1105,6 +1150,7 @@ class LiquidWarEngine:
             self.fy = torch.where(kmoves, kcell // W, self.fy)
             self.fx = torch.where(kmoves, kcell % W, self.fx)
             moved = moved | kmoves
+            taken = torch.where(kmoves, order[:, :, k], taken)         # record the heading actually taken
             # ENEMY at this (best available) down-gradient cell -> ATTACK here,
             # do NOT reroute past it. A teammate, by contrast, leaves the fighter
             # active so it tries the next candidate (reroute). This is what makes
@@ -1125,6 +1171,12 @@ class LiquidWarEngine:
         # see :meth:`_resolve_rotation`.
         rmoved = self._resolve_rotation(ncell_s, down_s, order, moved, attacking)
         moved = moved | rmoved
+        # Rotation movers stepped to their FIRST movable rank — the same rule
+        # _resolve_rotation used to pick its target cell — so that rank's
+        # original direction index is the heading they actually took.
+        rot_dir = order.gather(-1, torch.argmax(down_s.to(torch.int8),
+                                                dim=-1, keepdim=True)).squeeze(-1)
+        taken = torch.where(rmoved, rot_dir, taken)
         # combat: attackers push into the down-gradient enemy they committed to.
         self._blocked = attacking
         self._front_dy = torch.where(attacking, self._dy_t[front], front.new_zeros(()))
@@ -1133,6 +1185,13 @@ class LiquidWarEngine:
         # the combat phase reads the DEFENDER's facing to tell a back-attack
         # (defender facing away) from a defended head-on clash.
         self._facing = order[:, :, 0]
+        # Persist the heading ACTUALLY taken this sub-step (blocked fighters
+        # and committed attackers read as stationary — they took no step).
+        # ``copy_``, never rebind: graph I/O buffer at a fixed address. A
+        # fighter CONVERTED later this tick keeps its pre-conversion heading —
+        # harmless: it re-chooses next sub-step under its new team's gradient
+        # and the stale heading is at most a one-substep ~2.1-point nudge.
+        self._fdir.copy_(taken)
         # Carry velocity toward the chosen heading with high inertia (MOM); a
         # settled fighter (nothing movable) coasts to rest. This is what gives the
         # mass weight — momentum persists ~1/(1-MOM) ticks after the gradient shifts.
