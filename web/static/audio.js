@@ -301,15 +301,14 @@ const LWAUDIO = (() => {
     });
   }
 
-  // ---- THE GRID (the Pompeii engine): a 92 BPM lookahead scheduler.
-  // Everything rhythmic locks to it — the spiccato OSTINATO (the insistent
-  // pulse), grid-locked TAIKO, and a composed Phrygian THEME that enters at
-  // full battle. Chords change on 2-bar lines; layers come and go with
-  // intensity; at rest only the drone + sparkles remain (the ambient face).
-  const BPM = 92, SPB = 60 / BPM;
-  let gridBeat = 0, nextNote = 0, melPos = 0, melNext = 0;
-  // 16 eighth-notes / 2 bars: pounding root, the b2 bar, back, the bVII
-  const OST = [0, 0, 12, 0, 1, 1, 13, 1, 0, 0, 12, 0, -2, -2, 10, -2];
+  // ---- THE GRID (the Pompeii engine, energetic cut): 104 BPM, a 16th-note
+  // lookahead clock. The ostinato GALLOPS (DUM-dumdum per beat), taiko gets a
+  // backbeat, the theme rides on top at full battle, and the harmonic rhythm
+  // doubles at climax. At rest only the drone + sparkles remain.
+  const BPM = 104, SPB = 60 / BPM, STEP = SPB / 4;      // 16th-note steps
+  let gridStep = 0, nextNote = 0, melPos = 0, melNext = 0;
+  // pitch per BEAT over a 2-bar (8-beat) cycle: root bar, the b2 bar
+  const OSTP = [0, 0, 12, 0, 1, 1, 13, 1];
   // the theme (semitone, beats): rises, aches on the b2, falls home
   const THEME = [[12, 2], [13, 1], [12, 1], [8, 2], [10, 2],
                  [12, 2], [15, 1], [13, 1], [12, 3], [8, 1],
@@ -319,26 +318,26 @@ const LWAUDIO = (() => {
     const o = ctx.createOscillator(); o.type = "sawtooth";
     o.frequency.value = f(semi, 220);
     const bp = ctx.createBiquadFilter(); bp.type = "bandpass";
-    bp.frequency.value = 900; bp.Q.value = 1.4;
+    bp.frequency.value = 950; bp.Q.value = 1.4;
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, when);
-    g.gain.linearRampToValueAtTime(gain, when + 0.012);
-    g.gain.setTargetAtTime(0, when + 0.03, 0.07);
+    g.gain.linearRampToValueAtTime(gain, when + 0.01);
+    g.gain.setTargetAtTime(0, when + 0.025, 0.055);
     o.connect(bp).connect(g).connect(musicBus);
-    o.start(when); o.stop(when + 0.5);
+    o.start(when); o.stop(when + 0.4);
   }
   function lead(semi, when, dur, gain) {       // the theme: bowed, breathing
     if (semi === -99) return;
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, when);
-    g.gain.linearRampToValueAtTime(gain, when + 0.18);
-    g.gain.setTargetAtTime(0, when + dur - 0.15, 0.25);
-    const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 1800;
+    g.gain.linearRampToValueAtTime(gain, when + 0.15);
+    g.gain.setTargetAtTime(0, when + dur - 0.12, 0.22);
+    const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 1900;
     g.connect(lp).connect(musicBus);
     for (const det of [-5, 4]) {
       const o = ctx.createOscillator(); o.type = "sawtooth";
       o.frequency.value = f(semi, 440); o.detune.value = det;
-      const vib = ctx.createOscillator(); vib.frequency.value = 5.2;
+      const vib = ctx.createOscillator(); vib.frequency.value = 5.4;
       const vg = ctx.createGain(); vg.gain.value = 5;
       vib.connect(vg).connect(o.detune);
       o.connect(g); o.start(when); o.stop(when + dur + 1);
@@ -359,22 +358,35 @@ const LWAUDIO = (() => {
     if (nextNote < now) nextNote = now + 0.05;
     const drive = Math.max(sig.intensity, sig.doom ? 0.3 : 0);
     while (nextNote < now + 0.25) {            // standard WebAudio lookahead
-      const beat8 = gridBeat % 16, bar = (gridBeat / 8) | 0;
-      if (beat8 === 0 && bar % 2 === 0) nextChord();           // chords on 2-bar lines
-      if (drive > 0.1) spicc(OST[beat8], nextNote, 0.05 + 0.09 * drive);
-      if (drive > 0.15) {                      // taiko on the grid
-        if (beat8 === 0) taikoAt(nextNote, Math.min(1, 0.5 + drive), 1);
-        if (beat8 === 11) taikoAt(nextNote, 0.5 * drive, 1.5);
-        if (drive > 0.6 && beat8 === 8) taikoAt(nextNote, 0.45 * drive, 1.3);
+      const st16 = gridStep % 32;              // 2-bar cycle in 16ths
+      const beat = (st16 / 4) | 0, sub16 = st16 % 4;
+      const bar = (gridStep / 16) | 0;
+      // harmonic rhythm doubles at climax: chords every bar, else every 2
+      if (st16 === 0 || (drive > 0.55 && st16 === 16)) {
+        if ((bar % 2 === 0) || drive > 0.55) nextChord();
       }
-      if (drive > 0.45 && gridBeat >= melNext) {               // the THEME at full battle
+      // the GALLOP: hit on 1, and-a (sub16 0, 2, 3) — rest on the e
+      if (drive > 0.05 && sub16 !== 1) {
+        const accent = sub16 === 0;
+        spicc(OSTP[beat], nextNote, (accent ? 1 : 0.62) * (0.055 + 0.105 * drive));
+        if (drive > 0.5 && accent) spicc(OSTP[beat] + 12, nextNote, 0.04 + 0.05 * drive);
+      }
+      // TAIKO: downbeat boom + backbeat + pickup; relentless at climax
+      if (drive > 0.1) {
+        if (st16 === 0) taikoAt(nextNote, Math.min(1, 0.5 + drive), 1);
+        if (st16 === 16) taikoAt(nextNote, 0.6 * Math.min(1, 0.5 + drive), 1.2);
+        if (drive > 0.35 && (st16 === 8 || st16 === 24)) taikoAt(nextNote, 0.4 * drive, 1.5);
+        if (drive > 0.6 && st16 === 30) taikoAt(nextNote, 0.5 * drive, 1.4);
+      }
+      // the THEME at full battle, riding the pulse
+      if (drive > 0.4 && gridStep >= melNext) {
         const [semi, beats] = THEME[melPos % THEME.length];
-        lead(semi, nextNote, beats * SPB, 0.07 + 0.05 * drive);
-        melNext = gridBeat + beats * 2;
+        lead(semi, nextNote, beats * SPB, 0.075 + 0.05 * drive);
+        melNext = gridStep + beats * 4;
         melPos++;
       }
-      gridBeat++;
-      nextNote += SPB / 2;                     // eighth-note grid
+      gridStep++;
+      nextNote += STEP;
     }
     sparkTimer -= dt;
     if (sparkTimer <= 0) {
