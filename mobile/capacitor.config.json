@@ -1,0 +1,11 @@
+{
+  "appId": "net.pbox.liquidwar",
+  "appName": "Liquid War",
+  "webDir": "www",
+  "server": {
+    "url": "http://192.168.1.133:8099",
+    "cleartext": true
+  },
+  "android": { "allowMixedContent": true },
+  "ios": { "contentInset": "never" }
+}
