@@ -38,7 +38,7 @@ spec:
           image: alpine/git:latest
           env:
             - name: TRAINING_REF
-              value: "d6f2029"   # wells-110 + heading inertia (train/play parity)
+              value: "4b02892"   # wells-110 + inertia 0.12 + doom rebalance (parity)
           command: ["/bin/sh", "-c"]
           args:
             - |
