@@ -173,7 +173,6 @@ const LWAUDIO = (() => {
   // TAIKO: ceremonial hits — a pitch-dropping low sine + a skin-noise burst.
   // Silent at peace; the pattern wakes and quickens as the battle builds
   // (or while a Doom well is open — dread has a drum).
-  let drumTimer = 2, drumBeat = 0;
   function taiko(strength, low = 1) {
     const t = ctx.currentTime;
     const o = ctx.createOscillator(); o.type = "sine";
@@ -197,27 +196,40 @@ const LWAUDIO = (() => {
   // loudness AND brightness track the army's real aggregate speed (fed per
   // frame from the delta decode). Still army = silence; a full-flood charge
   // rushes like water over stone.
-  let flowG = null, flowLP = null, flowV = 0;
+  let flowG = null, flowLP = null, flowLP2 = null, flowV = 0;
   function startFlow() {
-    const len = ctx.sampleRate * 2, buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    // WATER, not static: brown-ish noise (deep integration kills the fizz)
+    // through TWO cascaded lowpasses (steep rolloff), with motion INSIDE the
+    // sound — a ~0.8Hz wash and a slow surge LFO so it breathes like a
+    // current instead of hissing like a detuned radio.
+    const len = ctx.sampleRate * 3, buf = ctx.createBuffer(1, len, ctx.sampleRate);
     const d = buf.getChannelData(0);
     let last = 0;
-    for (let i = 0; i < len; i++) {            // pink-ish: integrate white a touch
-      last = 0.92 * last + 0.35 * (Math.random() * 2 - 1);
-      d[i] = last;
+    for (let i = 0; i < len; i++) {
+      last = 0.985 * last + 0.07 * (Math.random() * 2 - 1);   // much deeper red
+      d[i] = last * 3.2;
     }
     const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true;
-    flowLP = ctx.createBiquadFilter(); flowLP.type = "lowpass"; flowLP.frequency.value = 400;
+    flowLP = ctx.createBiquadFilter(); flowLP.type = "lowpass"; flowLP.frequency.value = 300;
+    flowLP2 = ctx.createBiquadFilter(); flowLP2.type = "lowpass"; flowLP2.frequency.value = 600;
     flowG = ctx.createGain(); flowG.gain.value = 0;
-    src.connect(flowLP).connect(flowG).connect(sfxBus);
-    src.start();
+    const wash = ctx.createGain(); wash.gain.value = 1;
+    const lfo1 = ctx.createOscillator(); lfo1.frequency.value = 0.8;     // the wash
+    const l1g = ctx.createGain(); l1g.gain.value = 0.25;
+    const lfo2 = ctx.createOscillator(); lfo2.frequency.value = 0.13;    // the surge
+    const l2g = ctx.createGain(); l2g.gain.value = 0.18;
+    lfo1.connect(l1g).connect(wash.gain);
+    lfo2.connect(l2g).connect(wash.gain);
+    src.connect(flowLP).connect(flowLP2).connect(wash).connect(flowG).connect(sfxBus);
+    src.start(); lfo1.start(); lfo2.start();
   }
   function setFlow(v) {                        // v 0..1: per-mote avg speed, smoothed
     if (!ctx || !enabled || !flowG) { flowV = v; return; }
     flowV = v;
     const now = ctx.currentTime;
-    flowG.gain.setTargetAtTime(0.14 * Math.pow(v, 1.4), now, 0.25);
-    flowLP.frequency.setTargetAtTime(280 + 1400 * v, now, 0.3);
+    flowG.gain.setTargetAtTime(0.22 * Math.pow(v, 1.4), now, 0.25);
+    flowLP.frequency.setTargetAtTime(220 + 480 * v, now, 0.3);
+    flowLP2.frequency.setTargetAtTime(420 + 700 * v, now, 0.3);
   }
 
   // ---- SFX ----
@@ -269,35 +281,87 @@ const LWAUDIO = (() => {
     });
   }
 
-  // ---- per-frame driver (call from the render loop) ----
+  // ---- THE GRID (the Pompeii engine): a 92 BPM lookahead scheduler.
+  // Everything rhythmic locks to it — the spiccato OSTINATO (the insistent
+  // pulse), grid-locked TAIKO, and a composed Phrygian THEME that enters at
+  // full battle. Chords change on 2-bar lines; layers come and go with
+  // intensity; at rest only the drone + sparkles remain (the ambient face).
+  const BPM = 92, SPB = 60 / BPM;
+  let gridBeat = 0, nextNote = 0, melPos = 0, melNext = 0;
+  // 16 eighth-notes / 2 bars: pounding root, the b2 bar, back, the bVII
+  const OST = [0, 0, 12, 0, 1, 1, 13, 1, 0, 0, 12, 0, -2, -2, 10, -2];
+  // the theme (semitone, beats): rises, aches on the b2, falls home
+  const THEME = [[12, 2], [13, 1], [12, 1], [8, 2], [10, 2],
+                 [12, 2], [15, 1], [13, 1], [12, 3], [8, 1],
+                 [10, 2], [7, 2], [8, 3], [-99, 1]];
+
+  function spicc(semi, when, gain) {           // ostinato voice: struck string
+    const o = ctx.createOscillator(); o.type = "sawtooth";
+    o.frequency.value = f(semi, 220);
+    const bp = ctx.createBiquadFilter(); bp.type = "bandpass";
+    bp.frequency.value = 900; bp.Q.value = 1.4;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, when);
+    g.gain.linearRampToValueAtTime(gain, when + 0.012);
+    g.gain.setTargetAtTime(0, when + 0.03, 0.07);
+    o.connect(bp).connect(g).connect(musicBus);
+    o.start(when); o.stop(when + 0.5);
+  }
+  function lead(semi, when, dur, gain) {       // the theme: bowed, breathing
+    if (semi === -99) return;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, when);
+    g.gain.linearRampToValueAtTime(gain, when + 0.18);
+    g.gain.setTargetAtTime(0, when + dur - 0.15, 0.25);
+    const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 1800;
+    g.connect(lp).connect(musicBus);
+    for (const det of [-5, 4]) {
+      const o = ctx.createOscillator(); o.type = "sawtooth";
+      o.frequency.value = f(semi, 440); o.detune.value = det;
+      const vib = ctx.createOscillator(); vib.frequency.value = 5.2;
+      const vg = ctx.createGain(); vg.gain.value = 5;
+      vib.connect(vg).connect(o.detune);
+      o.connect(g); o.start(when); o.stop(when + dur + 1);
+      vib.start(when); vib.stop(when + dur + 1);
+    }
+  }
+  function taikoAt(when, strength, low) {      // grid-scheduled taiko
+    setTimeout(() => enabled && taiko(strength, low),
+               Math.max(0, (when - ctx.currentTime) * 1000 - 5));
+  }
+
   let lastT = 0, wasDone = false;
   function update(s) {
     if (!ctx || !enabled) return;
     sig = s;
     const now = ctx.currentTime, dt = Math.min(0.1, now - lastT || 0.016);
     lastT = now;
-    chordTimer -= dt; sparkTimer -= dt;
-    if (chordTimer <= 0) {
-      nextChord();
-      chordTimer = 22 - 10 * sig.intensity + Math.random() * 4;
+    if (nextNote < now) nextNote = now + 0.05;
+    const drive = Math.max(sig.intensity, sig.doom ? 0.3 : 0);
+    while (nextNote < now + 0.25) {            // standard WebAudio lookahead
+      const beat8 = gridBeat % 16, bar = (gridBeat / 8) | 0;
+      if (beat8 === 0 && bar % 2 === 0) nextChord();           // chords on 2-bar lines
+      if (drive > 0.1) spicc(OST[beat8], nextNote, 0.05 + 0.09 * drive);
+      if (drive > 0.15) {                      // taiko on the grid
+        if (beat8 === 0) taikoAt(nextNote, Math.min(1, 0.5 + drive), 1);
+        if (beat8 === 11) taikoAt(nextNote, 0.5 * drive, 1.5);
+        if (drive > 0.6 && beat8 === 8) taikoAt(nextNote, 0.45 * drive, 1.3);
+      }
+      if (drive > 0.45 && gridBeat >= melNext) {               // the THEME at full battle
+        const [semi, beats] = THEME[melPos % THEME.length];
+        lead(semi, nextNote, beats * SPB, 0.07 + 0.05 * drive);
+        melNext = gridBeat + beats * 2;
+        melPos++;
+      }
+      gridBeat++;
+      nextNote += SPB / 2;                     // eighth-note grid
     }
+    sparkTimer -= dt;
     if (sparkTimer <= 0) {
-      if (Math.random() < 0.8 - 0.5 * sig.intensity) sparkle();
-      sparkTimer = 1.2 + Math.random() * 3.5 + 3 * sig.intensity;
+      if (Math.random() < 0.8 - 0.9 * drive) sparkle();        // calm only
+      sparkTimer = 1.2 + Math.random() * 3.5 + 4 * drive;
     }
     sub.g.gain.setTargetAtTime(0.13 + 0.11 * sig.intensity, now, 1.5);
-    // war drums: wake above a whisper of combat (or under an open Doom),
-    // quickening from ceremonial to relentless; strong-weak-weak pattern
-    const drumDrive = Math.max(sig.intensity, sig.doom ? 0.25 : 0);
-    if (drumDrive > 0.08) {
-      drumTimer -= dt;
-      if (drumTimer <= 0) {
-        const accent = drumBeat % 3 === 0;
-        taiko((accent ? 1.0 : 0.55) * Math.min(1, 0.4 + drumDrive), accent ? 1 : 1.5);
-        drumBeat++;
-        drumTimer = (4.2 - 3.2 * drumDrive) * (accent ? 1 : 0.5);
-      }
-    } else drumBeat = 0;
     doomDrone.gain.setTargetAtTime(sig.doom ? 0.20 : 0, now, sig.doom ? 1.2 : 0.6);
     maelWash.gain.setTargetAtTime(sig.mael ? 0.12 : 0, now, 0.8);
     if (s.done && !wasDone) stinger(s.won);
