@@ -136,52 +136,64 @@ class LiquidWarEngine:
 
         if walls is None:
             walls = self._generate_random_maps()
-        self.walls = walls.bool().to(dev)
-        self.passable = ~self.walls
-
-        # SoA fighter buffers.
-        self.fx = torch.zeros(B, N, dtype=torch.long, device=dev)
-        self.fy = torch.zeros(B, N, dtype=torch.long, device=dev)
-        self.fhealth = torch.full((B, N), MAX_HEALTH, dtype=torch.int32, device=dev)
-        self.fteam = torch.zeros(B, N, dtype=torch.long, device=dev)
-        self.occ = torch.full((B, H, W), -1, dtype=torch.long, device=dev)
-        # Per-fighter LAST TAKEN heading (0-7 = direction index into _DY/_DX,
-        # 8 = stood still) feeding the discrete momentum bias in
-        # :meth:`_move_fighters`. Updated IN PLACE (``copy_``) at the end of
-        # every movement sub-step — never rebound, so its address is stable
-        # and a captured CUDA graph reads/writes it like ``cursor_val`` /
-        # ``gradient`` (no ``_persist`` round-trip needed).
-        self._fdir = torch.full((B, N), 8, dtype=torch.long, device=dev)
-
-        self.cursor_pos = torch.zeros(B, T, 2, dtype=torch.long, device=dev)
-        self.cursor_val = torch.full((B, T), CURSOR_SEED, dtype=torch.int32, device=dev)
-        self.team_alive = torch.ones(B, T, dtype=torch.bool, device=dev)
-        # float32, not int32: the relax sweeps now run as pooling ops (float
-        # only). Every value is an exact integer <= GRAD_INIT + 14 < 2^24, so
-        # float32 represents the field exactly — bit-identical distances.
-        self.gradient = torch.full((B, T, H, W), GRAD_INIT, dtype=torch.float32, device=dev)
-        self._wall_grad = self.walls.unsqueeze(1).expand(B, T, H, W)
-
-        # Cross-team well SLOTS, one per team (Doom gravity / Maelstrom current),
-        # written IN-PLACE by the play server each tick. str==0 / horizon==0 means
-        # "off" — the loops always run T fixed iterations so the kernel sequence
-        # is static (CUDA-graph-safe); a zeroed slot is a no-op force. Gated by
-        # ``_wells_enabled`` (play only) so training skips the loops entirely.
-        self._doom_pos = torch.zeros(B, T, 2, device=dev)
-        self._doom_str = torch.zeros(B, T, device=dev)
-        self._doom_range = torch.ones(B, T, device=dev)
-        self._doom_horizon = torch.zeros(B, T, device=dev)
-        self._doom_cap = torch.zeros(B, T, device=dev)
-        self._vortex_pos = torch.zeros(B, T, 2, device=dev)
-        self._vortex_str = torch.zeros(B, T, device=dev)
-        self._vortex_range = torch.ones(B, T, device=dev)
-        self._vortex_sign = torch.ones(B, T, device=dev)
-        self._vortex_rad = torch.zeros(B, T, device=dev)
-        # In-graph animation clock: python ``self.tick`` is invisible to a replayed
-        # graph (it would bake in as a constant), so every tensor expression that
-        # animates over time reads this GPU scalar instead, incremented inside the
-        # captured step.
-        self._tick_f = torch.zeros((), device=dev)
+        walls = walls.bool().to(dev)
+        # #14 GROUNDWORK: allocate the persistent buffers ONCE, then reinit them
+        # IN PLACE on every later reset (.copy_/.zero_/.fill_) — fewer per-reset
+        # allocations (a win on the big board) AND stable buffer addresses, so a
+        # captured CUDA graph can keep reading them across games (the structural
+        # fix for the teardown race; the graph is still dropped below until the
+        # graph-survival step + its GPU validation land). The reinit is
+        # value-identical to the fresh-allocation path, so the eager game is
+        # byte-for-byte unchanged.
+        if not hasattr(self, "fx"):                       # ---- first reset: ALLOCATE ----
+            self.walls = walls
+            self.passable = ~self.walls
+            self.fx = torch.zeros(B, N, dtype=torch.long, device=dev)
+            self.fy = torch.zeros(B, N, dtype=torch.long, device=dev)
+            self.fhealth = torch.full((B, N), MAX_HEALTH, dtype=torch.int32, device=dev)
+            self.fteam = torch.zeros(B, N, dtype=torch.long, device=dev)
+            self.occ = torch.full((B, H, W), -1, dtype=torch.long, device=dev)
+            # Per-fighter LAST TAKEN heading (0-7 = direction index, 8 = still)
+            # feeding the momentum bias; updated in place (copy_) per sub-step.
+            self._fdir = torch.full((B, N), 8, dtype=torch.long, device=dev)
+            self.cursor_pos = torch.zeros(B, T, 2, dtype=torch.long, device=dev)
+            self.cursor_val = torch.full((B, T), CURSOR_SEED, dtype=torch.int32, device=dev)
+            self.team_alive = torch.ones(B, T, dtype=torch.bool, device=dev)
+            # float32: relax sweeps are pooling ops; values are exact integers
+            # <= GRAD_INIT+14 < 2^24, so float32 holds the field bit-exactly.
+            self.gradient = torch.full((B, T, H, W), GRAD_INIT, dtype=torch.float32, device=dev)
+            self._wall_grad = self.walls.unsqueeze(1).expand(B, T, H, W)   # view -> follows walls.copy_
+            # Cross-team well SLOTS (Doom gravity / Maelstrom current), written
+            # in-place by the play server each tick; str==0 = off (static kernel
+            # sequence, graph-safe). _wells_enabled gates them (play only).
+            self._doom_pos = torch.zeros(B, T, 2, device=dev)
+            self._doom_str = torch.zeros(B, T, device=dev)
+            self._doom_range = torch.ones(B, T, device=dev)
+            self._doom_horizon = torch.zeros(B, T, device=dev)
+            self._doom_cap = torch.zeros(B, T, device=dev)
+            self._vortex_pos = torch.zeros(B, T, 2, device=dev)
+            self._vortex_str = torch.zeros(B, T, device=dev)
+            self._vortex_range = torch.ones(B, T, device=dev)
+            self._vortex_sign = torch.ones(B, T, device=dev)
+            self._vortex_rad = torch.zeros(B, T, device=dev)
+            # In-graph animation clock: python self.tick is invisible to a
+            # replayed graph (bakes in as a constant), so time-animated tensor
+            # expressions read this GPU scalar, incremented inside the step.
+            self._tick_f = torch.zeros((), device=dev)
+        else:                                             # ---- reuse: REINIT IN PLACE ----
+            self.walls.copy_(walls)                       # _wall_grad (a view) follows
+            self.passable.copy_(~self.walls)
+            self.fx.zero_(); self.fy.zero_()
+            self.fhealth.fill_(MAX_HEALTH); self.fteam.zero_()
+            self.occ.fill_(-1); self._fdir.fill_(8)
+            self.cursor_pos.zero_(); self.cursor_val.fill_(CURSOR_SEED)
+            self.team_alive.fill_(True); self.gradient.fill_(GRAD_INIT)
+            for _z in (self._doom_pos, self._doom_str, self._doom_horizon, self._doom_cap,
+                       self._vortex_pos, self._vortex_str, self._vortex_rad):
+                _z.zero_()
+            self._doom_range.fill_(1.0); self._vortex_range.fill_(1.0)
+            self._vortex_sign.fill_(1.0)
+            self._tick_f.zero_()
         self._graph = None              # captured CUDA graph (per game; reset() invalidates)
         self._fixed_sweeps = None       # gradient sweeps/tick under graph capture (else converge+early-out)
         self._persist = {}              # cross-tick state buffers (graph replay round-trip)
