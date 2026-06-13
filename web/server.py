@@ -114,6 +114,7 @@ class GameSession:
         self.engine._node_v = torch.zeros(1, teams, device=DEVICE)  # ring breathe speed (Pulse rings/star energy)
         self.engine._tide = torch.zeros(1, teams, 2, device=DEVICE)  # directional traveling-wave heading (Pulse tide mode)
         self.engine._surge = torch.ones(1, teams, device=DEVICE)  # per-team damage mult; IN-PLACE writes only (graph input)
+        self.engine._armor = torch.ones(1, teams, device=DEVICE)  # per-team INCOMING-damage mult (Wall braces)
         self.engine._wells_enabled = True            # play casts real cross-team wells (slots in engine.reset)
         # CUDA graphs are OPT-IN for play now (LW_CUDA_GRAPH=1): with rooms
         # churning constantly (auto-reconnect, phones sleeping, multiple
@@ -542,9 +543,10 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n,
     switch reads as a burst of energy instead of a soft fade."""
     stance = ctrl["stance"]                     # 0 Swarm 1 Spin 2 Drill 3 Wall 4 Pulse
     if stance == 0:                             # Swarm: 2 forms (tap 1): cloud -> comet
-        if ctrl["swarm_mode"] == 0:             # cloud: loose, varied-radius orbits
-            _e._spin[0, t] = 0.5 * spin_sign
-            _e._burst[0, t] = 0.15              # slight loosen -> a diffuse orbiting cloud
+        if ctrl["swarm_mode"] == 0:             # cloud: WIDE angry insect swarm
+            _e._spin[0, t] = 0.8 * spin_sign    # faster buzz
+            _e._burst[0, t] = 0.35              # broad cloud, not a blob
+            _e._surge[0, t] = 1.2               # a thousand small bites
         else:                                   # comet: a teardrop along your MOTION
             sgn = spin_sign if spin_sign != 0 else 1
             # aim = recent cursor displacement (works for mouse AND
@@ -552,10 +554,10 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n,
             # comet back into a blob
             cdy = (c0_hist[-1][0] > c0_hist[0][0]) - (c0_hist[-1][0] < c0_hist[0][0])
             cdx = (c0_hist[-1][1] > c0_hist[0][1]) - (c0_hist[-1][1] < c0_hist[0][1])
-            _e._drill[0, t, 0] = 0.85 * cdy     # dense head pierces along the motion
-            _e._drill[0, t, 1] = 0.85 * cdx     #   (the drill machinery, velocity-aimed)
-            _e._spin[0, t] = 0.35 * sgn         # slight twist gives the tail life
-            _e._burst[0, t] = -0.25             # packed head, trailing wake
+            _e._drill[0, t, 0] = 0.95 * cdy     # HEAVY head punches along the motion
+            _e._drill[0, t, 1] = 0.95 * cdx     #   (the drill machinery, velocity-aimed)
+            _e._spin[0, t] = 0.2 * sgn          # barely a twist -> short tight tail
+            _e._burst[0, t] = -0.45             # mass packs INTO the head
     elif stance == 1:                           # Spin: 3 forms (tap 2): vortex -> sawblade -> galaxy
         sm = ctrl["spin_mode"]
         sgn = spin_sign if spin_sign != 0 else 1
@@ -584,10 +586,11 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n,
             _e._surge[0, t] = DSURGE[m]
     elif stance == 3:                           # Wall: a concentrated bar, horizontal or vertical (tap 4 to flip)
         if ctrl["wall_orient"] == 0:            # horizontal bar = vertical facing
-            _e._wall[0, t, 0] = 1.0; _e._wall[0, t, 1] = 0.0
+            _e._wall[0, t, 0] = 1.25; _e._wall[0, t, 1] = 0.0
         else:                                   # vertical bar = horizontal facing
-            _e._wall[0, t, 0] = 0.0; _e._wall[0, t, 1] = 1.0
+            _e._wall[0, t, 0] = 0.0; _e._wall[0, t, 1] = 1.25
         _e._burst[0, t] = -0.9                  # strong inward pull -> a dense solid COLUMN, not a picket line
+        _e._armor[0, t] = 0.6                   # a FORMED rampart takes 40% less — holding the line is real defense
     elif stance == 4:                           # Pulse: 3 modes (tap 5 to cycle)
         pm = ctrl["pulse_mode"]
         # Q/E swirl works DURING Pulse (was never set -> the spin
@@ -684,7 +687,10 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n,
         # out into a broad swirling storm-cloud (no ring, no packed
         # disk; nothing like Doom's silhouette).
         _e._spin[0, t] = 2.0 * sgn
-        _e._burst[0, t] = 0.6
+        _e._burst[0, t] = 0.5                   # (0.6->0.5) a touch denser: the rim must GRIND
+        _e._surge[0, t] = 1.7                   # the spinning rim finally hits like a weapon —
+                                                # sweep-verified: this + str 28 is what flips
+                                                # ejecta-vs-Doom2x from losing 83/118 to winning 106/92
         # The CURRENT — Doom's radial devour rotated 90°: enemies
         # near the well are swept TANGENTIALLY off their gradient
         # and entrained into orbit through your storm-cloud; no
@@ -699,7 +705,7 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n,
         # enemy blob from across the arena. Now 22 + 1.5x-blob reach
         # + a SQUARED falloff in the engine = a local current you
         # can see coming and skirt, still lethal to wade through.
-        _e._vortex_str[0, t] = 22.0 * _frac ** 0.5
+        _e._vortex_str[0, t] = 28.0 * _frac ** 0.5
         _e._vortex_range[0, t] = max(60.0, 1.5 * (_mass / 3.14159) ** 0.5)
         # radial component per mode: undertow spirals them inward to
         # the rim, ejecta SHOVES them out (the siege-breaker vs an
@@ -807,6 +813,8 @@ class Player:
 def _clear_knobs(_e) -> None:
     """Per-tick neutral stance state (humans + AI rewrite what they hold)."""
     _e._surge.fill_(1.0)   # neutral damage mult (in-place: graph input)
+    if getattr(_e, "_armor", None) is not None:
+        _e._armor.fill_(1.0)
     _e._doom_str.zero_(); _e._doom_horizon.zero_(); _e._doom_cap.zero_(); _e._vortex_str.zero_()
     _e._spin.zero_(); _e._burst.zero_(); _e._drill.zero_(); _e._wall.zero_(); _e._fig8.zero_()
     _e._ring.zero_(); _e._ring_ecc.zero_(); _e._node_l.zero_(); _e._node_m.zero_()

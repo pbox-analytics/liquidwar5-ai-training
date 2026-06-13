@@ -60,36 +60,36 @@ LEGACY_ACTION = (0, 2, 6, 8, 10, 16, 19, 22)
 # Per-action knob tables (rows = ACTIONS). Columns follow the play server's
 # stance blocks exactly; 0 = knob off. Tick-phased modes (Pulse wave / nova)
 # are patched at apply time.
-#          spin burst surge fig8 nl  nm   nk    nw    nv   adv  wy  wx tide rin  ecc dLvl mRad mOn cspd
+#          spin burst surge fig8 nl  nm   nk    nw    nv   adv  wy  wx tide rin  ecc dLvl mRad mOn cspd armr
 _KNOBS = [
-    (0.5,  0.15, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Swarm cloud
-    (0.35, -0.25, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.85, 0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Swarm comet
-    (1.7,  -0.4, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Spin vortex
-    (1.6,  -0.45, 1.0, 0, 0,  8,  0.0,  0.4,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Spin sawblade
-    (1.1,  0.35, 1.0, 0, 0,  3,  0.25, -0.05, 0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Spin galaxy
-    (0.3,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  1.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Drill slow
-    (0.7,  0.0,  2.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.62, 0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Drill med
-    (1.5,  0.0,  4.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.34, 0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Drill fast
-    (0.0,  -0.9, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  1, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Wall horiz
-    (0.0,  -0.9, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 1, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Wall vert
-    (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Pulse wave (tick-phased)
-    (0.0,  0.0,  3.0, 0, 12, 0,  0.0,  0.0,  0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Pulse rings
-    (0.0,  0.0,  3.0, 0, 16, 6,  0.0,  0.05, 0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Pulse star
-    (0.0,  0.0,  2.5, 0, 16, 8,  0.15, 0.03, 0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Pulse lattice
-    (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Pulse nova (tick-phased)
-    (0.0,  0.0,  2.5, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 1, 0.0,  0, 0, 0.0,  0, 1.0),  # Pulse tide
-    (1.2,  0.0,  1.5, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 6.7,  1, 1, 0.0,  0, 0.7),  # Doom 1x
-    (1.8,  0.0,  1.75, 0, 0, 0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 9.0,  1, 2, 0.0,  0, 0.45),  # Doom 2x
-    (2.4,  0.0,  2.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 11.3, 1, 3, 0.0,  0, 0.3),  # Doom 3x
-    (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.30, 1, 1.0),  # Maelstrom undertow
-    (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, -0.7, 1, 1.0),  # Maelstrom ejecta
-    (2.0,  0.6,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  1, 1.0),  # Maelstrom shear
-    (1.8,  0.4,  1.0, 1, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Atom orbital
-    (1.6,  0.45, 1.0, 2, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Atom binary
-    (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0),  # Classic
+    (0.8,  0.35, 1.2, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Swarm cloud
+    (0.2,  -0.45, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.95, 0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Swarm comet
+    (1.7,  -0.4, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Spin vortex
+    (1.6,  -0.45, 1.0, 0, 0,  8,  0.0,  0.4,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Spin sawblade
+    (1.1,  0.35, 1.0, 0, 0,  3,  0.25, -0.05, 0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Spin galaxy
+    (0.3,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  1.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Drill slow
+    (0.7,  0.0,  2.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.62, 0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Drill med
+    (1.5,  0.0,  4.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.34, 0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Drill fast
+    (0.0,  -0.9, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  1.25, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 0.6),  # Wall horiz
+    (0.0,  -0.9, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 1.25, 0, 0.0,  0, 0, 0.0,  0, 1.0, 0.6),  # Wall vert
+    (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Pulse wave (tick-phased)
+    (0.0,  0.0,  3.0, 0, 12, 0,  0.0,  0.0,  0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Pulse rings
+    (0.0,  0.0,  3.0, 0, 16, 6,  0.0,  0.05, 0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Pulse star
+    (0.0,  0.0,  2.5, 0, 16, 8,  0.15, 0.03, 0.05, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Pulse lattice
+    (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Pulse nova (tick-phased)
+    (0.0,  0.0,  2.5, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 1, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Pulse tide
+    (1.2,  0.0,  1.5, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 6.7,  1, 1, 0.0,  0, 0.7, 1.0),  # Doom 1x
+    (1.8,  0.0,  1.75, 0, 0, 0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 9.0,  1, 2, 0.0,  0, 0.45, 1.0),  # Doom 2x
+    (2.4,  0.0,  2.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 11.3, 1, 3, 0.0,  0, 0.3, 1.0),  # Doom 3x
+    (2.0,  0.5,  1.7, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.30, 1, 1.0, 1.0),  # Maelstrom undertow
+    (2.0,  0.5,  1.7, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, -0.7, 1, 1.0, 1.0),  # Maelstrom ejecta
+    (2.0,  0.5,  1.7, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  1, 1.0, 1.0),  # Maelstrom shear
+    (1.8,  0.4,  1.0, 1, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Atom orbital
+    (1.6,  0.45, 1.0, 2, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Atom binary
+    (0.0,  0.0,  1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Classic
 ]
 _KNOB_NAMES = ("spin", "burst", "surge", "fig8", "nl", "nm", "nk", "nw", "nv",
-               "adv", "wy", "wx", "tide", "rin", "ecc", "dlvl", "mrad", "mon", "cspd")
+               "adv", "wy", "wx", "tide", "rin", "ecc", "dlvl", "mrad", "mon", "cspd", "armr")
 _TABS_CACHE = {}
 
 
@@ -283,6 +283,7 @@ def apply_stances(engine, action, dydx, team_start=0, human_teams=None):
     a = action.clamp(0, NUM_STANCES - 1)
     g = lambda name: tabs[name][a]                                # (B,T) lookups
     spin, burst, surge, fig8 = g("spin"), g("burst"), g("surge"), g("fig8")
+    armor = g("armr")
     node_l, node_m, node_k, node_w, node_v = g("nl"), g("nm"), g("nk"), g("nw"), g("nv")
     ring_rin, ring_ecc = g("rin"), g("ecc")
     doom_lvl, mael_rad, mael_on = g("dlvl"), g("mrad"), g("mon")
@@ -312,6 +313,7 @@ def apply_stances(engine, action, dydx, team_start=0, human_teams=None):
                        torch.zeros_like(ring_rin))
     if human_teams is None and team_start <= 0:                 # training: drive all teams
         engine._spin, engine._burst, engine._drill, engine._wall, engine._surge = spin, burst, drill, wall, surge
+        engine._armor = armor
         engine._fig8 = fig8
         engine._node_l, engine._node_m, engine._node_k = node_l, node_m, node_k
         engine._node_w, engine._node_v = node_w, node_v
@@ -321,10 +323,12 @@ def apply_stances(engine, action, dydx, team_start=0, human_teams=None):
     else:                                                        # play: ONLY the AI-held seats; humans keep their key-set knobs
         if engine._surge is None:
             engine._surge = torch.ones(B, T, device=dev)
+        if getattr(engine, "_armor", None) is None:
+            engine._armor = torch.ones(B, T, device=dev)
         cols = ([t for t in range(T) if t not in human_teams] if human_teams is not None
                 else list(range(team_start, T)))
         if cols:
-            for name, val in (("_spin", spin), ("_burst", burst), ("_surge", surge),
+            for name, val in (("_spin", spin), ("_burst", burst), ("_surge", surge), ("_armor", armor),
                               ("_fig8", fig8), ("_node_l", node_l), ("_node_m", node_m),
                               ("_node_k", node_k), ("_node_w", node_w), ("_node_v", node_v),
                               ("_ring", ring), ("_ring_ecc", ring_ecc),
@@ -344,7 +348,7 @@ def apply_stances(engine, action, dydx, team_start=0, human_teams=None):
         engine._doom_horizon[:, cols] = (ring_rin * 1.25 * d_on)[:, cols]   # the rendered hole, not blob-scaled (no snowball)
         engine._doom_cap[:, cols] = (0.09 * frac.sqrt() * d_on)[:, cols]
         engine._vortex_pos[:, cols] = cpos[:, cols]
-        engine._vortex_str[:, cols] = (22.0 * frac.sqrt() * mael_on)[:, cols]
+        engine._vortex_str[:, cols] = (28.0 * frac.sqrt() * mael_on)[:, cols]  # sweep: 22 lost to Doom2x
         engine._vortex_range[:, cols] = (1.5 * blob_r).clamp(min=60.0)[:, cols]
         engine._vortex_sign[:, cols] = 1.0
         engine._vortex_rad[:, cols] = mael_rad[:, cols]

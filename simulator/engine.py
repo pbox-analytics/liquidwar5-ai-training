@@ -1376,6 +1376,12 @@ class LiquidWarEngine:
         surge = getattr(self, "_surge", None)
         if surge is not None:
             hit = hit * surge.gather(1, self.fteam)
+        # ARMOR: the defender-side mirror of surge — a per-team incoming-damage
+        # multiplier (default absent/1.0). Wall braces behind it: a formed
+        # rampart takes ~30% less, so holding the line is a real defense.
+        armor = getattr(self, "_armor", None)
+        if armor is not None:
+            hit = hit * armor.gather(1, tgt_team.clamp(min=0))
         # MOMENTUM PIERCE (the inertia rule): a fast-moving attacker hits harder, so
         # a charging mass — and especially the Drill, which builds forward speed —
         # punches through, while a standing blob hits soft. Kept well under the 16x
