@@ -744,3 +744,54 @@ both "obvious" buffs ship a WORSE stance. Open task.
   request). Engine nondeterminism note: CPU runs are NOT bit-reproducible at
   fixed seed (scatter tie-breaks) — verify engine refactors with invariants,
   not hash equality.
+
+## 33. CUDA-graph restore — design (2026-06-13, execution gated)
+
+The big-board fps fix. Graphs gave 60+ but are opt-in because freeing a
+captured graph's pool under room churn poisons the CUDA context (whole server
+dies). Investigation complete; the SAFE design eliminates the free entirely:
+
+THE FIX — the graph SURVIVES reset, and is NEVER freed:
+1. **In-place reset()** — today reset() REBINDS every buffer (fx/fy/fteam/
+   fhealth/occ/_fdir/cursor_*/gradient/well-slots/_tick_f via fresh
+   torch.zeros/full) and sets _graph=None. Convert to allocate-once, then
+   reinit IN-PLACE (.zero_/.fill_/.copy_) so the captured graph's fixed buffer
+   addresses stay valid for the next game. `self.walls.copy_(new)` keeps
+   `_wall_grad` (a view) live; `passable` must also be in-place. Audit: EVERY
+   tensor the captured `_step_body` reads must be in-place across reset
+   (team_oh/health are rebuilt by _rebuild_views but are NOT read inside the
+   captured step — observation-only — so they may keep rebinding).
+2. **Graph survives reset** — keep `self._graph`; after reset run EAGER for
+   ticks 0-69 (per-game cold flood) then replay the existing graph at tick>=70.
+   New map's walls flow through the in-place `self.walls` the relax kernels
+   read. One capture per engine, ever.
+3. **Engine pool** (server.py) — `ENGINE_POOL[(H,W,T,N)]`; GameSession acquires/
+   returns instead of construct/destroy, so a graph is never GC'd under churn.
+   Room teardown returns the engine (graph intact); _start_match acquires.
+
+VALIDATION (mandatory, BEFORE enabling): an offline churn harness on a GPU
+spawns/returns mixed rooms with LW_CUDA_GRAPH=1 + mid-game resets until it
+either poisons (fail) or survives N cycles (pass). `LW_CUDA_GRAPH` stays
+DEFAULT-OFF until the harness is green; the in-place reset is CPU-verified
+(test suite + double-reset invariants) independently since the eager path
+must be byte-identical. Risk = context death, so this ships as its own
+GPU-validated pass, not bundled — stable-2026-06-13 is the rollback.
+
+## 34. Lives & respawn — design (2026-06-13)
+
+Per-player LIVES so no one sits out early (great for family play) and KOTH
+gets its natural rule. The engine is conversion-based (fixed N slots, every
+slot owned by some team, total conserved), so "resurrect" = re-seed a team's
+ORIGINAL slot block `[t*per:(t+1)*per]` back to team t around its CURSOR,
+full health — count-preserving (the slots flip back from whoever converted
+them; the enemy that ate you gives them up). `engine.respawn_team(t)` places
+that block in a passable box around `cursor_pos[t]` (overflow parks on the
+cursor, like _place_teams).
+
+- ANNIHILATE: each team starts with LW_LIVES (default 3). When a team hits 0
+  fighters with lives>0, respawn at its cursor + decrement; a team at 0 lives
+  AND 0 fighters is OUT. match_over = (teams not OUT) <= 1; winner = last in.
+- KOTH: unlimited lives (respawn forever) — the hill score decides, so a
+  wipe just sends you back to your cursor to contest again.
+- Client: per-team life pips in the team chips + a respawn toast
+  ("BLUE respawns — 2 lives left"); the result card honors lives elimination.
