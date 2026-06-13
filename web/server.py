@@ -225,18 +225,19 @@ class GameSession:
         return max(range(len(counts)), key=lambda t: counts[t])
 
     def _score_koth(self) -> None:
-        """+1 to whoever has the MOST units in the circle (plurality, any margin
-        — not last-touch, not a 55% supermajority). ``hill_holder`` is that team
-        (or -1 if the hill is empty / exactly tied) for the client ring tint."""
+        """CONTESTED hill: the counter only ticks when EXACTLY ONE team has units
+        in the circle. Even a single enemy unit in the ring contests it and
+        PAUSES scoring — you must clear the enemy out to bank time.
+        ``hill_holder``: the lone holder (scores), -2 contested (paused), -1
+        empty — for the client ring tint."""
         oh = self.engine.team_oh[0]                                   # (T,H,W)
         pres = (oh * self._hill_mask.unsqueeze(0)).sum(dim=(1, 2)).tolist()
-        srt = sorted(range(len(pres)), key=lambda t: pres[t], reverse=True)
-        lead = srt[0]
-        if pres[lead] > 0 and (len(srt) < 2 or pres[lead] > pres[srt[1]]):
-            self.hill_holder = lead                                   # strict plurality
-            self.koth_score[lead] += 1
+        present = [t for t in range(len(pres)) if pres[t] >= 1.0]     # any unit in the ring
+        if len(present) == 1:                                        # uncontested -> bank time
+            self.hill_holder = present[0]
+            self.koth_score[present[0]] += 1
         else:
-            self.hill_holder = -1                                     # empty or tied
+            self.hill_holder = -2 if len(present) >= 2 else -1        # contested / empty
 
     @torch.no_grad()
     def _ai_dydx(self):
@@ -512,10 +513,12 @@ class GameSession:
         if mode == "none":
             return
         alive = self.engine.team_alive[0].tolist()
-        if mode == "koth":                                  # unlimited: revive all, keep contesting
+        if mode == "koth":                                  # unlimited, LOCAL respawn:
             died = [t for t in range(self.engine.T) if not alive[t]]
+            for t in died:                                  # only the loser goes back to its
+                self.engine.respawn_team(t)                 # spawn — opponents keep the hill
             if died:
-                self.engine.soft_reset(); self._zap = died
+                self._zap = died
             return
         died = [t for t in range(self.engine.T) if not alive[t] and not self.out[t]]
         if not died:

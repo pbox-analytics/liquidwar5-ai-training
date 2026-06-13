@@ -379,7 +379,7 @@ if (!new URLSearchParams(location.search).has("debug"))
     document.getElementById(id).parentElement.style.display = "none";
 
 let trails = true;   // motion trails (toggle: T)
-let blackout = localStorage.getItem("lw-blackout") === "1";   // black-out mode (toggle: B)
+let blackout = localStorage.getItem("lw-blackout") !== "0";   // black-out is DEFAULT (opt-out, toggle: B)
 function setBlackout(v) {
   blackout = v; localStorage.setItem("lw-blackout", v ? "1" : "0");
   const sb = document.getElementById("shBlackout");
@@ -476,7 +476,7 @@ function toast(msg, ms = 3200) {
   toastT = setTimeout(() => el.style.display = "none", ms);
 }
 let cursSpd = new Float32Array(6);
-let lastStanceKey = "", morphT = 0, clashT = 0, clashAt = null, zapT = 0;
+let lastStanceKey = "", morphT = 0, clashT = 0, clashAt = null, zapT = 0, zapTeams = [];
 const curTrail = Array.from({ length: 6 }, () => []);   // per-team cursor path history
 let prevCursorsHud = null, prevHudT = 0;
 let lastWallMask = null;
@@ -651,9 +651,12 @@ function onHud(st) {                                    // the JSON channel: HUD
   const ks = document.getElementById("kothScore");
   if (st.gamemode === "koth" && st.koth && !st.done) {
     const tgt = st.koth_target || 600;
-    ks.innerHTML = "\u26f0 " + st.koth.map((v, t) =>
+    const scores = "\u26f0 " + st.koth.map((v, t) =>
       `<span style="color:${COLORS[colorMap[t] % COLORS.length]}">${Math.round(v / tgt * 100)}%</span>`
     ).join(" \u00b7 ");
+    // contested (hill_holder -2) PAUSES the counter \u2014 say so
+    ks.innerHTML = st.hill_holder === -2
+      ? scores + ` <span style="color:#ffb454">\u2694 CONTESTED</span>` : scores;
     ks.style.display = "block";
   } else { ks.style.display = "none"; }
   if (st.note && st.note.ev && lastNote !== st.note.ev + st.note.team) {
@@ -673,7 +676,7 @@ function onHud(st) {                                    // the JSON channel: HUD
     const tag = st.zap.join(",") + ":" + st.tick;
     if (lastRespawn !== tag) {
       lastRespawn = tag;
-      zapT = performance.now();
+      zapT = performance.now(); zapTeams = st.zap.slice();
       LWAUDIO.taiko(0.7, 1.4); LWAUDIO.blip();
       const rt = st.zap[0];
       const who = (st.names && st.names[rt]) || teamWord(rt);
@@ -825,9 +828,11 @@ function frame() {                                     // 60fps interpolated ren
   // expanding ring + spark fountain at each team's cursor sells the warp
   const zAge = (performance.now() - zapT) / 600;
   if (zapT && zAge < 1) {
-    curSt.cursors.forEach((c, t) => {
-      if (!curSt.alive[t]) return;
-      const zc = RGB[t % RGB.length], x = c[1] + .5, y = c[0] + .5;
+    // flash only the team(s) that actually respawned (KOTH = just the loser;
+    // stock modes soft-reset everyone, but the loser is who the zap celebrates)
+    (zapTeams.length ? zapTeams : curSt.cursors.map((_, i) => i)).forEach((t) => {
+      if (!curSt.alive[t] || !curSt.cursors[t]) return;
+      const c = curSt.cursors[t], zc = RGB[t % RGB.length], x = c[1] + .5, y = c[0] + .5;
       ck = pushFx(curArr, ck, x, y, 8 + 60 * zAge, 1, WHITE, 0.85 * (1 - zAge));
       ck = pushFx(curArr, ck, x, y, 5 + 44 * zAge, 1, zc, 0.6 * (1 - zAge));
       if (zAge < 0.12) for (let i = 0; i < 30 && particles.length < MAXP; i++) {
@@ -841,11 +846,30 @@ function frame() {                                     // 60fps interpolated ren
   // (curSt.hill_holder — plurality, not last-touch; white if empty/tied)
   if (curSt.hill) {
     const [hy, hx, hr] = curSt.hill;
+    const cxh = hx + .5, cyh = hy + .5;
     const hold = curSt.hill_holder ?? -1;
-    const hcol = hold >= 0 ? RGB[hold % RGB.length] : WHITE;
-    const pulse = 1 + 0.06 * Math.sin(performance.now() / 260);
-    ck = pushFx(curArr, ck, hx + .5, hy + .5, hr * 2 * pulse, 1, hcol, 0.7);   // boundary ring
-    ck = pushFx(curArr, ck, hx + .5, hy + .5, hr * 2 * 0.92, 0, hcol, 0.05);   // faint fill
+    const contested = hold === -2;             // both sides in the ring -> counter PAUSED
+    const hcol = hold >= 0 ? RGB[hold % RGB.length] : contested ? [1.0, 0.62, 0.18] : WHITE;
+    const ts = performance.now() / 1000;
+    const ksc = curSt.koth || [], tgt = curSt.koth_target || 600;
+    const frac = ksc.length ? Math.min(1, Math.max(...ksc) / tgt) : 0;   // match progress
+    // soft outer glow + a breathing boundary ring + a ring contracting inward
+    ck = pushFx(curArr, ck, cxh, cyh, hr * 2.5, 0, hcol, contested ? 0.11 : 0.06);
+    const breathe = 1 + (contested ? 0.10 : 0.04) * Math.sin(ts * (contested ? 7 : 1.8));
+    ck = pushFx(curArr, ck, cxh, cyh, hr * 2 * breathe, 1, hcol, contested ? 0.95 : 0.7);
+    const ph = (ts * 0.5) % 1;
+    ck = pushFx(curArr, ck, cxh, cyh, hr * 2 * (1 - 0.55 * ph), 1, hcol, 0.32 * (1 - ph));
+    ck = pushFx(curArr, ck, cxh, cyh, hr * 2 * 0.92, 0, hcol, contested ? 0.09 : 0.04);  // faint fill
+    // ORBITING CAPTURE NODES around the rim that LIGHT UP with match progress —
+    // a rotating capture-point readout (spins fast + amber when contested)
+    const NN = 18, rot = ts * (contested ? 1.4 : 0.45) * (curSt.spin_dir || 1);
+    for (let i = 0; i < NN; i++) {
+      const a = rot + i / NN * 6.2832;
+      const lit = (i / NN) < frac;
+      ck = pushFx(curArr, ck, cxh + Math.cos(a) * hr, cyh + Math.sin(a) * hr,
+                  lit ? 4.0 : 2.4, 1, lit ? WHITE : hcol, lit ? 0.95 : 0.45);
+    }
+    ck = pushFx(curArr, ck, cxh, cyh, 4, 0, hcol, contested ? 0.85 : 0.5);  // core marker
   }
   // ROUT BEACONS: the hunt for the last 4% was never a fight, it was a search —
   // a dying army's remnant pulses so the endgame concludes

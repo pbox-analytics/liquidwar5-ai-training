@@ -386,6 +386,47 @@ class LiquidWarEngine:
         self._rebuild_occ()
         self._rebuild_views()
 
+    def respawn_team(self, t: int) -> None:
+        """KOTH LOCAL respawn: re-place ONLY team ``t`` at its spawn strip (cursor
+        reset to the strip centre), reclaiming its original slot block at full
+        health on EMPTY passable cells — OPPONENTS ARE NOT MOVED (they keep
+        holding the hill). Count-preserving (the slots flip back from whoever
+        converted them)."""
+        B, H, W, T = self.B, self.H, self.W, self.T
+        per = self.fighters_per_team
+        base = t * per
+        dev = self.device
+        strip_w = max(1, (W - 2) // T)
+        x0 = 1 + t * strip_w
+        x1 = min(x0 + strip_w, W - 1)
+        region = torch.zeros(B, H, W, dtype=torch.bool, device=dev)
+        region[:, 2:H - 2, x0:x1] = True
+        region &= self.passable & (self.occ < 0)        # empty cells only -> no overlap
+        cy0, cx0 = H // 2, (x0 + x1) // 2
+        if not bool(self.passable[0, cy0, cx0]):
+            ys, xs = torch.where(self.passable[0])
+            if ys.numel():
+                j = int(((ys - cy0) ** 2 + (xs - cx0) ** 2).argmin())
+                cy0, cx0 = int(ys[j]), int(xs[j])
+        self.cursor_pos[:, t, 0] = cy0
+        self.cursor_pos[:, t, 1] = cx0
+        flat = region.view(B, -1).float()
+        avail = int(flat.sum(dim=1).min().item())
+        k = min(per, max(avail, 1))
+        sel = torch.multinomial(flat + 1e-8, k, replacement=False)
+        self.fy[:, base:base + k] = sel // W
+        self.fx[:, base:base + k] = sel % W
+        self.fteam[:, base:base + k] = t
+        self.fhealth[:, base:base + k] = MAX_HEALTH
+        if k < per:
+            self.fy[:, base + k:base + per] = cy0
+            self.fx[:, base + k:base + per] = cx0
+            self.fteam[:, base + k:base + per] = t
+            self.fhealth[:, base + k:base + per] = MAX_HEALTH
+        self.team_alive[:, t] = True
+        self._rebuild_occ()
+        self._rebuild_views()
+
     # ------------------------------------------------------------------
     # Derived views (so the public interface is unchanged)
     # ------------------------------------------------------------------

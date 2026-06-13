@@ -815,3 +815,19 @@ Per feedback, the lives feature became Smash-Melee STOCKS (the earlier
   margin — not last-touch, not a 55% supermajority); the hill ring tints by
   `hill_holder` (who holds it RIGHT NOW). Verified: annihilate ends on the
   first wipe (winner = survivor); challenger depletes 3→0 then eliminates.
+
+## 36. KOTH contested + local respawn, black-out default, animated hill (2026-06-13)
+
+- KOTH is now CONTESTED: the counter only ticks when EXACTLY ONE team has
+  units in the ring — even a single enemy unit pauses it (`hill_holder` -2 =
+  contested, -1 = empty, t = lone holder). You must CLEAR the ring to bank.
+- KOTH respawn is LOCAL: `engine.respawn_team(t)` re-places ONLY the wiped
+  team at its spawn strip (opponents are NOT teleported — they keep holding
+  the hill). Stock modes (annihilate/challenger) keep the full `soft_reset`.
+- Black-out is the DEFAULT now (opt-out via B / the 🌑 button; `lw-blackout`
+  must be "0" to disable).
+- The hill ring is a proper animated capture-point: soft glow, a breathing
+  boundary ring, an inward-contracting energy ring, and 18 ORBITING NODES
+  that light up with match progress (frac of target) and spin — fast + amber
+  when contested, calm + holder-coloured when held. Client `#kothScore` shows
+  "⚔ CONTESTED" when paused. Verified live: hill_holder cycles -1/-2/held.
