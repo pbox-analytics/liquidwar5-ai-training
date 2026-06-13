@@ -854,9 +854,17 @@ class Room:
         self.opponent = opponent           # kept for the lobby-start rebuild
         self.size = size
         small = size == "small"            # phone boards: same archetypes, half scale
+        # 2026-06-13: DOUBLED the board AREA (384x576 -> 544x816, x2.0 cells;
+        # phone 192x288 -> 272x408) while keeping the SAME 8000/2000 fighters
+        # — sparser armies, far more room to maneuver and kite. Cursor speed
+        # auto-scales with width (round(W/96)) so on-screen feel holds; the
+        # well range floors (Doom 56 / Maelstrom 60 cells) are now relatively
+        # smaller, which only helps escapes. 2x AREA, not 2x linear (that's 4x
+        # cells — units become specks and the cold flood lags); LW_PLAY_* env
+        # can push it further.
         self._dims = dict(
-            height=192 if small else int(os.environ.get("LW_PLAY_H", "384")),
-            width=288 if small else int(os.environ.get("LW_PLAY_W", "576")),
+            height=272 if small else int(os.environ.get("LW_PLAY_H", "544")),
+            width=408 if small else int(os.environ.get("LW_PLAY_W", "816")),
             fighters=2000 if small else int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),
         )
         self.session = GameSession(mode=mode, opponent=opponent, teams=teams, **self._dims)
@@ -1051,7 +1059,7 @@ class Room:
                     _ea = session.engine               # attract pays the same sweep cap
                     if (_ea.tick >= 80 and getattr(_ea, "_fixed_sweeps", None) is None
                             and not getattr(_ea, "_cuda_graph", False)):
-                        _ea._fixed_sweeps = _ea.cursor_speed + 4
+                        _ea._fixed_sweeps = int(os.environ.get("LW_GRAD_SWEEPS", str(_ea.cursor_speed + 4)))
             elif self.reset_flag:
                 session.engine._map_choice = self.map_choice   # picked map (None=random)
                 session.reset(); self.reset_flag = False; hold = 0; logged = False
@@ -1109,7 +1117,7 @@ class Room:
                 # and dropping it removes ~516 launches + 12 sync stalls/tick
                 if (_e.tick >= 80 and getattr(_e, "_fixed_sweeps", None) is None
                         and not getattr(_e, "_cuda_graph", False)):
-                    _e._fixed_sweeps = _e.cursor_speed + 4
+                    _e._fixed_sweeps = int(os.environ.get("LW_GRAD_SWEEPS", str(_e.cursor_speed + 4)))
             blob = session.frame_blob()
             if blob is not getattr(self, "_last_sent_blob", None):
                 self._last_sent_blob = blob
