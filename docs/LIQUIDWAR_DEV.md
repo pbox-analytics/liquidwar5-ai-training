@@ -795,3 +795,23 @@ cursor, like _place_teams).
   wipe just sends you back to your cursor to contest again.
 - Client: per-team life pips in the team chips + a respawn toast
   ("BLUE respawns — 2 lives left"); the result card honors lives elimination.
+
+## 35. Lives reworked to STOCKS + KOTH plurality (2026-06-13)
+
+Per feedback, the lives feature became Smash-Melee STOCKS (the earlier
+"steal-back respawn" wrongly shrank the opponent):
+- ANNIHILATE = **1 life** (first wipe loses — the classic mode).
+- CHALLENGER (new mode) = pick **1-5 stocks** (a lives selector, `?lives=N`).
+- KOTH = unlimited (the hill decides; a wipe just soft-resets).
+- On a death the team loses a stock; if any remain, `engine.soft_reset()`
+  returns the board to NEUTRAL — every team re-placed at its OWN spawn strip,
+  full health, cold gradient, MAP KEPT. Opponent un-damaged (resets to full
+  too) and spawns AWAY (point-symmetric strips). Count returns to exactly
+  T*per. `match_over`/`winner` are stock-based (last team with stocks) for
+  stock modes, score for koth, `done` for practice. Client: stock pips in the
+  team chips, a ⚡ ZAP fx (expanding ring + spark fountain at every cursor) +
+  toast on the soft-reset teleport.
+- KOTH now scores by **most units in the circle** (strict plurality, any
+  margin — not last-touch, not a 55% supermajority); the hill ring tints by
+  `hill_holder` (who holds it RIGHT NOW). Verified: annihilate ends on the
+  first wipe (winner = survivor); challenger depletes 3→0 then eliminates.

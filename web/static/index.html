@@ -220,7 +220,13 @@
     </select>
     <select id="gamemode" title="Win condition">
       <option value="annihilate">Mode: Annihilate</option>
+      <option value="challenger">Mode: Challenger (stocks)</option>
       <option value="koth">Mode: King of the Hill</option>
+    </select>
+    <select id="livesel" title="Stocks per player (Challenger mode)" style="display:none">
+      <option value="1">1 life</option><option value="2">2 lives</option>
+      <option value="3" selected>3 lives</option><option value="4">4 lives</option>
+      <option value="5">5 lives</option>
     </select>
     <select id="mapsel" title="Pick the map (Random = a fresh one each game)">
       <option value="-1">Map: Random</option>
@@ -421,7 +427,7 @@ let curPT = null, prevPT = null, curSt = null;
 let flashes = [];    // conversion flashes {x,y,life,col} popped when a mote changes team
 const MAXFLASH = 120;  // cap spawns per server frame (conversions can be hundreds)
 let tLast = 0, dtServer = 22;                          // ms between server frames (EMA)
-let lastTick = -1, lastMap = "", lastNote = "";
+let lastTick = -1, lastMap = "", lastNote = "", lastRespawn = "";
 let doomA = 0, doomR = 5, doomLvl = 1;                 // black-hole strength/radius (animated)
 let whirlA = 0;                                        // maelstrom whirlpool strength (animated)
 let lastFrameT = 0;
@@ -470,7 +476,7 @@ function toast(msg, ms = 3200) {
   toastT = setTimeout(() => el.style.display = "none", ms);
 }
 let cursSpd = new Float32Array(6);
-let lastStanceKey = "", morphT = 0, clashT = 0, clashAt = null;
+let lastStanceKey = "", morphT = 0, clashT = 0, clashAt = null, zapT = 0;
 const curTrail = Array.from({ length: 6 }, () => []);   // per-team cursor path history
 let prevCursorsHud = null, prevHudT = 0;
 let lastWallMask = null;
@@ -660,6 +666,22 @@ function onHud(st) {                                    // the JSON channel: HUD
     else if (st.note.ev === "start") toast("⚔ The match begins!");
     if (st.note.ev.startsWith("join")) LWAUDIO.stanceTap(st.note.team);
   }
+  // STOCK RESPAWN: a death soft-resets the board (everyone teleports to their
+  // spawns). Fire a ZAP — a bright ring + sparks at each team's cursor — and a
+  // toast for the team(s) that died.
+  if (st.zap && st.zap.length) {
+    const tag = st.zap.join(",") + ":" + st.tick;
+    if (lastRespawn !== tag) {
+      lastRespawn = tag;
+      zapT = performance.now();
+      LWAUDIO.taiko(0.7, 1.4); LWAUDIO.blip();
+      const rt = st.zap[0];
+      const who = (st.names && st.names[rt]) || teamWord(rt);
+      const left = st.stocks && st.stocks[rt] !== undefined ? st.stocks[rt] : -1;
+      toast(left < 0 ? `⚡ ${who} respawns`
+                     : `⚡ ${who} down — ${left} ${left === 1 ? "life" : "lives"} left`);
+    }
+  }
   if (pendingGrid && pendingGrid.length === W * H) { processGrid(pendingGrid); pendingGrid = null; }
   // STANCE MORPH: a switch is an EVENT — particle burst + shockwave ring
   // from your cursor (the server whips the army through a flare-and-snap)
@@ -692,7 +714,7 @@ function onHud(st) {                                    // the JSON channel: HUD
 // the army); cursors -> a second crisp batch drawn on top of the composite.
 const FXF = 8;                                           // x,y,size,shape,r,g,b,a
 const fxArr = new Float32Array((MAXP + MAXFLASH * 2) * FXF);
-const curArr = new Float32Array((8 * 6 + 6 * 16) * FXF);   // marks + comet tails
+const curArr = new Float32Array(256 * FXF);   // cursor marks + comet tails + zap/hill/clash rings
 const curBgArr = new Float32Array(8 * 2 * FXF);          // dark backdrops (over-blend pass)
 function pushFx(arr, k, x, y, size, shape, c, a) {
   const o = k * FXF;
@@ -799,13 +821,28 @@ function frame() {                                     // 60fps interpolated ren
   let ck = 0, bk = 0;
   const beat = 1 + 0.3 * Math.sin(performance.now() / 170);
   // KING OF THE HILL: the contested zone — a pulsing ring + faint disc at the
-  // hill, tinted by whoever currently leads the score (white if contested)
+  // ZAP: a stock respawn teleported everyone to their spawns — a bright
+  // expanding ring + spark fountain at each team's cursor sells the warp
+  const zAge = (performance.now() - zapT) / 600;
+  if (zapT && zAge < 1) {
+    curSt.cursors.forEach((c, t) => {
+      if (!curSt.alive[t]) return;
+      const zc = RGB[t % RGB.length], x = c[1] + .5, y = c[0] + .5;
+      ck = pushFx(curArr, ck, x, y, 8 + 60 * zAge, 1, WHITE, 0.85 * (1 - zAge));
+      ck = pushFx(curArr, ck, x, y, 5 + 44 * zAge, 1, zc, 0.6 * (1 - zAge));
+      if (zAge < 0.12) for (let i = 0; i < 30 && particles.length < MAXP; i++) {
+        const a = Math.random() * 6.283, sp = 1.2 + Math.random() * 2.8;
+        particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+                         life: 0.5 + Math.random() * 0.4, col: zc });
+      }
+    });
+  } else if (zAge >= 1) zapT = 0;
+  // hill, tinted by who has the MOST units in the circle RIGHT NOW
+  // (curSt.hill_holder — plurality, not last-touch; white if empty/tied)
   if (curSt.hill) {
     const [hy, hx, hr] = curSt.hill;
-    const ksc = curSt.koth || [];
-    const lead = ksc.length ? ksc.indexOf(Math.max(...ksc)) : -1;
-    const tied = ksc.filter(v => v === Math.max(...ksc)).length > 1;
-    const hcol = (lead >= 0 && !tied && Math.max(...ksc) > 0) ? RGB[lead % RGB.length] : WHITE;
+    const hold = curSt.hill_holder ?? -1;
+    const hcol = hold >= 0 ? RGB[hold % RGB.length] : WHITE;
     const pulse = 1 + 0.06 * Math.sin(performance.now() / 260);
     ck = pushFx(curArr, ck, hx + .5, hy + .5, hr * 2 * pulse, 1, hcol, 0.7);   // boundary ring
     ck = pushFx(curArr, ck, hx + .5, hy + .5, hr * 2 * 0.92, 0, hcol, 0.05);   // faint fill
@@ -1052,7 +1089,7 @@ function updateHUD(st) {
   }
   document.getElementById("domwrap").title = st.fighters.join(" / ");
   // the #teams strip rebuilds only when its content actually changed
-  const tkey = JSON.stringify([st.fighters, st.names, st.wins, st.alive, st.seats, MYT, colorMap]);
+  const tkey = JSON.stringify([st.fighters, st.names, st.wins, st.alive, st.seats, MYT, colorMap, st.stocks]);
   if (tkey === lastTeamsKey) return;
   lastTeamsKey = tkey;
   const tdiv = document.getElementById("teams"); tdiv.innerHTML = "";
@@ -1062,10 +1099,13 @@ function updateHUD(st) {
     const nm = st.names && st.names[t] ? esc(st.names[t]) : (human ? "P" + ((st.seats || []).indexOf(t) + 1) : "");
     const wn = st.wins && st.wins[t] ? " ·" + st.wins[t] : "";
     const tag = (t === MYT ? (nm || "you") : nm) + wn;
+    // life pips (LIVES mode): a small ● per remaining life in the team colour
+    const lv = st.stocks && st.stocks[t] !== undefined
+      ? `<span style="color:${COLORS[t%COLORS.length]};font-size:9px;letter-spacing:1px">${"●".repeat(Math.min(st.stocks[t],5))}</span>` : "";
     el.innerHTML = `<span class="swatch" style="background:${COLORS[t%COLORS.length]};${human ? "outline:2px solid #cdd6f4;outline-offset:1px" : ""}"></span>` +
-                   (tag ? `<span class="muted" style="font-size:11px">${tag}</span>` : "") +
+                   (tag ? `<span class="muted" style="font-size:11px">${tag}</span>` : "") + lv +
                    `<span style="display:inline-block;min-width:4ch;text-align:right">${f}</span>`;
-    if (!st.alive[t]) el.style.opacity = .35; tdiv.appendChild(el);
+    if (!st.alive[t] && !(st.stocks && st.stocks[t] > 0)) el.style.opacity = .35; tdiv.appendChild(el);
   });
 }
 
@@ -1104,6 +1144,7 @@ function connect() {
                      (room ? `&room=${encodeURIComponent(room)}` : "") +
                      (pname ? `&name=${encodeURIComponent(pname)}` : "") +
                      (gm !== "annihilate" ? `&gm=${gm}` : "") +
+                     (gm === "challenger" ? `&lives=${document.getElementById("livesel").value}` : "") +
                      (prefCol !== null ? `&color=${prefCol}` : ""));
   ws.binaryType = "arraybuffer";
   curPos = null; pendingGrid = null;
@@ -1420,7 +1461,7 @@ document.getElementById("tSpin").onclick = () => { spin = spin === 1 ? -1 : spin
 const COARSE = matchMedia("(pointer: coarse)").matches;
 if (COARSE) {
   const m = document.getElementById("shMatch");
-  for (const id of ["mode", "opponent", "oppcount", "gamemode", "mapsel", "reset"]) m.appendChild(document.getElementById(id));
+  for (const id of ["mode", "opponent", "oppcount", "gamemode", "livesel", "mapsel", "reset"]) m.appendChild(document.getElementById(id));
   const r = document.getElementById("shRoom");
   for (const id of ["pname", "room", "invite"]) r.appendChild(document.getElementById(id));
   document.getElementById("visuals2").append(...document.getElementById("visuals").querySelectorAll("label"));
@@ -1492,9 +1533,13 @@ document.getElementById("reset").onclick = () => ws && ws.send(JSON.stringify({r
 document.getElementById("mode").onchange = connect;
 document.getElementById("opponent").onchange = connect;
 document.getElementById("oppcount").onchange = connect;
-{ const gmSel = document.getElementById("gamemode");
+{ const gmSel = document.getElementById("gamemode"), lvSel = document.getElementById("livesel");
   gmSel.value = localStorage.getItem("lw-gamemode") || "annihilate";
-  gmSel.onchange = () => { localStorage.setItem("lw-gamemode", gmSel.value); connect(); }; }
+  lvSel.value = localStorage.getItem("lw-lives") || "3";
+  const syncLv = () => lvSel.style.display = gmSel.value === "challenger" ? "" : "none";
+  syncLv();
+  gmSel.onchange = () => { localStorage.setItem("lw-gamemode", gmSel.value); syncLv(); connect(); };
+  lvSel.onchange = () => { localStorage.setItem("lw-lives", lvSel.value); connect(); }; }
 document.getElementById("mapsel").onchange = () => {     // pick map -> tell server, start new game
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ map: parseInt(document.getElementById("mapsel").value) }));
 };

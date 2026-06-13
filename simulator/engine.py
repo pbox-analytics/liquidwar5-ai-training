@@ -370,6 +370,22 @@ class LiquidWarEngine:
                 self.fx[:, base + k:base + per] = cx0
                 self.fteam[:, base + k:base + per] = t
 
+    def soft_reset(self) -> None:
+        """STOCK respawn (Smash-Melee feel): return the board to a NEUTRAL start
+        — re-place EVERY team at its own spawn strip, full health, cold gradient
+        — while KEEPING the map (walls). A death just costs a stock; the
+        opponent is NOT damaged (they reset to full too) and spawns AWAY (their
+        own strip, point-symmetric, far apart). Fighter count returns to exactly
+        T*per (all conversions undone). The caller tracks the stock cost."""
+        self.fhealth.fill_(MAX_HEALTH)
+        self.cursor_val.fill_(CURSOR_SEED)
+        self.gradient.fill_(GRAD_INIT)
+        self.team_alive.fill_(True)
+        self._fdir.fill_(8)
+        self._place_teams()        # re-seeds fy/fx/fteam + cursor_pos at the strips (in-place)
+        self._rebuild_occ()
+        self._rebuild_views()
+
     # ------------------------------------------------------------------
     # Derived views (so the public interface is unchanged)
     # ------------------------------------------------------------------

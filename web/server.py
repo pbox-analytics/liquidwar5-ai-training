@@ -144,6 +144,7 @@ class GameSession:
         self.engine.reset()
         self.policy: CursorPolicy | None = None
         self.practice = False              # forgiving sandbox (opponent='practice')
+        self.challenger_lives = 3          # stocks in challenger mode (Room sets from ?lives=)
         self._lesson = 0                   # which LESSONS entry the dummy holds
         # GAME MODE (annihilate | koth). KOTH = a central hill; the team with
         # the clear majority of in-hill mass scores each tick, first to target
@@ -203,26 +204,39 @@ class GameSession:
 
     @property
     def match_over(self) -> bool:
-        return self.done or self.koth_done
+        if self.gamemode == "koth":
+            return self.koth_done
+        if getattr(self, "respawn_mode", "none") == "stock":
+            return sum(1 for o in self.out if not o) <= 1   # one team with stocks left
+        return self.done                                    # practice / fallback
 
     def winner(self) -> int:
-        """Match winner: KOTH leader if the hill was won, else the largest army
-        (covers annihilation AND a koth game that ends by elimination/timeout)."""
+        """Match winner: KOTH leader by hill score; stock modes -> the last team
+        with stocks (else largest army as a tie-break)."""
+        if self.gamemode == "koth":
+            return max(range(len(self.koth_score)), key=lambda t: self.koth_score[t])
+        if getattr(self, "respawn_mode", "none") == "stock":
+            standing = [t for t in range(self.engine.T) if not self.out[t]]
+            if len(standing) == 1:
+                return standing[0]
         if self.koth_done:
             return max(range(len(self.koth_score)), key=lambda t: self.koth_score[t])
         counts = self.engine.team_oh[0].sum(dim=(1, 2)).tolist()
         return max(range(len(counts)), key=lambda t: counts[t])
 
     def _score_koth(self) -> None:
-        """+1 to the team holding a clear (>55%) majority of the hill's mass."""
+        """+1 to whoever has the MOST units in the circle (plurality, any margin
+        — not last-touch, not a 55% supermajority). ``hill_holder`` is that team
+        (or -1 if the hill is empty / exactly tied) for the client ring tint."""
         oh = self.engine.team_oh[0]                                   # (T,H,W)
         pres = (oh * self._hill_mask.unsqueeze(0)).sum(dim=(1, 2)).tolist()
-        total = sum(pres)
-        if total < 1.0:
-            return
-        lead = max(range(len(pres)), key=lambda t: pres[t])
-        if pres[lead] > 0.55 * total and bool(self.engine.team_alive[0, lead]):
+        srt = sorted(range(len(pres)), key=lambda t: pres[t], reverse=True)
+        lead = srt[0]
+        if pres[lead] > 0 and (len(srt) < 2 or pres[lead] > pres[srt[1]]):
+            self.hill_holder = lead                                   # strict plurality
             self.koth_score[lead] += 1
+        else:
+            self.hill_holder = -1                                     # empty or tied
 
     @torch.no_grad()
     def _ai_dydx(self):
@@ -436,6 +450,7 @@ class GameSession:
         self.engine.step(dydx)
         if self.gamemode == "koth":
             self._score_koth()
+        self._check_stocks()                   # stock loss / soft-reset on a wipe
 
     def _ai_fx_markers(self, ai_stance: torch.Tensor, human_set=()) -> None:
         """HUD markers for the client's shaders: the first AI team holding a
@@ -460,10 +475,59 @@ class GameSession:
             self._set_opponent("latest")
         self.koth_score = [0] * self.engine.T
         self.engine.reset()
+        self.init_lives()
         self._prev_pos = None                  # force a keyframe after every reset
         self._grid_burst = 8                   # first frames carry the grid (cold flood)
         self._last_blob = None                 # never serve the OLD map's frozen frame
         self._last_blob_tick = None
+
+    def init_lives(self) -> None:
+        """Set the STOCK rule from the gamemode (called once gamemode is known —
+        at construction by the Room AND on every round reset):
+          annihilate = 1 stock (first wipe loses, the classic mode),
+          challenger = self.challenger_lives stocks (Smash-Melee stock select),
+          koth       = unlimited (the hill decides; a wipe just soft-resets),
+          practice   = none (the Room rotates lessons on wipe).
+        On a death a team loses a stock; if any remain, the board SOFT-RESETS
+        (everyone back to their spawn at full — opponent un-damaged, spawns
+        away), else the team is OUT."""
+        self.out = [False] * self.engine.T
+        self._zap = None                       # teams that just died -> client zap fx
+        self.hill_holder = -1
+        if self.gamemode == "koth":
+            self.respawn_mode = "koth"; self.stocks = None
+        elif self.practice:
+            self.respawn_mode = "none"; self.stocks = None
+        elif self.gamemode == "challenger":
+            self.respawn_mode = "stock"
+            self.stocks = [max(1, int(getattr(self, "challenger_lives", 3)))] * self.engine.T
+        else:                                  # annihilate
+            self.respawn_mode = "stock"; self.stocks = [1] * self.engine.T
+
+    def _check_stocks(self) -> None:
+        """Handle wipes per the stock rule (call AFTER engine.step). A wiped team
+        loses a stock; if it (or anyone) still has stocks, SOFT-RESET the board so
+        the survivors aren't frozen mid-wipe and the dier respawns at full."""
+        mode = getattr(self, "respawn_mode", "none")
+        if mode == "none":
+            return
+        alive = self.engine.team_alive[0].tolist()
+        if mode == "koth":                                  # unlimited: revive all, keep contesting
+            died = [t for t in range(self.engine.T) if not alive[t]]
+            if died:
+                self.engine.soft_reset(); self._zap = died
+            return
+        died = [t for t in range(self.engine.T) if not alive[t] and not self.out[t]]
+        if not died:
+            return
+        for t in died:
+            self.stocks[t] -= 1
+            if self.stocks[t] <= 0:
+                self.out[t] = True                          # eliminated for good
+        self._zap = died
+        # if the match isn't decided, return the board to neutral (Smash stock)
+        if sum(1 for o in self.out if not o) > 1:
+            self.engine.soft_reset()
 
     def frame_blob(self) -> bytes:
         """The per-tick BINARY channel: mote positions + teams (+ the cell
@@ -954,12 +1018,13 @@ class Room:
     MAX_SEATS = 6                          # client palette / engine ceiling
 
     def __init__(self, key: str, mode: str, opponent: str, teams: int,
-                 size: str = "full", gamemode: str = "annihilate") -> None:
+                 size: str = "full", gamemode: str = "annihilate", lives: int = 3) -> None:
         self.key = key
         self.mode = mode
         self.opponent = opponent           # kept for the lobby-start rebuild
         self.size = size
-        self.gamemode = gamemode           # annihilate | koth (the win condition)
+        self.gamemode = gamemode           # annihilate | challenger | koth
+        self.lives = lives                 # stocks for challenger mode
         small = size == "small"            # phone boards: same archetypes, half scale
         # 2026-06-13: DOUBLED the board AREA (384x576 -> 544x816, x2.0 cells;
         # phone 192x288 -> 272x408) while keeping the SAME 8000/2000 fighters
@@ -976,6 +1041,8 @@ class Room:
         )
         self.session = GameSession(mode=mode, opponent=opponent, teams=teams, **self._dims)
         self.session.gamemode = gamemode
+        self.session.challenger_lives = lives
+        self.session.init_lives()
         if small:
             # small boards run EAGER (they're ~5ms/tick anyway): phone rooms
             # churn constantly (screen sleep / tab switches), and the
@@ -1085,6 +1152,8 @@ class Room:
             self.session = GameSession(mode=self.mode, opponent=self.opponent,
                                        teams=want, **self._dims)
             self.session.gamemode = self.gamemode
+            self.session.challenger_lives = self.lives
+            self.session.init_lives()
             if self.size == "small":
                 self.session.engine._cuda_graph = False
         old = dict(self.players)
@@ -1262,6 +1331,12 @@ class Room:
                 st["hill"] = list(session.hill)        # (cy, cx, r)
                 st["koth"] = session.koth_score
                 st["koth_target"] = session.koth_target
+                st["hill_holder"] = getattr(session, "hill_holder", -1)
+            if getattr(session, "respawn_mode", "none") == "stock" and session.stocks:
+                st["stocks"] = session.stocks          # per-team stock pips
+            if getattr(session, "_zap", None):
+                st["zap"] = session._zap               # teams that just respawned -> zap fx
+                session._zap = None
             if session.match_over:
                 st["done"] = True                      # koth win sets done even with both alive
                 st["winner"] = session.winner()
@@ -1354,10 +1429,12 @@ async def ws(sock: WebSocket) -> None:
             floor = int(os.environ.get("LW_ROOM_SEATS", "4" if size == "small" else "3"))
             teams = max(teams, floor)
         gm = q.get("gm", "annihilate")
+        lv = q.get("lives")
         room = Room(key, mode=mode,
                     opponent=q.get("opponent", "latest"),
                     teams=teams, size=size,
-                    gamemode=gm if gm in ("annihilate", "koth") else "annihilate")
+                    gamemode=gm if gm in ("annihilate", "koth", "challenger") else "annihilate",
+                    lives=int(lv) if lv and lv.isdigit() else 3)
         ROOMS[key] = room
     colorq = q.get("color")
     player = room.join(sock, (q.get("name") or "").strip()[:12],
