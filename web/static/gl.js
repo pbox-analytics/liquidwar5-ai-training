@@ -211,6 +211,7 @@ precision highp float;
 uniform sampler2D uWalls, uArmy, uTrail, uBloom;
 uniform vec2 uRes, uGrid;
 uniform float uBloomK, uTrailK;
+uniform float uBlackout;             // 0 = normal, 1 = black-out (units are the only light)
 uniform vec4 uHole;                 // Doom black hole: x, y (grid), horizon radius (cells), strength (0=off)
 uniform vec2 uHoleT;                // (time, spin direction)
 uniform vec4 uWhirl;                // Maelstrom: x, y (grid), radius (cells), strength (0=off)
@@ -259,12 +260,24 @@ void main() {
   float lit = 0.5 + 0.5 * dot(normalize(g + vec2(1e-5)), normalize(vec2(-0.5, 0.86)));
   float bevel = smoothstep(0.5, 0.95, soft) * (1.0 - smoothstep(0.95, 1.0, soft));
   vec3 wallCol = vec3(0.052, 0.066, 0.108) + vec3(0.02, 0.03, 0.05) * soft;
-  wallCol += vec3(0.13, 0.18, 0.30) * bevel * lit;
+  wallCol += vec3(0.17, 0.23, 0.38) * bevel * lit;          // brighter rim — barriers read on the zoomed-out board
+  // BLACK-OUT MODE: the world goes dark and the UNITS are the only light —
+  // their bloom (the blurred army glow, amb below) spills onto nearby walls
+  // and floor, so barriers are revealed exactly where the action is. Far-off
+  // walls fade to black until a swarm approaches. Lean into the dark.
+  vec3 amb = texture(uBloom, uvL).rgb;                      // unit ambient light field
+  if (uBlackout > 0.0) {
+    col = mix(col, col * 0.10, uBlackout);                  // open floor goes near-black
+    vec3 wDark = vec3(0.014, 0.018, 0.032)                  // wall in shadow
+               + amb * 3.2                                  // lit by nearby units
+               + vec3(0.10, 0.14, 0.24) * bevel * lit * (0.3 + 6.0 * amb.g);  // rim catches the glow
+    wallCol = mix(wallCol, wDark, uBlackout);
+  }
   col = mix(col, wallCol, wall);
   col += texture(uTrail, uvL).rgb * uTrailK;                // motion history glow (lensed)
   vec4 ar = texture(uArmy, uvL);                            // crisp current frame, premult over (lensed)
   col = ar.rgb + col * (1.0 - ar.a);
-  col += texture(uBloom, uvL).rgb * uBloomK;                // glow (lensed)
+  col += amb * uBloomK;                                     // glow (lensed; reuses amb)
   // --- Doom: the hole itself. A doppler-bright accretion band (one side
   // blue-shifted brighter, like Gargantua), slow spiral arms feeding it, a
   // hot thin photon ring, and an event horizon that swallows ALL light.
@@ -598,6 +611,7 @@ function create(canvas, teamColors) {
     gl.uniform2f(U.comp.uRes, vw, vh);
     gl.uniform2f(U.comp.uGrid, gridW, gridH);
     gl.uniform1f(U.comp.uBloomK, o.bloom); gl.uniform1f(U.comp.uTrailK, o.trailVis);
+    gl.uniform1f(U.comp.uBlackout, o.blackout || 0);
     const fin = (v) => Number.isFinite(v) ? v : 0;   // one NaN uniform whites EVERY pixel
     const hole = o.hole || { x: 0, y: 0, r: 1, a: 0, spin: 1 };
     gl.uniform4f(U.comp.uHole, fin(hole.x), fin(hole.y), fin(hole.r) || 1, fin(hole.a));

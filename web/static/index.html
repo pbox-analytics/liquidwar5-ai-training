@@ -299,7 +299,9 @@
       <label style="display:flex;align-items:center;gap:8px;width:100%;font-size:13px;color:#9aa4b2">effects
         <input type="range" id="vSfx" min="0" max="1" step="0.05" value="0.7" style="flex:1"></label>
     </div>
-    <h3>Visuals</h3><div class="row" id="visuals2"></div>
+    <h3>Visuals</h3>
+    <div class="row"><button id="shBlackout" style="flex:1">🌑 Black-out mode</button></div>
+    <div class="row" id="visuals2"></div>
     <h3>Gauntlet</h3><div class="row" id="shGauntlet"></div>
     <div class="row"><button id="sheetClose" style="flex:1">Done</button></div>
   </div>
@@ -318,7 +320,7 @@
     <b>Stances</b> (hold one): <b>1</b> 🐝 Swarm <span class="muted">(tap: web→comet)</span> &nbsp; <b>2</b> 🌀 Spin <span class="muted">(tap to cycle: vortex→sawblade→galaxy)</span> &nbsp; <b>3</b> ➤ Drill <span class="muted">(tap to rev: slow→fast)</span> &nbsp; <b>4</b> 🛡 Wall <span class="muted">(tap to flip)</span> &nbsp; <b>5</b> 💥 Pulse <span class="muted">(tap: wave→rings→star→lattice→nova→tide)</span> &nbsp; <b>6</b> 🕳 Doom <span class="muted">(tap to charge)</span> &nbsp; <b>7</b> 🌪 Maelstrom <span class="muted">(tap to cycle: undertow→ejecta→shear)</span> &nbsp; <b>8</b> ⚛ Atom <span class="muted">(tap: orbital→binary)</span> &nbsp; <b>9</b> 🌊 Classic &nbsp;·&nbsp;
     <b>Q</b>/<b>E</b> spin direction &nbsp;·&nbsp;
     <span class="muted">counters: your Maelstrom shields your army from enemy Doom; Wall braces the pull</span> &nbsp;·&nbsp;
-    <b>T</b> trails &nbsp;·&nbsp;
+    <b>T</b> trails &nbsp;·&nbsp; <b>B</b> black-out &nbsp;·&nbsp;
     <b>F</b> fullscreen &nbsp;·&nbsp; 🎮 gamepad: stick/d-pad move, LB/RB stance, A mode, X/B spin, Y trails, Start new game &nbsp;·&nbsp;
     <b>New game</b> / <b>Map</b> picker above &nbsp;·&nbsp;
     <a href="liquidwar.apk" class="muted">📦 Android app</a> &nbsp;·&nbsp;
@@ -331,7 +333,7 @@
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 </script>
 <script src="audio.js?v=1781616000"></script>
-<script src="gl.js?v=1781618000"></script>
+<script src="gl.js?v=1781702000"></script>
 <script>
 // The PALETTE is fixed; which palette entry each TEAM wears is the server's
 // call (players pick colors in the lobby) — COLORS/RGB are per-team views
@@ -369,6 +371,14 @@ if (!new URLSearchParams(location.search).has("debug"))
     document.getElementById(id).parentElement.style.display = "none";
 
 let trails = true;   // motion trails (toggle: T)
+let blackout = localStorage.getItem("lw-blackout") === "1";   // black-out mode (toggle: B)
+function setBlackout(v) {
+  blackout = v; localStorage.setItem("lw-blackout", v ? "1" : "0");
+  const sb = document.getElementById("shBlackout");
+  if (sb) sb.classList.toggle("picked", v);
+}
+{ const sb = document.getElementById("shBlackout");
+  if (sb) { sb.classList.toggle("picked", blackout); sb.onclick = () => setBlackout(!blackout); } }
 let particles = [];  // collision-spark particles {x,y,vx,vy,life,col} that fly out + fade
 const MAXP = 1600;
 let spin = 1;        // swarm orbit sign mirrored to the server (1 / -1 / 0)
@@ -951,7 +961,9 @@ function frame() {                                     // 60fps interpolated ren
   R.render({
     f, time, teams: TEAMS,
     beats, flush: flushArr, cursSpd, life: pLife,
-    tail: pTail, curve: pCurve, size: pWidth, alpha: pAlpha, bloom: pGlow,
+    tail: pTail, curve: pCurve, size: pWidth, alpha: pAlpha,
+    bloom: pGlow + (blackout ? 0.6 : 0),             // units glow harder to light the dark
+    blackout: blackout ? 1 : 0,
     trailFade: trails ? (0.04 + (1 - pTrail) * 0.26) : 0.5,
     trailVis: (trails ? 0.55 : 0.0) + 0.3 * doomA,   // infall paths burn brighter
     fx: fxArr, fxCount: k,
@@ -1450,6 +1462,10 @@ window.addEventListener("keydown", (e) => {
   }
   if (e.key === "m" || e.key === "M") { setSound(!LWAUDIO.enabled); return; }   // sound toggle (S is WASD!)
   if (e.key === "t" || e.key === "T") { trails = !trails; return; }   // toggle motion trails
+  if (e.key === "b" || e.key === "B") {                               // toggle black-out mode
+    setBlackout(!blackout);
+    toast(blackout ? "🌑 Black-out — units light the dark" : "Black-out off"); return;
+  }
   if (e.key === "f" || e.key === "F") { toggleFullscreen(); return; }  // big-screen mode
   if (e.key === "q" || e.key === "Q") { spin = spin === -1 ? 0 : -1; sendSpin(); return; }  // orbit CCW / off
   if (e.key === "e" || e.key === "E") { spin = spin === 1 ? 0 : 1; sendSpin(); return; }    // orbit CW / off

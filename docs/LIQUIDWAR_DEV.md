@@ -722,3 +722,25 @@ both "obvious" buffs ship a WORSE stance. Open task.
 - **Launch-diet agent FAILED**: its worktree branched from a stale commit
   (475-line dense-grid prototype, not the 1450-line real engine) — discarded,
   not merged. Worktree agents need a base from the working branch HEAD.
+
+## 32. Black-out mode + the rest of the queue (2026-06-13)
+
+- **Black-out mode** (toggle: B / 🌑 sheet button, persisted): the doubled
+  board zoomed out and made barriers dim. Lean into it — the world goes near-
+  black and the UNITS are the only light: the composite shader spills the
+  army bloom (`amb`) onto nearby walls + floor, so barriers are revealed
+  exactly where the action is and fade to black far away. `uBlackout` uniform;
+  bloom auto-boosts +0.6 when on. Normal-mode wall rim also brightened
+  (0.13→0.17) so barriers read on the big board either way.
+- **Launch diet** (§9): _move_fighters 8-dir candidate loop → one vectorized
+  gather, bit-exact, ~47→36ms tick.
+- **Grid RLE** (§16): cell grid → (i8,u16) run triples (gflag=2), ~5x on
+  battle grids, raw fallback, decoded before the mote-sync early-returns
+  (drop-resilient).
+- **King of the Hill** (§12) and **CB palette/accessibility** (§15) earlier
+  this session.
+- REMAINING: CUDA-graph restore (the real big-board fps fix — needs the
+  teardown race reproduced offline first; risky) and music (on hold per
+  request). Engine nondeterminism note: CPU runs are NOT bit-reproducible at
+  fixed seed (scatter tie-breaks) — verify engine refactors with invariants,
+  not hash equality.
