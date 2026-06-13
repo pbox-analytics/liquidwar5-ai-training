@@ -145,6 +145,18 @@ class GameSession:
         self.policy: CursorPolicy | None = None
         self.practice = False              # forgiving sandbox (opponent='practice')
         self._lesson = 0                   # which LESSONS entry the dummy holds
+        # GAME MODE (annihilate | koth). KOTH = a central hill; the team with
+        # the clear majority of in-hill mass scores each tick, first to target
+        # wins — a positional objective, not a fight to the last drop.
+        self.gamemode = "annihilate"
+        self.koth_target = int(os.environ.get("LW_KOTH_TARGET", "600"))
+        self.koth_score = [0] * teams
+        _hy, _hx = self.engine.H // 2, self.engine.W // 2
+        _hr = max(8, min(self.engine.H, self.engine.W) // 5)
+        self.hill = (_hy, _hx, _hr)
+        _ys = torch.arange(self.engine.H, device=DEVICE).view(-1, 1)
+        _xs = torch.arange(self.engine.W, device=DEVICE).view(1, -1)
+        self._hill_mask = (((_ys - _hy) ** 2 + (_xs - _hx) ** 2) <= _hr * _hr).float()
         self._opp_request = opponent
         self._set_opponent(opponent)
 
@@ -184,6 +196,33 @@ class GameSession:
     @property
     def done(self) -> bool:
         return bool(self.engine.team_alive[0].sum() <= 1)
+
+    @property
+    def koth_done(self) -> bool:
+        return self.gamemode == "koth" and max(self.koth_score, default=0) >= self.koth_target
+
+    @property
+    def match_over(self) -> bool:
+        return self.done or self.koth_done
+
+    def winner(self) -> int:
+        """Match winner: KOTH leader if the hill was won, else the largest army
+        (covers annihilation AND a koth game that ends by elimination/timeout)."""
+        if self.koth_done:
+            return max(range(len(self.koth_score)), key=lambda t: self.koth_score[t])
+        counts = self.engine.team_oh[0].sum(dim=(1, 2)).tolist()
+        return max(range(len(counts)), key=lambda t: counts[t])
+
+    def _score_koth(self) -> None:
+        """+1 to the team holding a clear (>55%) majority of the hill's mass."""
+        oh = self.engine.team_oh[0]                                   # (T,H,W)
+        pres = (oh * self._hill_mask.unsqueeze(0)).sum(dim=(1, 2)).tolist()
+        total = sum(pres)
+        if total < 1.0:
+            return
+        lead = max(range(len(pres)), key=lambda t: pres[t])
+        if pres[lead] > 0.55 * total and bool(self.engine.team_alive[0, lead]):
+            self.koth_score[lead] += 1
 
     @torch.no_grad()
     def _ai_dydx(self):
@@ -395,6 +434,8 @@ class GameSession:
         if ot > 1.0:
             self.engine._surge.mul_(ot)
         self.engine.step(dydx)
+        if self.gamemode == "koth":
+            self._score_koth()
 
     def _ai_fx_markers(self, ai_stance: torch.Tensor, human_set=()) -> None:
         """HUD markers for the client's shaders: the first AI team holding a
@@ -417,6 +458,7 @@ class GameSession:
     def reset(self) -> None:
         if self._opp_request == "latest":      # per-match rotation (see _set_opponent)
             self._set_opponent("latest")
+        self.koth_score = [0] * self.engine.T
         self.engine.reset()
         self._prev_pos = None                  # force a keyframe after every reset
         self._grid_burst = 8                   # first frames carry the grid (cold flood)
@@ -876,11 +918,12 @@ class Room:
     MAX_SEATS = 6                          # client palette / engine ceiling
 
     def __init__(self, key: str, mode: str, opponent: str, teams: int,
-                 size: str = "full") -> None:
+                 size: str = "full", gamemode: str = "annihilate") -> None:
         self.key = key
         self.mode = mode
         self.opponent = opponent           # kept for the lobby-start rebuild
         self.size = size
+        self.gamemode = gamemode           # annihilate | koth (the win condition)
         small = size == "small"            # phone boards: same archetypes, half scale
         # 2026-06-13: DOUBLED the board AREA (384x576 -> 544x816, x2.0 cells;
         # phone 192x288 -> 272x408) while keeping the SAME 8000/2000 fighters
@@ -896,6 +939,7 @@ class Room:
             fighters=2000 if small else int(os.environ.get("LW_PLAY_FIGHTERS", "8000")),
         )
         self.session = GameSession(mode=mode, opponent=opponent, teams=teams, **self._dims)
+        self.session.gamemode = gamemode
         if small:
             # small boards run EAGER (they're ~5ms/tick anyway): phone rooms
             # churn constantly (screen sleep / tab switches), and the
@@ -1004,6 +1048,7 @@ class Room:
                 e._graph = None
             self.session = GameSession(mode=self.mode, opponent=self.opponent,
                                        teams=want, **self._dims)
+            self.session.gamemode = self.gamemode
             if self.size == "small":
                 self.session.engine._cuda_graph = False
         old = dict(self.players)
@@ -1095,7 +1140,7 @@ class Room:
                 self.freeze = 3 * int(TICK_HZ)         # 3-2-1-GO: everyone starts on GO
                 self.overtime = False                  # last round's surge isn't this round's
                 session._overtime = 1.0
-            elif session.done:
+            elif session.match_over:                   # annihilation OR the hill was won
                 hold += 1
                 # POST-MATCH MOMENT: hold the result for ~20s — long enough to
                 # read the card and hit Rematch (any {reset} ends it early).
@@ -1174,10 +1219,16 @@ class Room:
                 st["wins"] = {str(t): n for t, n in self.wins.items()}
             if self.freeze > 0:
                 st["countdown"] = (self.freeze + int(TICK_HZ) - 1) // int(TICK_HZ)
-            if getattr(self, "overtime", False) and not session.done:
+            if getattr(self, "overtime", False) and not session.match_over:
                 st["overtime"] = True
-            if session.done:
-                st["winner"] = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])
+            if session.gamemode == "koth":             # objective HUD: hill + score bars
+                st["gamemode"] = "koth"
+                st["hill"] = list(session.hill)        # (cy, cx, r)
+                st["koth"] = session.koth_score
+                st["koth_target"] = session.koth_target
+            if session.match_over:
+                st["done"] = True                      # koth win sets done even with both alive
+                st["winner"] = session.winner()
             else:
                 # ROUT BEACON: a team under 4% of starting mass broadcasts its
                 # remnant centroid — endgame drag was never killing the last
@@ -1202,13 +1253,13 @@ class Room:
             for p in players:
                 if p.team < len(st["cursors"]):    # lobby seats can outnumber engine seats
                     p.c0_hist.append(list(st["cursors"][p.team])); del p.c0_hist[:-7]   # comet aim window
-            if self.phase == "play" and session.done and not logged and not session.practice:
-                w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])
+            if self.phase == "play" and session.match_over and not logged and not session.practice:
+                w = session.winner()
                 self.wins[w] = self.wins.get(w, 0) + 1
-                print(f"[telemetry] GAME END room={self.key} map={st['map']} tick={st['tick']} winner=team{w} "
-                      f"counts={st['fighters']} spread={st['spread']} fps={fps:.1f}", flush=True)
+                print(f"[telemetry] GAME END room={self.key} mode={session.gamemode} map={st['map']} tick={st['tick']} "
+                      f"winner=team{w} counts={st['fighters']} koth={session.koth_score} fps={fps:.1f}", flush=True)
                 logged = True
-            elif not session.done and st["tick"] and st["tick"] % 150 == 0:
+            elif not session.match_over and st["tick"] and st["tick"] % 150 == 0:
                 print(f"[telemetry] tick={st['tick']} fps={fps:.1f} flood={st['flood_pct']}% "
                       f"spread={st['spread']} counts={st['fighters']}", flush=True)
             # one shared binary frame + per-seat HUD JSON, via each player's
@@ -1266,9 +1317,11 @@ async def ws(sock: WebSocket) -> None:
             # the third player stops bouncing off a silently-full 1v1.
             floor = int(os.environ.get("LW_ROOM_SEATS", "4" if size == "small" else "3"))
             teams = max(teams, floor)
+        gm = q.get("gm", "annihilate")
         room = Room(key, mode=mode,
                     opponent=q.get("opponent", "latest"),
-                    teams=teams, size=size)
+                    teams=teams, size=size,
+                    gamemode=gm if gm in ("annihilate", "koth") else "annihilate")
         ROOMS[key] = room
     colorq = q.get("color")
     player = room.join(sock, (q.get("name") or "").strip()[:12],

@@ -91,6 +91,10 @@
   #banner.show .card { opacity: 1; transition-delay: .8s; }
   #banner .card button { font-size: 17px; min-height: 52px; padding: 8px 22px; margin: 6px;
                          border-radius: 12px; font-weight: 700; }
+  #kothScore { display: none; position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+              z-index: 4; background: #11151fdd; border: 1px solid #2a3550; border-radius: 10px;
+              padding: 5px 14px; font-size: 14px; font-weight: 700; white-space: nowrap;
+              box-shadow: 0 4px 16px #0008; }
   #practiceTip { display: none; position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
                 z-index: 4; background: #15243fcc; border: 1px solid #3d59a8; color: #cdd6f4;
                 border-radius: 10px; padding: 6px 14px; font-size: 14px; max-width: 90%;
@@ -204,6 +208,10 @@
       <option value="3">3 opponents</option>
       <option value="4">4 opponents</option>
     </select>
+    <select id="gamemode" title="Win condition">
+      <option value="annihilate">Mode: Annihilate</option>
+      <option value="koth">Mode: King of the Hill</option>
+    </select>
     <select id="mapsel" title="Pick the map (Random = a fresh one each game)">
       <option value="-1">Map: Random</option>
       <option value="0">Map: Open</option>
@@ -228,6 +236,7 @@
     <div id="banner"></div>
     <div id="otpill">⚔ OVERTIME — fronts weaken</div>
     <div id="practiceTip"></div>
+    <div id="kothScore"></div>
     <div id="netveil">⟳ reconnecting…</div>
     <div id="toast" role="status" aria-live="polite"></div>
     <div id="intro">
@@ -590,6 +599,15 @@ function onHud(st) {                                    // the JSON channel: HUD
   if (st.practice && st.lesson && !st.countdown) {
     ptip.textContent = "\ud83c\udf93 " + st.lesson; ptip.style.display = "block";
   } else { ptip.style.display = "none"; }
+  // KING OF THE HILL live score: each team's progress to the target
+  const ks = document.getElementById("kothScore");
+  if (st.gamemode === "koth" && st.koth && !st.done) {
+    const tgt = st.koth_target || 600;
+    ks.innerHTML = "\u26f0 " + st.koth.map((v, t) =>
+      `<span style="color:${COLORS[colorMap[t] % COLORS.length]}">${Math.round(v / tgt * 100)}%</span>`
+    ).join(" \u00b7 ");
+    ks.style.display = "block";
+  } else { ks.style.display = "none"; }
   if (st.note && st.note.ev && lastNote !== st.note.ev + st.note.team) {
     lastNote = st.note.ev + st.note.team;
     const who = (st.names && st.names[st.note.team]) || "P" + (st.note.team + 1);
@@ -733,6 +751,18 @@ function frame() {                                     // 60fps interpolated ren
   // the fight (a colored ring inside a same-colored bloomed blob is invisible)
   let ck = 0, bk = 0;
   const beat = 1 + 0.3 * Math.sin(performance.now() / 170);
+  // KING OF THE HILL: the contested zone — a pulsing ring + faint disc at the
+  // hill, tinted by whoever currently leads the score (white if contested)
+  if (curSt.hill) {
+    const [hy, hx, hr] = curSt.hill;
+    const ksc = curSt.koth || [];
+    const lead = ksc.length ? ksc.indexOf(Math.max(...ksc)) : -1;
+    const tied = ksc.filter(v => v === Math.max(...ksc)).length > 1;
+    const hcol = (lead >= 0 && !tied && Math.max(...ksc) > 0) ? RGB[lead % RGB.length] : WHITE;
+    const pulse = 1 + 0.06 * Math.sin(performance.now() / 260);
+    ck = pushFx(curArr, ck, hx + .5, hy + .5, hr * 2 * pulse, 1, hcol, 0.7);   // boundary ring
+    ck = pushFx(curArr, ck, hx + .5, hy + .5, hr * 2 * 0.92, 0, hcol, 0.05);   // faint fill
+  }
   // ROUT BEACONS: the hunt for the last 4% was never a fight, it was a search —
   // a dying army's remnant pulses so the endgame concludes
   if (curSt.rout) for (const [rt, ry, rx] of curSt.rout) {
@@ -850,6 +880,9 @@ function frame() {                                     // 60fps interpolated ren
       : youWon ? "VICTORY"
       : humanWon ? `${esc((curSt.names && curSt.names[w]) || teamWord(w))} WINS` : "DEFEAT";
     if (youWon && winStreak >= 3) head = `VICTORY — ${winStreak} IN A ROW 🔥`;
+    if (curSt.gamemode === "koth") head = (youWon ? "⛰ YOU HELD THE HILL"
+      : spec || humanWon ? `⛰ ${esc((curSt.names && curSt.names[w]) || teamWord(w))} HELD THE HILL`
+      : "⛰ HILL LOST");
     if (!spec && (curSt.players || 1) === 1) {
       soloRecord(youWon ? 1 : -1);
       if (youWon) markGauntlet(currentOpp);
@@ -1006,12 +1039,14 @@ function connect() {
               || (matchMedia("(pointer: coarse)").matches ? "small" : "full");
   document.getElementById("modeLabel").textContent = mode + (room ? ` · room ${room}` : "");
   const teams = parseInt(document.getElementById("oppcount").value) + 1;   // humans + AI share these seats
+  const gm = document.getElementById("gamemode").value;
   curSt = null; prevPT = curPT = null; flashes = []; tLast = 0; lastTick = -1; lastMap = ""; MYT = 0;
   currentOpp = opp;
   const prefCol = localStorage.getItem("lw-color");
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?mode=${mode}&opponent=${opp}&teams=${teams}&size=${sizeQ}` +
                      (room ? `&room=${encodeURIComponent(room)}` : "") +
                      (pname ? `&name=${encodeURIComponent(pname)}` : "") +
+                     (gm !== "annihilate" ? `&gm=${gm}` : "") +
                      (prefCol !== null ? `&color=${prefCol}` : ""));
   ws.binaryType = "arraybuffer";
   curPos = null; pendingGrid = null;
@@ -1326,7 +1361,7 @@ document.getElementById("tSpin").onclick = () => { spin = spin === 1 ? -1 : spin
 const COARSE = matchMedia("(pointer: coarse)").matches;
 if (COARSE) {
   const m = document.getElementById("shMatch");
-  for (const id of ["mode", "opponent", "oppcount", "mapsel", "reset"]) m.appendChild(document.getElementById(id));
+  for (const id of ["mode", "opponent", "oppcount", "gamemode", "mapsel", "reset"]) m.appendChild(document.getElementById(id));
   const r = document.getElementById("shRoom");
   for (const id of ["pname", "room", "invite"]) r.appendChild(document.getElementById(id));
   document.getElementById("visuals2").append(...document.getElementById("visuals").querySelectorAll("label"));
@@ -1394,6 +1429,9 @@ document.getElementById("reset").onclick = () => ws && ws.send(JSON.stringify({r
 document.getElementById("mode").onchange = connect;
 document.getElementById("opponent").onchange = connect;
 document.getElementById("oppcount").onchange = connect;
+{ const gmSel = document.getElementById("gamemode");
+  gmSel.value = localStorage.getItem("lw-gamemode") || "annihilate";
+  gmSel.onchange = () => { localStorage.setItem("lw-gamemode", gmSel.value); connect(); }; }
 document.getElementById("mapsel").onchange = () => {     // pick map -> tell server, start new game
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ map: parseInt(document.getElementById("mapsel").value) }));
 };
