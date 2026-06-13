@@ -254,12 +254,15 @@ stays valid. Balance history (all server-tunable dials in the stance blocks):
 
 - **Maelstrom** = Doom rotated 90°: tangential entrainment (enemies near the
   well are swept into orbit through your storm-cloud), undertow/ejecta/shear
-  radial modes. Nerfed from a cross-arena tractor beam to a local hazard:
-  squared falloff (25% at R), str `22·√frac`, reach 1.5× blob radius.
-- **Doom** can no longer be an unkillable last stand: capture rate scales with
-  the wielder's mass (`0.12·√frac`) and the horizon floor dropped 14 → the
-  rendered hole radius, so a whittled army's well stops out-eating the blob
-  consuming it.
+  radial modes. Local hazard, not a tractor beam: squared falloff (25% at R),
+  str `28·√frac`, reach 1.5× blob radius. Its bite is the **spinning rim**,
+  not the current: `_surge 1.7` (§27) — raw current strength only feeds the
+  enemy well, so impact came from rim damage.
+- **Doom** can no longer be an unkillable last stand OR an inescapable tractor
+  beam: capture rate scales with wielder mass (`0.09·√frac`), the horizon is
+  the rendered hole radius, **squared falloff**, range floor **56**, and a
+  per-level strength ladder `24/40/52` that concentrates power near the well
+  (§26). A committed kite escapes; a stationary blob still bleeds ~31%.
 - **Parity**: the AI casts the same wells with the same dials — before
   2026-06-10 its Doom was a cosmetic self-collapse and the human duelled with
   superpowers the opponent lacked.
@@ -290,8 +293,12 @@ Re-tapping a held stance's key cycles its modes (the HUD pill shows the mode):
 | 9 | Classic | — (no knobs at all: the original gradient-following blob) |
 
 Maelstrom renders a whirlpool refraction shader (rotational ray-bending that
-composes with Doom's lensing); the AI's casts are visible via `ai_doom` /
-`ai_mael` HUD markers.
+composes with Doom's lensing) PLUS a per-mode look (§27 — undertow/ejecta/shear
+read at a glance); the AI's casts are visible via `ai_doom` / `ai_mael` HUD
+markers (the mael marker carries its mode). The `_KNOBS` table that drives all
+this (`rl/policy.py`) is the single source of play/train parity — 20 columns
+as of 2026-06-12 (`...mon, cspd, armr`: Maelstrom-on, Doom mobility tax, Wall
+armor).
 
 ## 13. Training the opponent — what we're doing now, and why
 
@@ -489,12 +496,164 @@ outages were co-tenant CPU starvation (host load 48). Landed:
   diffs (~32 -> ~16 Mbit/s), engine-pool path back to CUDA graphs, batched
   same-geometry rooms.
 
-### 18b. Anti-camp escort (2026-06-12)
+## 21. Anti-camp escort (2026-06-12)
 
 The small-map lineage pins its cursor into the play board's corner (measured
 93% occupancy of the corner CELL at 384x576 — OOD scale, the move argmax
 degenerates to a constant heading; the curriculum that should have fixed it
-trained on dead air, §19). Guard: `LW_AI_CAMP_BUDGET` (120 ticks in a 12%
-corner box) hands the seat to the heuristic coach for `LW_AI_CAMP_ESCORT`
-(900 ticks), then the policy resumes. Measured corner time 0.93 -> 0.23.
-Stances stay policy-chosen (the Doom governor composes on top). 0 disables.
+trained on dead air, §19). Guard (`web/server.py` `_ai_dydx`):
+`LW_AI_CAMP_BUDGET` (120 ticks in a 12% corner box) hands the seat to the
+heuristic coach for `LW_AI_CAMP_ESCORT` (900 ticks), then the policy resumes.
+Measured corner time 0.93 -> 0.23. Stances stay policy-chosen (the Doom
+governor composes on top). 0 disables. Joins the §18 guardrail family —
+all band-aids on the wells-100 fossil until wells-110 lands.
+
+## 22. The synthwave score (2026-06-12)
+
+`why did we pick an organ key to play when the units fight?` -> the whole
+music half of `audio.js` was re-voiced from "Pompeii orchestral" to
+**deep-space synthwave at 112 BPM** (`more electronic` / `upbeat with a good
+beat`). The adaptive ARCHITECTURE is unchanged — one Phrygian progression,
+two voicings crossfaded on combat intensity, stance signatures, the
+win/lose cadences, all the SFX — only the instruments changed:
+
+- PEACE voice (was pipe organ): warm analog pad — detuned saw pair + sub-
+  octave square per chord tone through a slow-wandering shared lowpass
+  (0.08Hz, 700-1400Hz) + two-tap chorus.
+- WAR voice (was strings): a 5-saw SUPERSAW wall, lowpass opening
+  900->4500Hz with intensity, SIDECHAIN-PUMPED by every kick.
+- DRUM MACHINE on the grid: pitch-drop kick (four-on-the-floor), noise
+  snare on the backbeat, 7kHz hats opening to shimmered 16ths. `taiko()`
+  itself is byte-identical — countdown / nova / cadence still use it.
+- New mono BASSLINE (eighth-note root, kick-pumped), arpeggiator ostinato
+  (resonant filter env), PWM portamento lead, tanh-warmed sub for phones.
+- GROOVE FLOOR 0.32 (`drive = max(intensity, doom?0.3, 0.32)`): the kit /
+  bass / arp run four-on-the-floor even at peace so a beat ALWAYS plays;
+  snare / 16th-hats / theme / double-time chords still gate higher, and the
+  pad->supersaw crossfade tracks RAW intensity so calm still sounds calm.
+
+The honest limit: this is composed BLIND (the model can't hear the output).
+Every "the music sounds off" has been the only feedback loop. The planned
+next step is generated stems — see §28.
+
+## 23. Cursor visibility & kinetic feel (2026-06-12)
+
+`cursors get lost in the fight` / `make the cursor look cooler` / `make
+switching stance energetic` — a batch of game-feel fixes, client + server:
+
+- CURSOR CONTRAST (`gl.js` drawFx `over` path + `index.html`): a
+  REVERSE-SUBTRACT pass draws dark shadow pucks + a contrast edge UNDER
+  bigger, brighter rings — a colored ring inside a same-colored bloomed
+  blob was invisible. (Subtractive, not premult-over: black is a no-op in
+  additive, and over-blend white-screened on the SwiftShader test backend.)
+- SONAR PING: your cursor emits an expanding ring every ~1.8s — motion
+  pulls the eye back even when contrast can't.
+- COMET TAIL: per-team cursor path history (`curTrail[]`) burns behind a
+  moving cursor in team colour (white-hot core on yours) — a move order is
+  visible at a glance.
+- STANCE MORPH (server `_apply_player_stance(morph=)` + client shockwave):
+  any stance OR mode change kicks a 16-tick flare-open -> whip-spin ->
+  snap-into-form transient, plus a client particle burst + shockwave ring
+  from the cursor. A formation change is now an EVENT.
+- FOLLOW-LUNGE + COHESION (server): a moving cursor tightens `_burst` so the
+  swarm CHASES your hand and settles when you stop; loose/neutral forms get
+  a constant -0.18 inward bias so the army clusters near the cursor without
+  deforming engineered silhouettes (Wall / Maelstrom / Atom).
+- CLASH IMPACT (client): armies meeting OUT OF CALM (conv>=8 while the combat
+  EMA is low, edge-triggered, 4s cooldown) fire a white/amber shockwave +
+  `taiko` at the contact centroid.
+- NaN HARDENING (`gl.js`): safe-normalize in the cilia mix + an isnan scrub
+  in the composite + finite-guards on every well uniform — one poisoned
+  value used to white the whole RGBA8 canvas for a frame.
+
+## 24. Heading inertia — momentum in the swarm (2026-06-12)
+
+`do we still consider momentum and inertia for the swarm attacking?` — we
+didn't: fighters were memoryless gradient-descenders (the `fvy/fvx` EMA only
+fed combat pierce, not steering), so attacks turned on a dime. Added
+(`simulator/engine.py`): a persistent per-fighter `_fdir` (0-7 heading,
+8 = stationary) and a `_mom_tab` (9x8) alignment bias added to the candidate
+score — same heading +6*mom, 45deg +3, reversal -4, in gradient-field units,
+`_inertia` knob. Graph-safe (one gather + one sub/sub-step, `_fdir.copy_`
+in place, no syncs). DEFAULT 0.12, NOT the agent's 0.35: live A/B showed
+0.35 snowballed routs (brawls collapsed in ~220 ticks — the 5-second-match
+regression); 0.12 keeps the weight while fronts hold (>1500 ticks). Verified:
+invariants hold over 1500 ticks at 0 and 0.12; bit-identical to HEAD at 0;
+turning fraction down ~17%; no measurable perf cost. Mirrored in training
+via the trainer-image ref bump (play/train physics parity).
+
+## 25. The balance-sweep method (2026-06-12)
+
+Balance complaints ("Doom inescapable", "Maelstrom gets overwhelmed") are now
+settled EMPIRICALLY, not by intuition. Pattern: a `/tmp/lw_*_testbed.py`
+script builds a controlled 1v1 on an open arena (full-mass attacker vs a
+held stance, scripted kite / charge / counter scenarios), reports kept-mass
+and geometry after N ticks; a Workflow fans 4-5 parameter configs across
+parallel CPU sims, and a judge agent picks the config meeting the design
+bars. Run from the repo root with `CUDA_VISIBLE_DEVICES="" PYTHONPATH=. uv
+run --with numpy python /tmp/lw_*_testbed.py <args>` (script files get /tmp
+as sys.path[0], hence PYTHONPATH). CAVEAT learned: a judge agent went rogue
+and re-ran experiments instead of ruling — read the workflow `journal.jsonl`
+and judge the raw numbers yourself if the verdict stalls.
+
+## 26. Doom kiting rebalance (2026-06-12)
+
+`units cannot escape it when trying to kite` + `bigger penalty for 2x/3x`.
+The 5-config sweep (§25) found the culprit was NOT the falloff shape but the
+**range floor of 70 cells** — it guaranteed a grip zone where escape was
+0-7% in every rfloor=70 variant. Shipped (engine `_doom_fall_sq` default ON
++ server/policy dials):
+
+- SQUARED falloff (was flat) — crosses the ~10/cell escape gradient at ~1.3R
+  instead of holding pull to ~2R.
+- Range floor 70 -> **56** — THE fix: converts "survives in the grip" into
+  33-69% clean escapes for a committed runner.
+- Strength LADDER 24/48/72 -> **24/40/52** — charge concentrates power NEAR
+  the well, not as extra reach.
+- Steeper cursor tax: 2x 0.5->0.45, 3x 0.35->0.3.
+- Offense intact: a stationary engaged blob still loses ~31% point-blank
+  (69% kept vs 68% baseline) — Doom stays a close-range finisher.
+
+## 27. Stance impact pass (2026-06-12)
+
+Four stance-feel asks, each measured:
+
+- MAELSTROM `none of these are impactful` — the sweep's surprise: the storm
+  already crushed naive charges but LOST `ejecta-vs-Doom2x` (83% vs 118%),
+  the matchup it's designed to win. Raw strength made it WORSE (entrainment
+  feeds the enemy well). Fix: the spinning rim got TEETH — `_surge` 1.0 ->
+  **1.7** (it was the only aggressive stance with no damage bonus), current
+  22 -> 28, shell 0.6 -> 0.5 (denser grinder). Flips the matchup to 106/92.
+- WALL `defensive buff + more visible structure` — new engine `_armor` knob
+  (the defender-side mirror of `_surge`, a per-team incoming-damage
+  multiplier in the combat damage path). Wall takes **40% less** (`_armor
+  0.6`) + crisper bar (facing 1.0 -> 1.25). Drill's 4x still cracks it
+  (eff 2.4x) — counters survive.
+- SWARM CLOUD `wider, more aggressive` — spin 0.5->0.8, burst 0.15->0.35,
+  +1.2x bite: an angry insect cloud, not a drifting puff.
+- SWARM COMET `heavy head, small tail` — head pack -0.25->-0.45, punch
+  0.85->0.95, twist 0.35->0.2.
+- MAELSTROM MODE VISUALS `no visible difference` — the composite shader now
+  renders three storms: undertow drinks cool rings INWARD to a dark eye,
+  ejecta blasts warm rings OUT with a burning rim, shear whips silver spokes
+  with no radial motion. AI marker carries the mode (`_ai_mael[3]`).
+
+The KNOB TABLE (`rl/policy.py` `_KNOBS`) is now 20 columns — added `cspd`
+(Doom mobility tax, §18) and `armr` (Wall armor). Every play dial is mirrored
+there so training and play share the physics; the trainer-image ref bumps
+with each balance change.
+
+## 28. Music generation — the plan (pending go-ahead)
+
+The procedural score (§22) has hit its ceiling (composed blind). The agreed
+next step, NOT yet started (awaiting an explicit "go"): host a music-gen
+model on pstorm (5090 has ~15GB headroom beside lwplay) — MusicGen-medium
+first (ungated, runs in the trainer image), Stable Audio Open later for
+seamless loops (gated — needs an HF token). Pipeline: generate ~4 takes per
+stem (calm pad / mid groove / battle wall / overtime, + win/lose stingers)
+at 112 BPM D-minor; spectral analysis pre-filters takes (the substitute
+ears); a listening page lets Wolfgang pick winners; loop + encode to OGG;
+rewrite `audio.js`'s music half into a STEM MIXER (crossfade real loops by
+the same intensity signals), keeping procedural SFX + the engine as fallback.
+What helps most: the go-ahead, Wolfgang's ear on the rating page, and one
+reference track (MusicGen has a melody-conditioned variant).
