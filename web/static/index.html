@@ -738,12 +738,17 @@ function frame() {                                     // 60fps interpolated ren
   const f = Math.max(0, Math.min(1.1, (performance.now() - tLast) / Math.max(8, dtServer)));
   const time = performance.now() / 1000;
   let k = 0;
+  // CLASH LIGHT: in black-out the sparks/flashes are the muzzle-flash that
+  // lights the dark — bigger & brighter so a fight visibly reveals the
+  // barriers around it (these fx feed the bloomed army FBO -> the wall
+  // ambient field). Normal mode unchanged (boost = 1).
+  const fxB = blackout ? 1.8 : 1.0;
   // collision embers: travel, drag, gravity, fade; white-hot -> team colour
   const next = [];
   for (const p of particles) {
     p.x += p.vx; p.y += p.vy; p.vx *= 0.95; p.vy = p.vy*0.95 + 0.03; p.life -= 0.022;
     if (p.life <= 0 || p.x < 0 || p.x >= W || p.y < 0 || p.y >= H) continue;
-    k = pushFx(fxArr, k, p.x, p.y, 1.6, 0, p.life > 0.7 ? WHITE : p.col, p.life * 0.9);
+    k = pushFx(fxArr, k, p.x, p.y, 1.6 * fxB, 0, p.life > 0.7 ? WHITE : p.col, Math.min(1, p.life * 0.9 * fxB));
     next.push(p);
   }
   particles = next;
@@ -753,8 +758,8 @@ function frame() {                                     // 60fps interpolated ren
     fl.life -= 0.055;
     if (fl.life <= 0) continue;
     const hot = fl.life * fl.life;
-    k = pushFx(fxArr, k, fl.x, fl.y, 1.6 + (1 - fl.life) * 4.4, 0,
-               hot > 0.55 ? WHITE : fl.col, Math.min(1, fl.life * 1.4));
+    k = pushFx(fxArr, k, fl.x, fl.y, (1.6 + (1 - fl.life) * 4.4) * fxB, 0,
+               hot > 0.55 ? WHITE : fl.col, Math.min(1, fl.life * 1.4 * fxB));
     nf.push(fl);
   }
   flashes = nf;
