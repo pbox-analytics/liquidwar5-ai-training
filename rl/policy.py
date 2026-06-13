@@ -62,7 +62,7 @@ LEGACY_ACTION = (0, 2, 6, 8, 10, 16, 19, 22)
 # are patched at apply time.
 #          spin burst surge fig8 nl  nm   nk    nw    nv   adv  wy  wx tide rin  ecc dLvl mRad mOn cspd armr
 _KNOBS = [
-    (0.8,  0.35, 1.2, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Swarm cloud
+    (0.7,  0.25, 1.2, 0, 14, 12,  0.0,  0.09, 0.07, 0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Swarm web (current flows through rings x spokes)
     (0.2,  -0.45, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.95, 0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Swarm comet
     (1.7,  -0.4, 1.0, 0, 0,  0,  0.0,  0.0,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Spin vortex
     (1.6,  -0.45, 1.0, 0, 0,  8,  0.0,  0.4,  0.0,  0.0,  0, 0, 0, 0.0,  0, 0, 0.0,  0, 1.0, 1.0),  # Spin sawblade

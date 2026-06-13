@@ -527,7 +527,7 @@ def _mode_name(ctrl) -> str:
             else ("wave", "rings", "star", "lattice", "nova", "tide")[ctrl["pulse_mode"]] if ctrl["stance"] == 4
             else ("vortex", "sawblade", "galaxy")[ctrl["spin_mode"]] if ctrl["stance"] == 1
             else ("undertow", "ejecta", "shear")[ctrl["mael_mode"]] if ctrl["stance"] == 6
-            else ("cloud", "comet")[ctrl["swarm_mode"]] if ctrl["stance"] == 0
+            else ("web", "comet")[ctrl["swarm_mode"]] if ctrl["stance"] == 0
             else ("orbital", "binary")[ctrl["atom_mode"]] if ctrl["stance"] == 7 else "")
 
 
@@ -542,11 +542,23 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n,
     flares open then SNAPS into the new form with an over-revved spin — the
     switch reads as a burst of energy instead of a soft fade."""
     stance = ctrl["stance"]                     # 0 Swarm 1 Spin 2 Drill 3 Wall 4 Pulse
-    if stance == 0:                             # Swarm: 2 forms (tap 1): cloud -> comet
-        if ctrl["swarm_mode"] == 0:             # cloud: WIDE angry insect swarm
-            _e._spin[0, t] = 0.8 * spin_sign    # faster buzz
-            _e._burst[0, t] = 0.35              # broad cloud, not a blob
+    if stance == 0:                             # Swarm: 2 forms (tap 1): web -> comet
+        if ctrl["swarm_mode"] == 0:             # web: a living NET of strands
+            # concentric rings (node_l) crossed with straight radial spokes
+            # (node_m, k=0 — NOT spiraled like Pulse-lattice) = a polar grid
+            # = a spider web. The units TRAVEL through it: the node terms are
+            # traveling waves, so a faster radial phase (node_v) migrates the
+            # rings and units ride them IN and OUT, a faster angular sweep
+            # (node_w) carries the spokes AROUND, and a healthy orbital spin
+            # streams units ALONG the threads (bunching where they cross a
+            # spoke) — a swarming current flowing through a living web.
+            _e._spin[0, t] = 0.7 * spin_sign    # orbital traffic around the net
+            _e._burst[0, t] = 0.25              # the ring radii define the spread
             _e._surge[0, t] = 1.2               # a thousand small bites
+            _e._node_l[0, t] = 14.0             # concentric ring spacing
+            _e._node_m[0, t] = 12.0             # 12 radial spokes -> a fine net
+            _e._node_w[0, t] = 0.09 * (spin_sign if spin_sign != 0 else 1)  # spokes sweep AROUND
+            _e._node_v[0, t] = 0.07             # rings travel IN and OUT (units ride them)
         else:                                   # comet: a teardrop along your MOTION
             sgn = spin_sign if spin_sign != 0 else 1
             # aim = recent cursor displacement (works for mouse AND
@@ -1262,7 +1274,7 @@ async def ws(sock: WebSocket) -> None:
                     ctrl["mael_mode"] = (ctrl["mael_mode"] + 1) % 3
                 elif s == 6:
                     ctrl["mael_mode"] = 0
-                if s == 0 and ctrl["stance"] == 0:    # re-tap Swarm cycles cloud -> comet
+                if s == 0 and ctrl["stance"] == 0:    # re-tap Swarm cycles web -> comet
                     ctrl["swarm_mode"] ^= 1
                 if s == 7 and ctrl["stance"] == 7:    # re-tap Atom cycles orbital -> binary star
                     ctrl["atom_mode"] ^= 1

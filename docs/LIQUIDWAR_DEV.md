@@ -629,8 +629,16 @@ Four stance-feel asks, each measured:
   multiplier in the combat damage path). Wall takes **40% less** (`_armor
   0.6`) + crisper bar (facing 1.0 -> 1.25). Drill's 4x still cracks it
   (eff 2.4x) — counters survive.
-- SWARM CLOUD `wider, more aggressive` — spin 0.5->0.8, burst 0.15->0.35,
-  +1.2x bite: an angry insect cloud, not a drifting puff.
+- SWARM WEB (was cloud) `form a web-like structure` + `units travel through
+  it, in and out, around` — the cloud mode became a living SPIDER WEB built
+  from the Chladni machinery: node_l 14 (concentric rings) x node_m 12
+  (straight radial spokes, k=0 — distinct from Pulse-lattice's spiral). The
+  node terms are TRAVELING waves, so node_v 0.07 migrates the rings (units
+  ride them in/out), node_w 0.09 sweeps the spokes around, and spin 0.7
+  streams units along the threads — a swarming current through a fixed net
+  (measured: web persists across frames with ~25/255 inter-frame mote flow).
+  Keeps the 1.2x bite. Reuses node knobs = NO new action slot (the 25-action
+  head is fixed). Labels: re-tap cycles web -> comet now.
 - SWARM COMET `heavy head, small tail` — head pack -0.25->-0.45, punch
   0.85->0.95, twist 0.35->0.2.
 - MAELSTROM MODE VISUALS `no visible difference` — the composite shader now

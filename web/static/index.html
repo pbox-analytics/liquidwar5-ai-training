@@ -292,7 +292,7 @@
   </div>
   <div id="help" class="muted" style="text-align:center; line-height:1.8;">
     <b>↑ ↓ ← → / WASD</b> steer (or hold mouse) &nbsp;·&nbsp;
-    <b>Stances</b> (hold one): <b>1</b> 🐝 Swarm <span class="muted">(tap: cloud→comet)</span> &nbsp; <b>2</b> 🌀 Spin <span class="muted">(tap to cycle: vortex→sawblade→galaxy)</span> &nbsp; <b>3</b> ➤ Drill <span class="muted">(tap to rev: slow→fast)</span> &nbsp; <b>4</b> 🛡 Wall <span class="muted">(tap to flip)</span> &nbsp; <b>5</b> 💥 Pulse <span class="muted">(tap: wave→rings→star→lattice→nova→tide)</span> &nbsp; <b>6</b> 🕳 Doom <span class="muted">(tap to charge)</span> &nbsp; <b>7</b> 🌪 Maelstrom <span class="muted">(tap to cycle: undertow→ejecta→shear)</span> &nbsp; <b>8</b> ⚛ Atom <span class="muted">(tap: orbital→binary)</span> &nbsp; <b>9</b> 🌊 Classic &nbsp;·&nbsp;
+    <b>Stances</b> (hold one): <b>1</b> 🐝 Swarm <span class="muted">(tap: web→comet)</span> &nbsp; <b>2</b> 🌀 Spin <span class="muted">(tap to cycle: vortex→sawblade→galaxy)</span> &nbsp; <b>3</b> ➤ Drill <span class="muted">(tap to rev: slow→fast)</span> &nbsp; <b>4</b> 🛡 Wall <span class="muted">(tap to flip)</span> &nbsp; <b>5</b> 💥 Pulse <span class="muted">(tap: wave→rings→star→lattice→nova→tide)</span> &nbsp; <b>6</b> 🕳 Doom <span class="muted">(tap to charge)</span> &nbsp; <b>7</b> 🌪 Maelstrom <span class="muted">(tap to cycle: undertow→ejecta→shear)</span> &nbsp; <b>8</b> ⚛ Atom <span class="muted">(tap: orbital→binary)</span> &nbsp; <b>9</b> 🌊 Classic &nbsp;·&nbsp;
     <b>Q</b>/<b>E</b> spin direction &nbsp;·&nbsp;
     <span class="muted">counters: your Maelstrom shields your army from enemy Doom; Wall braces the pull</span> &nbsp;·&nbsp;
     <b>T</b> trails &nbsp;·&nbsp;
@@ -1163,7 +1163,7 @@ const S_EMOJI = ["🐝", "🌀", "➤", "🛡", "💥", "🕳", "🌪", "⚛", "
 const S_NAME = ["Swarm", "Spin", "Drill", "Wall", "Pulse", "Doom", "Maelstrom", "Atom", "Classic"];
 let loadout = JSON.parse(localStorage.getItem("lw-loadout") || "[0,4,5]").slice(0, 3);
 const MODE_HINTS = [
-  "🐝 Swarm — tap again: cloud → comet (a piercing teardrop along your motion)",
+  "🐝 Swarm — a living web of strands; tap again for comet (a piercing teardrop along your motion)",
   "🌀 Spin — tap again to cycle: vortex → sawblade → galaxy",
   "➤ Drill — tap again to rev: slow grind → fast advance",
   "🛡 Wall — tap again to flip horizontal ↔ vertical",
