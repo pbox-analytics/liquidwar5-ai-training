@@ -739,13 +739,17 @@ class LiquidWarEngine:
         b = self._barangeN.expand(B, N)
         cur = self.gradient[b, self.fteam, self.fy, self.fx]           # (B,N)
         BIGG = GRAD_INIT * 4
-        ng = torch.empty(B, N, 8, dtype=self.gradient.dtype, device=self.device)
-        ncell = torch.empty(B, N, 8, dtype=torch.long, device=self.device)
-        for i in range(8):
-            ny = (self.fy + _DY[i]).clamp(0, H - 1)
-            nx = (self.fx + _DX[i]).clamp(0, W - 1)
-            ng[:, :, i] = self.gradient[b, self.fteam, ny, nx]
-            ncell[:, :, i] = ny * W + nx
+        # LAUNCH DIET: build all 8 candidate neighbours in one vectorized gather
+        # instead of an 8-iteration Python loop (~40 kernels -> ~5). Bit-exact:
+        # dim-2 index i still maps to direction (_DY[i], _DX[i]). The B=1 play
+        # tick is launch-bound and this is the hottest function, so fewer
+        # launches is fewer microseconds of overhead per tick.
+        ny8 = (self.fy.unsqueeze(-1) + self._dy_t).clamp(0, H - 1)      # (B,N,8)
+        nx8 = (self.fx.unsqueeze(-1) + self._dx_t).clamp(0, W - 1)      # (B,N,8)
+        ncell = ny8 * W + nx8
+        b8 = b.unsqueeze(-1).expand(B, N, 8)
+        ft8 = self.fteam.unsqueeze(-1).expand(B, N, 8)
+        ng = self.gradient[b8, ft8, ny8, nx8]                          # one gather
         downhill = ng < cur.unsqueeze(-1)                              # strictly toward the cursor
         # IDLE JITTER as a Dictyostelium-style TRAVELING WAVE. A uniform random
         # twinkle felt flat; real slime-mold / social-amoeba colonies pulse in

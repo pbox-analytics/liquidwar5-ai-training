@@ -509,15 +509,26 @@ class GameSession:
         if burst > 0:
             self._grid_burst = burst - 1
         grid = b""
+        gflag = 0
         if send_grid:
             oh = e.team_oh[0]
             present = oh.sum(0) > 0
             cell = oh.argmax(0).to(torch.int8)
             cell = torch.where(present, cell, torch.full_like(cell, -1))
             cell = torch.where(e.walls[0], torch.full_like(cell, -2), cell)  # -2 = wall
-            grid = cell.cpu().numpy().tobytes()
+            # RLE the cell grid: it's long homogeneous runs (walls / empty /
+            # team blocks), and the doubled board made the raw grid ~440KB.
+            # Wire: (i8 value, u16 runlen) triples; gflag=2. A battle grid
+            # compresses heavily; on a pathologically fragmented frame RLE can
+            # EXPAND, so fall back to raw (gflag=1) — never worse than before.
+            raw = cell.cpu().numpy().reshape(-1)
+            rle = _rle_grid(raw)
+            if len(rle) < raw.size:
+                grid = rle; gflag = 2
+            else:
+                grid = raw.tobytes(); gflag = 1
         import struct
-        head = struct.pack("<BBHI", 1 if key else 2, 1 if send_grid else 0,
+        head = struct.pack("<BBHI", 1 if key else 2, gflag,
                            pidx.numel(), self._fseq & 0xFFFFFFFF)
         self._last_blob = head + body + pteam + grid
         return self._last_blob
@@ -890,6 +901,31 @@ class Player:
                 await self.sock.send_json(hud)
         except Exception:
             self.dead = True
+
+
+def _rle_grid(flat) -> bytes:
+    """Run-length encode an int8 cell grid -> (u8 value, u16 runlen) triples,
+    little-endian. Runs >65535 are split. flat is a 1-D numpy int8 array."""
+    import numpy as np
+    n = flat.size
+    if n == 0:
+        return b""
+    chg = np.flatnonzero(flat[1:] != flat[:-1]) + 1
+    starts = np.concatenate(([0], chg))
+    vals = flat[starts]
+    lens = np.diff(np.concatenate((starts, [n])))
+    if (lens > 65535).any():                       # split long runs into u16 chunks
+        ev, el = [], []
+        for v, L in zip(vals.tolist(), lens.tolist()):
+            while L > 65535:
+                ev.append(v); el.append(65535); L -= 65535
+            ev.append(v); el.append(L)
+        vals = np.array(ev, dtype=np.int8); lens = np.array(el)
+    rle = np.empty((vals.size, 3), dtype=np.uint8)
+    rle[:, 0] = vals.view(np.uint8)
+    rle[:, 1] = (lens & 0xFF).astype(np.uint8)
+    rle[:, 2] = ((lens >> 8) & 0xFF).astype(np.uint8)
+    return rle.tobytes()
 
 
 def _clear_knobs(_e) -> None:

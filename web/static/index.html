@@ -487,6 +487,15 @@ function onFrame(buf) {                                 // a fresh binary frame 
   const pn = dv.getUint16(2, true);
   const seq = dv.getUint32(4, true);
   let off = 8;
+  // GRID FIRST: it's independent of the mote delta-chain, so decode it before
+  // the sync early-returns below — a dropped delta frame still applies its
+  // walls (offset is deterministic from pn + frame type).
+  if (hasGrid) {
+    const gOff = 8 + (type === 1 ? pn * 4 : pn * 2) + pn;
+    const g = hasGrid === 2 ? decodeRLE(new Uint8Array(buf, gOff))
+                            : new Int8Array(buf.slice(gOff));
+    if (g.length === W * H) processGrid(g); else pendingGrid = g;
+  }
   if (type === 1) {                                     // keyframe: absolute int16
     curPos = new Int16Array(buf.slice(off, off + pn * 4)); off += pn * 4;
   } else {                                              // delta: int8, accumulate
@@ -558,10 +567,18 @@ function onFrame(buf) {                                 // a fresh binary frame 
       spawned++;
     }
   }
-  if (hasGrid) {                                        // dims come from the HUD channel
-    const g = new Int8Array(buf.slice(off));
-    if (g.length === W * H) processGrid(g); else pendingGrid = g;
+}
+function decodeRLE(u8) {                                 // -> Int8Array at the grid's natural size
+  let total = 0;
+  for (let i = 0; i + 2 < u8.length; i += 3) total += u8[i + 1] | (u8[i + 2] << 8);
+  const out = new Int8Array(total);
+  let o = 0;
+  for (let i = 0; i + 2 < u8.length; i += 3) {
+    let v = u8[i]; if (v >= 128) v -= 256;              // u8 -> int8 (-2 wall, -1 empty)
+    const len = u8[i + 1] | (u8[i + 2] << 8);
+    out.fill(v, o, o + len); o += len;
   }
+  return out;
 }
 function onHud(st) {                                    // the JSON channel: HUD + cursors
   if (st.error === "room_full") {
