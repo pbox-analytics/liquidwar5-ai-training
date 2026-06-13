@@ -523,7 +523,7 @@ class GameSession:
             return
         # a dier with stocks left RESPAWNS (challenger); a dier on its last stock
         # is OUT for good. ANNIHILATE (1 stock) -> always out -> LAST MAN STANDING:
-        # no board reset, the survivors fight on from where they are.
+        # nobody is moved, the survivors fight on from where they are.
         revived = []
         for t in died:
             self.stocks[t] -= 1
@@ -531,9 +531,14 @@ class GameSession:
                 self.out[t] = True
             else:
                 revived.append(t)
-        # only soft-reset when someone actually came back AND the match continues
-        if revived and sum(1 for o in self.out if not o) > 1:
-            self.engine.soft_reset()
+        # LOCAL respawn (NOT a full board reset): only the dead player's units
+        # are removed from wherever they were converted and warped back to that
+        # player's spawn — the opponents are NOT teleported, they keep their
+        # ground. (The killer gives the converted units back; its own army and
+        # position are untouched.)
+        for t in revived:
+            self.engine.respawn_team(t)
+        if revived:
             self._zap = revived; self._snap_next = True; self._prev_pos = None
 
     def frame_blob(self) -> bytes:
