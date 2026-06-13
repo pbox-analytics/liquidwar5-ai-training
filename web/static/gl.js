@@ -460,13 +460,13 @@ function create(canvas, teamColors) {
     // must not wipe the motion history)
   }
 
-  function pushFrame(pos, team, n) {              // pos Int16Array (y,x)*n, team Uint8Array n
+  function pushFrame(pos, team, n, snap) {        // pos Int16Array (y,x)*n, team Uint8Array n
     n = Math.min(n, CAP);
     nMotes = n;
     ring = (ring + 1) % 3;
     gl.bindBuffer(gl.ARRAY_BUFFER, posBufs[ring]);
     gl.bufferData(gl.ARRAY_BUFFER, pos, gl.DYNAMIC_DRAW);
-    if (framesPushed === 0) {                     // first frame: fill the whole ring
+    if (framesPushed === 0 || snap) {             // first frame / teleport SNAP: fill the whole ring
       for (const b of posBufs) { gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, pos, gl.DYNAMIC_DRAW); }
     }
     gl.bindBuffer(gl.ARRAY_BUFFER, teamBuf);

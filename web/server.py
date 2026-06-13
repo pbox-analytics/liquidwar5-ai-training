@@ -506,9 +506,7 @@ class GameSession:
             self.respawn_mode = "stock"; self.stocks = [1] * self.engine.T
 
     def _check_stocks(self) -> None:
-        """Handle wipes per the stock rule (call AFTER engine.step). A wiped team
-        loses a stock; if it (or anyone) still has stocks, SOFT-RESET the board so
-        the survivors aren't frozen mid-wipe and the dier respawns at full."""
+        """Handle wipes per the stock rule (call AFTER engine.step)."""
         mode = getattr(self, "respawn_mode", "none")
         if mode == "none":
             return
@@ -518,19 +516,25 @@ class GameSession:
             for t in died:                                  # only the loser goes back to its
                 self.engine.respawn_team(t)                 # spawn — opponents keep the hill
             if died:
-                self._zap = died
+                self._zap = died; self._snap_next = True; self._prev_pos = None
             return
         died = [t for t in range(self.engine.T) if not alive[t] and not self.out[t]]
         if not died:
             return
+        # a dier with stocks left RESPAWNS (challenger); a dier on its last stock
+        # is OUT for good. ANNIHILATE (1 stock) -> always out -> LAST MAN STANDING:
+        # no board reset, the survivors fight on from where they are.
+        revived = []
         for t in died:
             self.stocks[t] -= 1
             if self.stocks[t] <= 0:
-                self.out[t] = True                          # eliminated for good
-        self._zap = died
-        # if the match isn't decided, return the board to neutral (Smash stock)
-        if sum(1 for o in self.out if not o) > 1:
+                self.out[t] = True
+            else:
+                revived.append(t)
+        # only soft-reset when someone actually came back AND the match continues
+        if revived and sum(1 for o in self.out if not o) > 1:
             self.engine.soft_reset()
+            self._zap = revived; self._snap_next = True; self._prev_pos = None
 
     def frame_blob(self) -> bytes:
         """The per-tick BINARY channel: mote positions + teams (+ the cell
@@ -567,7 +571,12 @@ class GameSession:
         pidx = torch.arange(0, e.N, step, device=e.device)
         pos = torch.stack((e.fy[0, pidx], e.fx[0, pidx]), dim=1).reshape(-1).to(torch.int16).cpu()
         prev = getattr(self, "_prev_pos", None)
-        key = prev is None or prev.numel() != pos.numel() or self._fseq % 30 == 0
+        # SNAP: after a respawn the whole army teleports to spawns — flag the
+        # frame so the client fills its interpolation ring (no cross-map smear)
+        snap = getattr(self, "_snap_next", False)
+        if snap:
+            self._snap_next = False
+        key = snap or prev is None or prev.numel() != pos.numel() or self._fseq % 30 == 0
         self._prev_pos = pos
         body = (pos if key else (pos - prev).to(torch.int8)).numpy().tobytes()
         pteam = e.fteam[0, pidx].to(torch.uint8).cpu().numpy().tobytes()
@@ -595,7 +604,7 @@ class GameSession:
             else:
                 grid = raw.tobytes(); gflag = 1
         import struct
-        head = struct.pack("<BBHI", 1 if key else 2, gflag,
+        head = struct.pack("<BBHI", 3 if snap else (1 if key else 2), gflag,
                            pidx.numel(), self._fseq & 0xFFFFFFFF)
         self._last_blob = head + body + pteam + grid
         return self._last_blob

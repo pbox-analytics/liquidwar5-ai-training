@@ -341,7 +341,7 @@
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 </script>
 <script src="audio.js?v=1781616000"></script>
-<script src="gl.js?v=1781702000"></script>
+<script src="gl.js?v=1781788000"></script>
 <script>
 // The PALETTE is fixed; which palette entry each TEAM wears is the server's
 // call (players pick colors in the lobby) — COLORS/RGB are per-team views
@@ -509,12 +509,12 @@ function onFrame(buf) {                                 // a fresh binary frame 
   // the sync early-returns below — a dropped delta frame still applies its
   // walls (offset is deterministic from pn + frame type).
   if (hasGrid) {
-    const gOff = 8 + (type === 1 ? pn * 4 : pn * 2) + pn;
+    const gOff = 8 + ((type === 1 || type === 3) ? pn * 4 : pn * 2) + pn;
     const g = hasGrid === 2 ? decodeRLE(new Uint8Array(buf, gOff))
                             : new Int8Array(buf.slice(gOff));
     if (g.length === W * H) processGrid(g); else pendingGrid = g;
   }
-  if (type === 1) {                                     // keyframe: absolute int16
+  if (type === 1 || type === 3) {                       // keyframe: absolute int16
     curPos = new Int16Array(buf.slice(off, off + pn * 4)); off += pn * 4;
   } else {                                              // delta: int8, accumulate
     // a dropped frame (latest-wins queue under slow wifi) breaks the delta
@@ -537,7 +537,10 @@ function onFrame(buf) {                                 // a fresh binary frame 
   if (tLast) dtServer = 0.85 * dtServer + 0.15 * (now - tLast);
   tLast = now;
   prevPT = curPT; curPT = new Uint8Array(buf.slice(off, off + pn)); off += pn;
-  R.pushFrame(curPos, curPT, pn);                       // bufferData copies — mutation-safe
+  // type 3 = SNAP (a respawn teleported the army to spawns): fill the whole
+  // interpolation ring so the units appear cleanly instead of smearing across
+  // the map from the opponent's blob (the warp fx sells the "zip" — see onHud)
+  R.pushFrame(curPos, curPT, pn, type === 3);           // bufferData copies — mutation-safe
   // Conversion flashes: a mote whose team changed since last frame just got
   // converted in combat. Cap spawns/frame — conversions can be hundreds.
   if (prevPT && prevPT.length === curPT.length) {
@@ -683,6 +686,21 @@ function onHud(st) {                                    // the JSON channel: HUD
       const left = st.stocks && st.stocks[rt] !== undefined ? st.stocks[rt] : -1;
       toast(left < 0 ? `⚡ ${who} respawns`
                      : `⚡ ${who} down — ${left} ${left === 1 ? "life" : "lives"} left`);
+      // HYPERSPEED: a bright white tracer beam zips from across the map into
+      // each respawn point, then the units materialize there (the snap frame
+      // places them; the zap ring + this beam sell the warp).
+      for (const t of st.zap) {
+        const c = st.cursors[t]; if (!c) continue;
+        const sx = c[1] + .5, sy = c[0] + .5;          // spawn (destination)
+        const ox = (st.w - 1 - c[1]) + .5, oy = (st.h - 1 - c[0]) + .5;  // mirror = the fray
+        for (let i = 0; i < 40 && particles.length < MAXP; i++) {
+          const u = i / 40;                            // a fading beam of points along the path
+          particles.push({ x: ox + (sx - ox) * u + (Math.random() - .5) * 3,
+                           y: oy + (sy - oy) * u + (Math.random() - .5) * 3,
+                           vx: (sx - ox) * 0.012, vy: (sy - oy) * 0.012,   // drift toward spawn
+                           life: 0.18 + 0.5 * u, col: WHITE });            // brightest near the spawn
+        }
+      }
     }
   }
   if (pendingGrid && pendingGrid.length === W * H) { processGrid(pendingGrid); pendingGrid = null; }
