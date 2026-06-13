@@ -38,7 +38,7 @@ spec:
           image: alpine/git:latest
           env:
             - name: TRAINING_REF
-              value: "548494b"   # wells-110 + stance impact batch (parity)
+              value: "9916557"   # wells-110 + swarm web (parity)
           command: ["/bin/sh", "-c"]
           args:
             - |
