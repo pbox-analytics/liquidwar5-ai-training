@@ -665,3 +665,60 @@ rewrite `audio.js`'s music half into a STEM MIXER (crossfade real loops by
 the same intensity signals), keeping procedural SFX + the engine as fallback.
 What helps most: the go-ahead, Wolfgang's ear on the rating page, and one
 reference track (MusicGen has a melody-conditioned variant).
+
+## 29. The stance balance matrix (2026-06-13)
+
+First systematic balance read (`/tmp/lw_matrix_testbed.py` + a 36-pair sweep):
+a symmetric mirror duel, both cursors charging the enemy centroid, each
+holding one canonical stance, mass ratio after ~440 ticks. PROTOCOL CAVEAT:
+"both charge" is the aggressor's test — defensive/spread stances (Wall,
+Swarm-web) play their worst case and need a hold-protocol follow-up before
+tuning. Tier list (wins of 8):
+
+- **Doom 7-0-1** — dominant head-on; ONLY Maelstrom holds it (draw — the §27
+  rim buff worked, it's the intended check). Head-on dominance is acceptable
+  *because kiting is the out* (§26): you can refuse the standup fight.
+- **Drill 6-2**, **Maelstrom 5-2-1** — strong.
+- **Spin / Pulse 4-3-1** — mid, and a clean RPS triangle: Spin > Drill >
+  Pulse > Spin.
+- **Wall 3-4-1**, **Swarm 1-6-1** — weak, but BOTH protocol-confounded
+  (defensive / spread); don't nerf/buff off this protocol alone.
+- **Classic 0-4-4** — baseline (draws the gentle, loses to the aggressive).
+- **Atom 0-8 — DEAD** (and it's compact, so NOT a protocol artifact). See §30.
+
+## 30. Atom is mechanically anti-brawl — flagged for redesign (2026-06-13)
+
+The matrix found Atom loses every head-on duel (0-8, even to do-nothing
+Classic). Two intuitive buffs were tried and EMPIRICALLY REJECTED: (a) damage
+surge (1.3/1.5) — *backfired*, Atom went 57%→0% vs Classic, because speeding
+the boundary conversion churn helps the DENSER opponent win the exchange;
+(b) tighter lobes (negative burst) — no help. Root cause is mechanical: the
+fig-8 keeps Atom's units perpetually ORBITING, never consolidating into a
+fighting mass, so any dense formation envelops the thin moving front. This
+needs a redesign (a combat role for the orbit, or a denser fightable form),
+not a knob — reverted to original. The matrix's value here was catching that
+both "obvious" buffs ship a WORSE stance. Open task.
+
+## 31. Doubled board + practice mode + test suite (2026-06-13)
+
+- **Board doubled** (§ commit): 384×576 → 544×816 (2× area, same 8000
+  fighters) for maneuver room. Cost ~17→47ms tick (~21fps); the client's
+  60fps interpolation masks it, and the launch-diet/CUDA-graph work recovers
+  it. `LW_PLAY_H/W` + `LW_GRAD_SWEEPS` env-tunable. (Gradient sweeps proven
+  NOT the bottleneck — 12→4 changed nothing; it's the movement/collision
+  machinery scaling with cells.)
+- **Practice mode** (`opponent=practice`): a forgiving sandbox — the dummy
+  holds a rotating LESSON stance (Classic → Doom → Wall → Maelstrom → Drill →
+  Pulse → web) with a coach line ("Enemy holds DOOM — hold Maelstrom"); no
+  win/loss/streak/gauntlet recorded, ~4s between rounds. Server `GameSession.
+  practice`/`_lesson` + `LESSONS`; client `#practiceTip` banner, result card
+  suppressed.
+- **Test suite** (`tests/`, 32 passing, CPU): engine invariants
+  (conservation, one-per-cell, occ↔SoA) across {wells, inertia} settings;
+  the **train/play parity** tests that lock the `_KNOBS` table to the server
+  dials (Doom `cspd` tax, Wall `armr`) so a one-sided balance change FAILS
+  CI; `act()` shape/mask/legacy coverage. Run: `CUDA_VISIBLE_DEVICES=""
+  PYTHONPATH=. uv run --with pytest --with numpy python -m pytest tests/ -q`.
+- **Launch-diet agent FAILED**: its worktree branched from a stale commit
+  (475-line dense-grid prototype, not the 1450-line real engine) — discarded,
+  not merged. Worktree agents need a base from the working branch HEAD.

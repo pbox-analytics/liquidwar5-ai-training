@@ -88,6 +88,21 @@ def _load_policy(path: str) -> tuple[CursorPolicy, int]:
     return policy, n_act
 
 
+# PRACTICE MODE lessons: the dummy (all AI seats) holds a fixed stance each
+# round so a new player learns to FACE each threat and which counter answers
+# it. Cycles on each round; no win/loss/streak/gauntlet is recorded.
+#   (flat action the dummy holds, coach line shown to the player)
+LESSONS = [
+    (24, "Free practice \u2014 hold keys 1\u20139 to try every stance"),
+    (17, "Enemy holds \ud83d\udd73 DOOM \u2014 hold \ud83c\udf2a Maelstrom to shield, or kite away"),
+    (8,  "Enemy holds \ud83d\udee1 WALL \u2014 \u27a4 Drill punches through it"),
+    (20, "Enemy holds \ud83c\udf2a MAELSTROM \u2014 don't charge in; flank wide"),
+    (6,  "Enemy \u27a4 DRILLS \u2014 \ud83d\udee1 Wall braces it"),
+    (10, "Enemy \ud83d\udca5 PULSES \u2014 spread out so the crests miss"),
+    (0,  "Enemy spreads a \ud83d\udd78 WEB \u2014 a dense Drill or Doom cuts through"),
+]
+
+
 class GameSession:
     """One live game: engine + a controller per team."""
 
@@ -128,6 +143,8 @@ class GameSession:
         self.engine._cuda_graph = os.environ.get("LW_CUDA_GRAPH", "0") == "1"
         self.engine.reset()
         self.policy: CursorPolicy | None = None
+        self.practice = False              # forgiving sandbox (opponent='practice')
+        self._lesson = 0                   # which LESSONS entry the dummy holds
         self._opp_request = opponent
         self._set_opponent(opponent)
 
@@ -139,7 +156,8 @@ class GameSession:
         self.policy = None
         self._legacy = None
         self.ckpt_name = opponent
-        if opponent in ("heuristic", "random"):
+        self.practice = (opponent == "practice")
+        if opponent in ("heuristic", "random", "practice"):
             return
         if opponent == "latest":
             arch = sorted(glob.glob(os.path.join(CKPT_DIR, "rl", "archive", "*.pt")))
@@ -185,6 +203,10 @@ class GameSession:
             argmax mode. Default 0 (argmax) until a non-collapsed head ships.
         """
         if self.policy is None:
+            if self.practice:                  # dummy holds this round's lesson stance
+                act_id = LESSONS[self._lesson % len(LESSONS)][0]
+                stance = torch.full((1, self.engine.T), act_id, dtype=torch.long, device=DEVICE)
+                return _heuristic_dydx(self.engine), stance
             return _heuristic_dydx(self.engine), None
         e = self.engine
         T = e.T
@@ -726,6 +748,12 @@ def _apply_player_stance(_e, t, ctrl, spin_sign, last_dir, c0_hist, n,
         _e._vortex_rad[0, t] = (0.30, -0.7, 0.0)[mm]
     elif stance == 7:                           # Atom: 2 forms (tap 8): orbital -> binary star
         sgn = spin_sign if spin_sign != 0 else 1
+        # NOTE: the balance matrix found Atom 0-8 (loses every head-on brawl).
+        # Tried surge (backfired — sped the boundary churn the denser foe wins)
+        # and density (no help) — both empirically worse/equal. The real cause
+        # is mechanical: the fig-8 keeps units orbiting, never consolidating, so
+        # any dense mass envelops them. Flagged for a REDESIGN (dev log §29),
+        # not a knob — reverted to the original look-defining values.
         if ctrl["atom_mode"] == 0:              # figure-8 electron orbitals
             _e._spin[0, t] = 1.8 * sgn          # orbital speed
             _e._burst[0, t] = 0.4               # a little room so the two lobes form
@@ -1070,8 +1098,12 @@ class Room:
             elif session.done:
                 hold += 1
                 # POST-MATCH MOMENT: hold the result for ~20s — long enough to
-                # read the card and hit Rematch (any {reset} ends it early)
-                if hold > TICK_HZ * 20:
+                # read the card and hit Rematch (any {reset} ends it early).
+                # PRACTICE: no result card, just a short beat then the NEXT
+                # lesson (the dummy's stance rotates) — endless low-stakes reps.
+                if hold > TICK_HZ * (4 if session.practice else 20):
+                    if session.practice:
+                        session._lesson += 1
                     session.engine._map_choice = self.map_choice
                     session.reset(); hold = 0; logged = False
                     _clear_knobs(session.engine)
@@ -1129,6 +1161,9 @@ class Room:
             st["phase"] = self.phase
             st["ai_n"] = self.ai_count
             st["colors"] = self._palette()                # cosmetic palette map, lobby-picked
+            if session.practice:                          # forgiving sandbox: coach line, no card
+                st["practice"] = True
+                st["lesson"] = LESSONS[session._lesson % len(LESSONS)][1]
             if self.host is not None:
                 st["host"] = self.host
             if self.phase == "lobby":
@@ -1167,7 +1202,7 @@ class Room:
             for p in players:
                 if p.team < len(st["cursors"]):    # lobby seats can outnumber engine seats
                     p.c0_hist.append(list(st["cursors"][p.team])); del p.c0_hist[:-7]   # comet aim window
-            if self.phase == "play" and session.done and not logged:
+            if self.phase == "play" and session.done and not logged and not session.practice:
                 w = max(range(len(st["fighters"])), key=lambda i: st["fighters"][i])
                 self.wins[w] = self.wins.get(w, 0) + 1
                 print(f"[telemetry] GAME END room={self.key} map={st['map']} tick={st['tick']} winner=team{w} "

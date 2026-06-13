@@ -91,6 +91,10 @@
   #banner.show .card { opacity: 1; transition-delay: .8s; }
   #banner .card button { font-size: 17px; min-height: 52px; padding: 8px 22px; margin: 6px;
                          border-radius: 12px; font-weight: 700; }
+  #practiceTip { display: none; position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+                z-index: 4; background: #15243fcc; border: 1px solid #3d59a8; color: #cdd6f4;
+                border-radius: 10px; padding: 6px 14px; font-size: 14px; max-width: 90%;
+                text-align: center; box-shadow: 0 4px 16px #0008; }
   #otpill { display: none; position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
             z-index: 4; background: #40222288; border: 1px solid #7a3a3a; color: #ffb4a8;
             border-radius: 10px; padding: 4px 12px; font-size: 13px; }
@@ -192,6 +196,7 @@
     <select id="opponent" title="Latest auto-upgrades as training improves; archive entries are frozen generations">
       <option value="latest">Newest AI (auto-improves)</option>
       <option value="heuristic">Classic AI</option>
+      <option value="practice">🎓 Practice (learn the stances)</option>
     </select>
     <select id="oppcount" title="Number of AI opponents">
       <option value="1">1 opponent</option>
@@ -222,6 +227,7 @@
     <canvas id="c" width="110" height="80"></canvas>
     <div id="banner"></div>
     <div id="otpill">⚔ OVERTIME — fronts weaken</div>
+    <div id="practiceTip"></div>
     <div id="netveil">⟳ reconnecting…</div>
     <div id="toast" role="status" aria-live="polite"></div>
     <div id="intro">
@@ -579,6 +585,11 @@ function onHud(st) {                                    // the JSON channel: HUD
     setTimeout(() => { if (!curSt || !curSt.done) bn0.style.display = "none"; }, 700);
   }
   document.getElementById("otpill").style.display = st.overtime ? "block" : "none";
+  // PRACTICE coach line: a calm persistent tip naming the current lesson
+  const ptip = document.getElementById("practiceTip");
+  if (st.practice && st.lesson && !st.countdown) {
+    ptip.textContent = "\ud83c\udf93 " + st.lesson; ptip.style.display = "block";
+  } else { ptip.style.display = "none"; }
   if (st.note && st.note.ev && lastNote !== st.note.ev + st.note.team) {
     lastNote = st.note.ev + st.note.team;
     const who = (st.names && st.names[st.note.team]) || "P" + (st.note.team + 1);
@@ -829,7 +840,7 @@ function frame() {                                     // 60fps interpolated ren
   // THE POST-MATCH MOMENT: result card with the story of the match,
   // edge-triggered entrance, fireworks from the winner's cursor
   const bn = document.getElementById("banner");
-  if (curSt.done && curSt.phase !== "lobby" && !bn.classList.contains("show") && !bn.dataset.cd) {
+  if (curSt.done && curSt.phase !== "lobby" && !curSt.practice && !bn.classList.contains("show") && !bn.dataset.cd) {
     const w = curSt.winner ?? curSt.fighters.indexOf(Math.max(...curSt.fighters));
     const spec = document.getElementById("mode").value !== "play";   // spectators have no record
     const youWon = !spec && w === MYT;

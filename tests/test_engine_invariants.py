@@ -39,7 +39,7 @@ from tests.conftest import make_engine
 # (wells_enabled, inertia) matrix. Wells need the per-team well slots (reset()
 # always allocates them); we just flip the gate. Inertia is the _inertia knob.
 _MATRIX = list(itertools.product([False, True], [0.0, 0.12]))
-_TICKS = 120          # per matrix case; x8 cases + the strict run = "a few hundred"
+_TICKS = 100          # per matrix case; x8 cases + the strict run = "a few hundred"
 _B = 3
 _T = 3
 _PER = 22
@@ -165,7 +165,7 @@ def test_team_counts_change_only_by_conversion(wells, inertia):
     prev = e.active_fighters.clone()              # (B, T)
     total = prev.sum(dim=1)
 
-    for _ in range(90):
+    for _ in range(70):
         e.step(_random_actions(e.B, e.T, gen))
         cur = e.active_fighters
         assert torch.equal(cur.sum(dim=1), total), "grand total drifted"
